@@ -1,0 +1,4 @@
+.zig-cache/
+.zig-cache-global/
+zig-out/
+tasks/
