@@ -2,3 +2,5 @@
 .zig-cache-global/
 zig-out/
 tasks/
+.grechman/
+depwire-output.json

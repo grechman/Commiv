@@ -13,13 +13,14 @@ pub const ParseDiagnostic = struct {
 
 pub const ParseOptions = struct {
     diagnostic: ?*ParseDiagnostic = null,
+    max_dimension: usize = 100_000,
+    max_matrix_weights: usize = 25_000_000,
 };
 
 const Section = enum {
     header,
     node_coord,
     edge_weight,
-    done,
 };
 
 const Header = struct {
@@ -40,6 +41,7 @@ pub fn parse(
         .allocator = allocator,
         .input = input,
         .diagnostic = options.diagnostic,
+        .options = options,
     };
     return parser.parse();
 }
@@ -48,6 +50,7 @@ const Parser = struct {
     allocator: std.mem.Allocator,
     input: []const u8,
     diagnostic: ?*ParseDiagnostic,
+    options: ParseOptions,
 
     fn parse(self: *Parser) ParseError!problem.Problem {
         var header: Header = .{};
@@ -67,7 +70,6 @@ const Parser = struct {
             const line = std.mem.trim(u8, raw_line, " \t\r");
             if (line.len == 0) continue;
             if (std.ascii.eqlIgnoreCase(line, "EOF")) {
-                section = .done;
                 break;
             }
 
@@ -75,6 +77,7 @@ const Parser = struct {
                 .header => {
                     if (std.ascii.eqlIgnoreCase(line, "NODE_COORD_SECTION")) {
                         const dim = header.dimension orelse return self.fail(line_no, "NODE_COORD_SECTION before DIMENSION");
+                        try self.validateDimensionLimit(dim, line_no);
                         if (!isCoordType(header.edge_weight_type)) {
                             return self.fail(line_no, "NODE_COORD_SECTION requires EUC_2D or CEIL_2D");
                         }
@@ -85,6 +88,7 @@ const Parser = struct {
                         section = .node_coord;
                     } else if (std.ascii.eqlIgnoreCase(line, "EDGE_WEIGHT_SECTION")) {
                         const dim = header.dimension orelse return self.fail(line_no, "EDGE_WEIGHT_SECTION before DIMENSION");
+                        try self.validateDimensionLimit(dim, line_no);
                         if (!std.ascii.eqlIgnoreCase(header.edge_weight_type, "EXPLICIT")) {
                             return self.fail(line_no, "EDGE_WEIGHT_SECTION requires EDGE_WEIGHT_TYPE EXPLICIT");
                         }
@@ -92,6 +96,7 @@ const Parser = struct {
                             return self.fail(line_no, "only EDGE_WEIGHT_FORMAT FULL_MATRIX is supported");
                         }
                         const total = std.math.mul(usize, dim, dim) catch return self.fail(line_no, "DIMENSION is too large");
+                        if (total > self.options.max_matrix_weights) return self.fail(line_no, "EDGE_WEIGHT_SECTION exceeds max_matrix_weights");
                         try matrix.ensureTotalCapacityPrecise(self.allocator, total);
                         section = .edge_weight;
                     } else {
@@ -100,7 +105,6 @@ const Parser = struct {
                 },
                 .node_coord => try self.parseCoordLine(&coords, &coord_seen, &coord_count, header.dimension.?, line_no, line),
                 .edge_weight => try self.parseMatrixLine(&matrix, header.dimension.?, line_no, line),
-                .done => break,
             }
         }
 
@@ -108,6 +112,7 @@ const Parser = struct {
         if (!std.ascii.eqlIgnoreCase(header.tsp_type, "TSP")) return self.fail(0, "only TYPE TSP is supported");
         const dim = header.dimension orelse return self.fail(0, "missing DIMENSION");
         if (dim < 2) return self.fail(0, "DIMENSION must be at least 2");
+        try self.validateDimensionLimit(dim, 0);
         if (header.edge_weight_type.len == 0) return self.fail(0, "missing EDGE_WEIGHT_TYPE");
 
         if (isCoordType(header.edge_weight_type)) {
@@ -125,6 +130,7 @@ const Parser = struct {
                 return self.fail(0, "EXPLICIT requires EDGE_WEIGHT_FORMAT FULL_MATRIX");
             }
             const expected = std.math.mul(usize, dim, dim) catch return self.fail(0, "DIMENSION is too large");
+            if (expected > self.options.max_matrix_weights) return self.fail(0, "EDGE_WEIGHT_SECTION exceeds max_matrix_weights");
             if (matrix.items.len != expected) return self.fail(0, "EDGE_WEIGHT_SECTION does not contain DIMENSION squared weights");
             const owned_matrix = try matrix.toOwnedSlice(self.allocator);
             defer self.allocator.free(owned_matrix);
@@ -134,6 +140,10 @@ const Parser = struct {
         }
 
         return self.fail(0, "unsupported EDGE_WEIGHT_TYPE");
+    }
+
+    fn validateDimensionLimit(self: *Parser, dimension: usize, line_no: usize) ParseError!void {
+        if (dimension > self.options.max_dimension) return self.fail(line_no, "DIMENSION exceeds max_dimension");
     }
 
     fn parseHeaderLine(self: *Parser, header: *Header, line_no: usize, line: []const u8) ParseError!void {
@@ -254,6 +264,12 @@ fn isCoordType(kind: []const u8) bool {
     return std.ascii.eqlIgnoreCase(kind, "EUC_2D") or std.ascii.eqlIgnoreCase(kind, "CEIL_2D");
 }
 
+fn expectInvalid(input: []const u8, expected_message: []const u8) !void {
+    var diag: ParseDiagnostic = .{};
+    try std.testing.expectError(error.InvalidTsplib, parse(std.testing.allocator, input, .{ .diagnostic = &diag }));
+    try std.testing.expectEqualStrings(expected_message, diag.message);
+}
+
 test "parse EUC_2D TSPLIB square" {
     const allocator = std.testing.allocator;
     const data =
@@ -347,4 +363,110 @@ test "parse out-of-order coordinates by node id" {
     var p = try parse(allocator, data, .{});
     defer p.deinit();
     try std.testing.expectEqual(@as(u64, 4), try p.tourLength(&.{ 0, 1, 2, 3 }));
+}
+
+test "parse rejects missing required headers" {
+    try expectInvalid(
+        \\NAME: missing-type
+        \\DIMENSION: 2
+        \\EDGE_WEIGHT_TYPE: EUC_2D
+        \\NODE_COORD_SECTION
+        \\1 0 0
+        \\2 1 0
+        \\EOF
+    , "missing TYPE");
+
+    try expectInvalid(
+        \\NAME: missing-dimension
+        \\TYPE: TSP
+        \\EDGE_WEIGHT_TYPE: EUC_2D
+        \\NODE_COORD_SECTION
+        \\1 0 0
+        \\2 1 0
+        \\EOF
+    , "NODE_COORD_SECTION before DIMENSION");
+
+    try expectInvalid(
+        \\NAME: missing-weight-type
+        \\TYPE: TSP
+        \\DIMENSION: 2
+        \\EOF
+    , "missing EDGE_WEIGHT_TYPE");
+
+    try expectInvalid(
+        \\NAME: missing-weight-type-before-section
+        \\TYPE: TSP
+        \\DIMENSION: 2
+        \\NODE_COORD_SECTION
+        \\1 0 0
+        \\2 1 0
+        \\EOF
+    , "NODE_COORD_SECTION requires EUC_2D or CEIL_2D");
+}
+
+test "parse rejects unsupported type and weight formats" {
+    try expectInvalid(
+        \\NAME: bad-type
+        \\TYPE: ATSP
+        \\DIMENSION: 2
+        \\EDGE_WEIGHT_TYPE: EUC_2D
+        \\NODE_COORD_SECTION
+        \\1 0 0
+        \\2 1 0
+        \\EOF
+    , "only TYPE TSP is supported");
+
+    try expectInvalid(
+        \\NAME: bad-weight-type
+        \\TYPE: TSP
+        \\DIMENSION: 2
+        \\EDGE_WEIGHT_TYPE: GEO
+        \\EOF
+    , "unsupported EDGE_WEIGHT_TYPE");
+
+    try expectInvalid(
+        \\NAME: bad-format
+        \\TYPE: TSP
+        \\DIMENSION: 3
+        \\EDGE_WEIGHT_TYPE: EXPLICIT
+        \\EDGE_WEIGHT_FORMAT: UPPER_ROW
+        \\EDGE_WEIGHT_SECTION
+        \\0 1 2 1 0 3 2 3 0
+        \\EOF
+    , "only EDGE_WEIGHT_FORMAT FULL_MATRIX is supported");
+}
+
+test "parse enforces resource limits before section allocation" {
+    const too_many_coords =
+        \\NAME: huge
+        \\TYPE: TSP
+        \\DIMENSION: 11
+        \\EDGE_WEIGHT_TYPE: EUC_2D
+        \\NODE_COORD_SECTION
+        \\1 0 0
+        \\EOF
+    ;
+    var coord_diag: ParseDiagnostic = .{};
+    try std.testing.expectError(error.InvalidTsplib, parse(std.testing.allocator, too_many_coords, .{
+        .diagnostic = &coord_diag,
+        .max_dimension = 10,
+    }));
+    try std.testing.expectEqualStrings("DIMENSION exceeds max_dimension", coord_diag.message);
+
+    const too_many_matrix_weights =
+        \\NAME: huge-matrix
+        \\TYPE: TSP
+        \\DIMENSION: 3
+        \\EDGE_WEIGHT_TYPE: EXPLICIT
+        \\EDGE_WEIGHT_FORMAT: FULL_MATRIX
+        \\EDGE_WEIGHT_SECTION
+        \\0 1 2 1 0 3 2 3 0
+        \\EOF
+    ;
+    var matrix_diag: ParseDiagnostic = .{};
+    try std.testing.expectError(error.InvalidTsplib, parse(std.testing.allocator, too_many_matrix_weights, .{
+        .diagnostic = &matrix_diag,
+        .max_matrix_weights = 8,
+    }));
+    try std.testing.expectEqualStrings("EDGE_WEIGHT_SECTION exceeds max_matrix_weights", matrix_diag.message);
 }

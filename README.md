@@ -1,8 +1,8 @@
 # commiv
 
-Zig 0.16.0 library-style implementation of a symmetric TSP heuristic based on the practical Lin-Kernighan/LKH shape: candidate sets, deterministic multi-start tours, 2-opt improvement, bounded 3-edge Or-opt moves, and best-tour retention.
+Zig 0.16.0 library-style implementation of a symmetric TSP heuristic: candidate sets, deterministic multi-start tours, 2-opt improvement, one-node Or-opt moves, best-tour retention, and exact brute force for tiny instances.
 
-This is not a full LKH-3 clone. Full LKH includes deeper machinery such as alpha-nearness candidate generation, 1-trees, patching, and recombination. The current code is clean Zig built for correctness, repeatable tests, and further extension.
+This is not Lin-Kernighan or LKH. Real LK/LKH needs bounded variable-depth sequential edge exchanges and deeper machinery such as gain sequences, feasibility checks, alpha-nearness candidate generation, 1-trees, patching, and recombination. The current code is clean Zig built for correctness, repeatable tests, and further extension without lying about the algorithm.
 
 ## Supported Input
 
@@ -27,7 +27,7 @@ Main entry points:
 - `problem.validateTour(tour)`
 - `problem.tourLength(tour)`
 
-`solve` uses brute force automatically for instances up to 10 nodes and the heuristic path above that.
+`solve` returns `SolveResult`, including the tour, length, iteration count, and `SolveStats`. It uses brute force automatically for instances up to 10 nodes and the heuristic path above that.
 
 ## Verification
 
@@ -51,15 +51,17 @@ Current reference checks include:
 
 - exact brute-force optimum on tiny instances
 - 12-node convex perimeter instance with known optimum length `24`
+- TSPLIB `gr17` explicit matrix converted to `FULL_MATRIX`, known optimum length `2085`
+- explicit 11-node max-weight matrix regression for `u32.max` edge weights
 - deterministic repeated solver output for fixed seeds
-- TSPLIB parser diagnostics and out-of-order node id handling
+- TSPLIB parser diagnostics, out-of-order node id handling, missing/unsupported input rejection, and parser resource limits
 
 ## Reference Implementations
 
-Useful references for comparison and future extension:
+Useful references for comparison and possible future LK/LKH implementation:
 
 - LKH/LKH-3 by Keld Helsgaun
 - Concorde `linkern`
 - Neto's LK implementation
 
-Use them to compare solution quality and runtime. Do not claim LKH parity unless alpha-nearness, 1-tree candidate generation, patching, and deeper LK backtracking are actually implemented.
+Use them to compare solution quality and runtime. Do not claim LK/LKH until bounded variable-depth sequential exchanges and the supporting tests are actually implemented.
