@@ -1,8 +1,41 @@
 # commiv
 
-Zig 0.16.0 library-style implementation of a symmetric TSP heuristic: candidate sets, deterministic multi-start tours, 2-opt improvement, one-node Or-opt moves, best-tour retention, and exact brute force for tiny instances.
+Zig 0.16.0 library-style implementation of symmetric TSP solving.
 
-This is not Lin-Kernighan or LKH. Real LK/LKH needs bounded variable-depth sequential edge exchanges and deeper machinery such as gain sequences, feasibility checks, alpha-nearness candidate generation, 1-trees, patching, and recombination. The current code is clean Zig built for correctness, repeatable tests, and further extension without lying about the algorithm.
+The solver now has a real bounded Lin-Kernighan-style core, not just 2-opt. It still is not full LKH-3.
+
+## Implemented Solver
+
+For `n <= 10`, `solve` uses exact brute force with node 0 fixed.
+
+For larger instances, `solve` runs deterministic multi-start heuristic search:
+
+- nearest-neighbor/randomized initial tours from a fixed seed
+- nearest-distance candidate rows with deterministic tie handling
+- optional 2-opt and one-node Or-opt warmup
+- bounded variable-depth sequential LK search
+- alternating removed/added edges `x_i`/`y_i`
+- positive partial gain pruning
+- candidate-set branching for added edges
+- two tour-neighbor choices for removed edges
+- closing-edge gain evaluation at each depth
+- generic k-opt feasibility/application that accepts only one Hamiltonian cycle
+- reusable solver workspace with no per-move heap allocation
+
+Default LK depth is `5`. Use `SolveOptions.lk_max_depth` and `SolveOptions.lk_backtrack_limit` to trade runtime for search depth.
+
+## Not Implemented
+
+This is not full Helsgaun LKH/LKH-3 parity. Missing pieces include:
+
+- alpha-nearness candidate generation
+- 1-tree ascent and Held-Karp penalties
+- Delaunay/quadrant candidate sets
+- non-sequential moves, patching, `Gain23`, and recombination
+- tree/segment-list tour representation for very large tours
+- ATSP, VRP, time windows, and other LKH-3 problem classes
+
+Candidate generation is nearest-distance only.
 
 ## Supported Input
 
@@ -10,6 +43,8 @@ This is not Lin-Kernighan or LKH. Real LK/LKH needs bounded variable-depth seque
 - `EDGE_WEIGHT_TYPE: EUC_2D`
 - `EDGE_WEIGHT_TYPE: CEIL_2D`
 - `EDGE_WEIGHT_TYPE: EXPLICIT` with `EDGE_WEIGHT_FORMAT: FULL_MATRIX`
+
+The TSPLIB parser enforces `max_dimension` and `max_matrix_weights`. It does not preallocate a full dense matrix for incomplete `FULL_MATRIX` input.
 
 ## Public API
 
@@ -27,7 +62,9 @@ Main entry points:
 - `problem.validateTour(tour)`
 - `problem.tourLength(tour)`
 
-`solve` returns `SolveResult`, including the tour, length, iteration count, and `SolveStats`. It uses brute force automatically for instances up to 10 nodes and the heuristic path above that.
+`solve` returns `SolveResult` with `tour`, `length`, and `SolveStats`. Stats include `trials`, `warmup_moves`, `lk_attempts`, `lk_search_nodes`, `lk_moves`, `max_depth_reached`, `exact_permutations`, candidate width, and distance-cache usage. The old ambiguous heuristic `iterations` field was removed.
+
+Distance caching is controlled by `SolveOptions.max_distance_cache_weights`, default `4_000_000` weights, about 16 MiB. Set it higher explicitly for larger dense coordinate caches, or `0` to disable coordinate distance caching.
 
 ## Verification
 
@@ -47,21 +84,24 @@ ZIG_LOCAL_CACHE_DIR=/home/grechman/commiv/.zig-cache \
 zig build example
 ```
 
-Current reference checks include:
+Current checks include:
 
 - exact brute-force optimum on tiny instances
-- 12-node convex perimeter instance with known optimum length `24`
-- TSPLIB `gr17` explicit matrix converted to `FULL_MATRIX`, known optimum length `2085`
-- explicit 11-node max-weight matrix regression for `u32.max` edge weights
-- deterministic repeated solver output for fixed seeds
-- TSPLIB parser diagnostics, out-of-order node id handling, missing/unsupported input rejection, and parser resource limits
+- deterministic fixed-seed heuristic output above the brute-force cutoff
+- constructed matrix where 2-opt and one-node Or-opt are locally stuck but bounded LK improves the tour
+- 12-node convex perimeter known optimum length `24`
+- hardcoded TSPLIB `gr17` regression target length `2085`
+- explicit 11-node `u32.max` edge-weight regression
+- candidate row sanity: no self nodes or duplicates
+- coordinate-cache smoke test proving cached heuristic search performs zero uncached coordinate distance calls after candidate construction
+- TSPLIB parser diagnostics, out-of-order node ids, unsupported input rejection, and parser resource limits
 
-## Reference Implementations
+## References
 
-Useful references for comparison and possible future LK/LKH implementation:
+Algorithm structure follows the basic LK outline from Keld Helsgaun, "An Effective Implementation of the Lin-Kernighan Traveling Salesman Heuristic": choose `x_i` tour edges and `y_i` non-tour edges, keep positive gain, evaluate closing moves, and repeat from improvements. This implementation deliberately keeps only a bounded sequential subset.
+
+Useful comparison implementations:
 
 - LKH/LKH-3 by Keld Helsgaun
 - Concorde `linkern`
 - Neto's LK implementation
-
-Use them to compare solution quality and runtime. Do not claim LK/LKH until bounded variable-depth sequential exchanges and the supporting tests are actually implemented.

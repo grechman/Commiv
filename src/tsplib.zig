@@ -97,7 +97,6 @@ const Parser = struct {
                         }
                         const total = std.math.mul(usize, dim, dim) catch return self.fail(line_no, "DIMENSION is too large");
                         if (total > self.options.max_matrix_weights) return self.fail(line_no, "EDGE_WEIGHT_SECTION exceeds max_matrix_weights");
-                        try matrix.ensureTotalCapacityPrecise(self.allocator, total);
                         section = .edge_weight;
                     } else {
                         try self.parseHeaderLine(&header, line_no, line);
@@ -469,4 +468,24 @@ test "parse enforces resource limits before section allocation" {
         .max_matrix_weights = 8,
     }));
     try std.testing.expectEqualStrings("EDGE_WEIGHT_SECTION exceeds max_matrix_weights", matrix_diag.message);
+}
+
+test "parse does not preallocate full matrix capacity for incomplete matrix section" {
+    const header_only_matrix =
+        \\NAME: incomplete-huge-matrix
+        \\TYPE: TSP
+        \\DIMENSION: 5000
+        \\EDGE_WEIGHT_TYPE: EXPLICIT
+        \\EDGE_WEIGHT_FORMAT: FULL_MATRIX
+        \\EDGE_WEIGHT_SECTION
+        \\EOF
+    ;
+    var buffer: [128]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&buffer);
+    var diag: ParseDiagnostic = .{};
+    try std.testing.expectError(error.InvalidTsplib, parse(fixed.allocator(), header_only_matrix, .{
+        .diagnostic = &diag,
+        .max_matrix_weights = 25_000_000,
+    }));
+    try std.testing.expectEqualStrings("EDGE_WEIGHT_SECTION does not contain DIMENSION squared weights", diag.message);
 }
