@@ -49,6 +49,10 @@ pub const SolveStats = struct {
     lk_nonseq_rejected: u64 = 0,
     lk_nonseq_depth_total: u64 = 0,
     lk_nonseq_deepest_accepted_depth: usize = 0,
+    lk_chain_nonseq_depth_attempts: [8]u64 = .{0} ** 8,
+    lk_chain_nonseq_depth_accepted: [8]u64 = .{0} ** 8,
+    lk_chain_nonseq_depth_gain_rejected: [8]u64 = .{0} ** 8,
+    lk_chain_nonseq_depth_apply_rejected: [8]u64 = .{0} ** 8,
     lk_completion_attempts: u64 = 0,
     lk_completion_accepted: u64 = 0,
     lk_completion_2opt_hits: u64 = 0,
@@ -2387,6 +2391,7 @@ const LocalSearch = struct {
         if (depth < 3 or depth >= self.max_lk_depth or self.lk_nonseq_branch_limit == 0) return false;
 
         const t1 = self.lk_t[0];
+        const bucket = @min(depth, stats.lk_chain_nonseq_depth_attempts.len - 1);
         var tried: usize = 0;
         for (self.candidates.row(even)) |u| {
             if (tried >= self.lk_nonseq_branch_limit) break;
@@ -2396,11 +2401,13 @@ const LocalSearch = struct {
             if (self.edgeInList(even, u, self.added_a, self.added_b, depth - 1)) continue;
             if (!self.recordLKNode(stats)) return false;
             stats.lk_nonseq_attempts += 1;
+            stats.lk_chain_nonseq_depth_attempts[bucket] += 1;
             tried += 1;
 
             const after_first_add = gain - @as(i64, @intCast(self.dist.distance(even, u)));
             if (after_first_add <= 0) {
                 stats.lk_nonseq_rejected += 1;
+                stats.lk_chain_nonseq_depth_gain_rejected[bucket] += 1;
                 continue;
             }
 
@@ -2415,10 +2422,12 @@ const LocalSearch = struct {
                 const closing_cost = @as(i64, @intCast(self.dist.distance(v, t1)));
                 if (after_remove <= closing_cost) {
                     stats.lk_nonseq_rejected += 1;
+                    stats.lk_chain_nonseq_depth_gain_rejected[bucket] += 1;
                     continue;
                 }
                 if (sameUndirectedEdge(v, t1, even, u) or self.edgeInList(v, t1, self.added_a, self.added_b, depth - 1)) {
                     stats.lk_nonseq_rejected += 1;
+                    stats.lk_chain_nonseq_depth_apply_rejected[bucket] += 1;
                     continue;
                 }
 
@@ -2430,11 +2439,13 @@ const LocalSearch = struct {
                 self.added_b[depth] = t1;
                 if (self.testAndApplyNonSequentialMove(depth + 1, depth + 1, stats)) {
                     stats.lk_nonseq_accepted += 1;
+                    stats.lk_chain_nonseq_depth_accepted[bucket] += 1;
                     stats.lk_nonseq_depth_total += depth + 1;
                     stats.lk_nonseq_deepest_accepted_depth = @max(stats.lk_nonseq_deepest_accepted_depth, depth + 1);
                     return true;
                 }
                 stats.lk_nonseq_rejected += 1;
+                stats.lk_chain_nonseq_depth_apply_rejected[bucket] += 1;
             }
         }
         return false;

@@ -171,6 +171,7 @@ Current read:
 - `lin318` improved after adding Gain23-style nonfeasible bridge paths: best gap moved from `4.559%` to `3.319%`.
 - `rat575` is still not acceptable. Candidate coverage is 100% at alpha width 8+, so the issue is search/move generation, not missing candidate edges.
 - Ungated generic bridge probing on rat575 produced zero accepted non-sequential moves and 30-87 second runtimes, so the current bridge paths stay gated below 512 nodes.
+- Capped rat575 bridge probing was tested with a total sweep budget around `lk_nonseq_branch_limit * n / 4`. It did not blow up, but it made quality worse: `rat575 alpha-w24-t4` moved from `7182 / 6.039%` to `7187 / 6.113%`, and `lin318 alpha-w24-t4` regressed from `43424 / 3.319%` to `43945 / 4.559%`. Do not keep that as a default.
 
 ## Why Quality Is Still Bad
 
@@ -183,6 +184,8 @@ The solver does not have full Gain23. It has partial Gain23-style probes that he
 | Gain23 | Partial | `lin318` improved, rat575 unchanged | Current cases are too narrow. |
 | BridgeGain | Incomplete | Only the first selected-subtour case is implemented | rat575 likely needs the missing `Case6`/`Case8` bridge paths. |
 | rat575 runtime | Fragile | Ungated generic bridge probing hit 30-87 s with zero accepts | More brute force is the wrong fix. Port the case logic. |
+| Capped rat575 bridge sweep | Rejected | Runtime stayed sane, but gap got worse | Existing bridge cases are harmful on rat575 without LKH case selectivity. |
+| Anchored `tryNonSequentialBridge` | Dead | rat575 depth-3/depth-4 attempts have zero accepts in every benchmark mode | The one add/remove/close pattern is too weak; add case-aware bridge completions inside `searchRemoved`. |
 
 ## What To Do First
 
@@ -197,6 +200,18 @@ Priority order:
 | 5 | Only then tune ascent/candidate sensitivity | candidate generation code, outside the LK block | Current evidence says candidates are not the main failure. |
 
 Do not start with CGAL, candidate width, or more trials. That hides the bug and costs time. The first real fix is LKH-equivalent `BridgeGain` case coverage with hard caps and benchmark evidence.
+
+Depth diagnostic from 2026-06-07 confirms the next target. `tryNonSequentialBridge` is called from `searchRemoved`, so it has the correct LK chain context, but its current single-step close never accepts on rat575:
+
+| rat575 mode | Depth-3 attempts | Depth-3 accepted | Depth-3 gain rejects | Depth-3 apply rejects | Depth-4 attempts | Depth-4 accepted | Depth-4 gain rejects | Depth-4 apply rejects |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| nearest-lk | 6012 | 0 | 6829 | 1345 | 25209 | 0 | 27167 | 11625 |
+| alpha-lk | 4242 | 0 | 4436 | 2089 | 26563 | 0 | 23563 | 20489 |
+| alpha-w12-t4 | 18124 | 0 | 21494 | 4439 | 121711 | 0 | 125502 | 67300 |
+| alpha-w24-t4 | 17032 | 0 | 20220 | 1709 | 105264 | 0 | 128013 | 41684 |
+| alpha-w24-t8 | 27282 | 0 | 34166 | 2562 | 177976 | 0 | 224114 | 65939 |
+
+Interpretation: the anchored path is not starved; it tries plenty. It fails because the current pattern is only one candidate add, one tour-edge removal, and one close to `t1`. The next implementation should extend this anchored path with 3-edge and 4-edge bridge completions using the existing `removed_a/removed_b` and `added_a/added_b` chain state. Do not revive the standalone full-tour sweep.
 
 ## What Is Not Finished
 

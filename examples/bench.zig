@@ -45,7 +45,7 @@ const fixtures = [_]TsplibFixture{
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
-    std.debug.print("instance,dimension,mode,trials,candidate_count,length,optimum,gap_percent,time_ms,lk_moves,bounded_three_opt_cleanup_moves,bounded_three_opt_cleanup_attempts,lk_search_nodes,max_depth_reached,lk_nonseq_attempts,lk_nonseq_accepted,lk_nonseq_rejected,lk_nonseq_deepest_accepted_depth,lk_completion_attempts,lk_completion_accepted,lk_completion_2opt_hits,lk_completion_3opt_hits,lk_completion_patch_hits,lk_completion_rejected,candidate_nearest_edges,candidate_alpha_edges,candidate_geometric_edges,candidate_patch_edges,move_plan_attempts,move_plan_direct_applies,move_plan_invalid_fallbacks,move_plan_multi_component_fallbacks,move_plan_apply_fallbacks,move_plan_fallback_successes,move_plan_patch_attempts,move_plan_patch_hits,move_plan_patch_rejected\n", .{});
+    std.debug.print("instance,dimension,mode,trials,candidate_count,length,optimum,gap_percent,time_ms,lk_moves,bounded_three_opt_cleanup_moves,bounded_three_opt_cleanup_attempts,lk_search_nodes,max_depth_reached,lk_nonseq_attempts,lk_nonseq_accepted,lk_nonseq_rejected,lk_nonseq_deepest_accepted_depth,chain_nonseq_d3_attempts,chain_nonseq_d3_accepted,chain_nonseq_d3_gain_rejected,chain_nonseq_d3_apply_rejected,chain_nonseq_d4_attempts,chain_nonseq_d4_accepted,chain_nonseq_d4_gain_rejected,chain_nonseq_d4_apply_rejected,chain_nonseq_d5p_attempts,chain_nonseq_d5p_accepted,chain_nonseq_d5p_gain_rejected,chain_nonseq_d5p_apply_rejected,lk_completion_attempts,lk_completion_accepted,lk_completion_2opt_hits,lk_completion_3opt_hits,lk_completion_patch_hits,lk_completion_rejected,candidate_nearest_edges,candidate_alpha_edges,candidate_geometric_edges,candidate_patch_edges,move_plan_attempts,move_plan_direct_applies,move_plan_invalid_fallbacks,move_plan_multi_component_fallbacks,move_plan_apply_fallbacks,move_plan_fallback_successes,move_plan_patch_attempts,move_plan_patch_hits,move_plan_patch_rejected\n", .{});
     try runGeneratedInstance(allocator, "clustered80", 80);
     try runGeneratedInstance(allocator, "clustered160", 160);
     try runTsplibFixtures(allocator, init.io);
@@ -195,7 +195,12 @@ fn runMode(allocator: std.mem.Allocator, p: *const commiv.Problem, optimum: ?u64
         100.0 * (@as(f64, @floatFromInt(result.length)) - @as(f64, @floatFromInt(known))) / @as(f64, @floatFromInt(known))
     else
         0.0;
-    std.debug.print("{s},{},{s},{},{},{},{},{d:.3},{d:.3},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}", .{
+    const d5p_attempts = sumTail(result.stats.lk_chain_nonseq_depth_attempts, 5);
+    const d5p_accepted = sumTail(result.stats.lk_chain_nonseq_depth_accepted, 5);
+    const d5p_gain_rejected = sumTail(result.stats.lk_chain_nonseq_depth_gain_rejected, 5);
+    const d5p_apply_rejected = sumTail(result.stats.lk_chain_nonseq_depth_apply_rejected, 5);
+
+    std.debug.print("{s},{},{s},{},{},{},{},{d:.3},{d:.3},{},{},{},{},{},{},{},{},{}", .{
         p.name,
         n,
         mode.name,
@@ -214,6 +219,20 @@ fn runMode(allocator: std.mem.Allocator, p: *const commiv.Problem, optimum: ?u64
         result.stats.lk_nonseq_accepted,
         result.stats.lk_nonseq_rejected,
         result.stats.lk_nonseq_deepest_accepted_depth,
+    });
+    std.debug.print(",{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}", .{
+        result.stats.lk_chain_nonseq_depth_attempts[3],
+        result.stats.lk_chain_nonseq_depth_accepted[3],
+        result.stats.lk_chain_nonseq_depth_gain_rejected[3],
+        result.stats.lk_chain_nonseq_depth_apply_rejected[3],
+        result.stats.lk_chain_nonseq_depth_attempts[4],
+        result.stats.lk_chain_nonseq_depth_accepted[4],
+        result.stats.lk_chain_nonseq_depth_gain_rejected[4],
+        result.stats.lk_chain_nonseq_depth_apply_rejected[4],
+        d5p_attempts,
+        d5p_accepted,
+        d5p_gain_rejected,
+        d5p_apply_rejected,
         result.stats.lk_completion_attempts,
         result.stats.lk_completion_accepted,
         result.stats.lk_completion_2opt_hits,
@@ -236,6 +255,12 @@ fn runMode(allocator: std.mem.Allocator, p: *const commiv.Problem, optimum: ?u64
         result.stats.move_plan_patch_hits,
         result.stats.move_plan_patch_rejected,
     });
+}
+
+fn sumTail(values: [8]u64, start: usize) u64 {
+    var total: u64 = 0;
+    for (values[start..]) |value| total += value;
+    return total;
 }
 
 fn monotonicNanos() u64 {
