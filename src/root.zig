@@ -21,6 +21,7 @@ pub const solve = solver.solve;
 pub const SolveOptions = solver.SolveOptions;
 pub const SolveResult = solver.SolveResult;
 pub const SolveStats = solver.SolveStats;
+pub const CandidateMode = solver.CandidateMode;
 
 test {
     std.testing.refAllDecls(@This());

@@ -1,0 +1,268 @@
+const std = @import("std");
+const commiv = @import("commiv");
+
+const Mode = struct {
+    name: []const u8,
+    enable_lk: bool,
+    enable_move_patching: bool = false,
+    candidate_mode: commiv.solver.CandidateMode,
+    trials: ?usize = null,
+    candidate_count: ?usize = null,
+    max_passes: ?usize = null,
+    lk_backtrack_limit: ?usize = null,
+};
+
+const TsplibFixture = struct {
+    name: []const u8,
+    path: []const u8,
+    tour_path: []const u8,
+    optimum: u64,
+};
+
+const modes = [_]Mode{
+    .{ .name = "warmup-only", .enable_lk = false, .candidate_mode = .nearest_distance },
+    .{ .name = "nearest-lk", .enable_lk = true, .candidate_mode = .nearest_distance },
+    .{ .name = "alpha-lk", .enable_lk = true, .candidate_mode = .alpha_nearness },
+    .{ .name = "alpha-patch-lk", .enable_lk = true, .enable_move_patching = true, .candidate_mode = .alpha_nearness },
+};
+
+const cgal_mode: Mode = .{ .name = "cgal-lk", .enable_lk = true, .candidate_mode = .alpha_nearness_cgal };
+
+const tsplib_matrix_modes = [_]Mode{
+    .{ .name = "alpha-w12-t4", .enable_lk = true, .candidate_mode = .alpha_nearness, .candidate_count = 12, .trials = 4, .max_passes = 64, .lk_backtrack_limit = 80_000 },
+    .{ .name = "alpha-w24-t4", .enable_lk = true, .candidate_mode = .alpha_nearness, .candidate_count = 24, .trials = 4, .max_passes = 64, .lk_backtrack_limit = 80_000 },
+    .{ .name = "alpha-w24-t8", .enable_lk = true, .candidate_mode = .alpha_nearness, .candidate_count = 24, .trials = 8, .max_passes = 64, .lk_backtrack_limit = 80_000 },
+};
+
+const fixtures = [_]TsplibFixture{
+    .{ .name = "berlin52", .path = "vendor/tsplib/berlin52.tsp", .tour_path = ".zig-cache/lkh-tours/berlin52.tour", .optimum = 7542 },
+    .{ .name = "eil76", .path = "vendor/tsplib/eil76.tsp", .tour_path = ".zig-cache/lkh-tours/eil76.tour", .optimum = 538 },
+    .{ .name = "rat195", .path = "vendor/tsplib/rat195.tsp", .tour_path = ".zig-cache/lkh-tours/rat195.tour", .optimum = 2323 },
+    .{ .name = "lin318", .path = "vendor/tsplib/lin318.tsp", .tour_path = ".zig-cache/lkh-tours/lin318.tour", .optimum = 42029 },
+    .{ .name = "rat575", .path = "vendor/tsplib/rat575.tsp", .tour_path = ".zig-cache/lkh-tours/rat575.tour", .optimum = 6773 },
+};
+
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+
+    std.debug.print("instance,dimension,mode,trials,candidate_count,length,optimum,gap_percent,time_ms,lk_moves,bounded_three_opt_cleanup_moves,bounded_three_opt_cleanup_attempts,lk_search_nodes,max_depth_reached,lk_nonseq_attempts,lk_nonseq_accepted,lk_nonseq_rejected,lk_nonseq_deepest_accepted_depth,lk_completion_attempts,lk_completion_accepted,lk_completion_2opt_hits,lk_completion_3opt_hits,lk_completion_patch_hits,lk_completion_rejected,candidate_nearest_edges,candidate_alpha_edges,candidate_geometric_edges,candidate_patch_edges,move_plan_attempts,move_plan_direct_applies,move_plan_invalid_fallbacks,move_plan_multi_component_fallbacks,move_plan_apply_fallbacks,move_plan_fallback_successes,move_plan_patch_attempts,move_plan_patch_hits,move_plan_patch_rejected\n", .{});
+    try runGeneratedInstance(allocator, "clustered80", 80);
+    try runGeneratedInstance(allocator, "clustered160", 160);
+    try runTsplibFixtures(allocator, init.io);
+}
+
+fn runGeneratedInstance(allocator: std.mem.Allocator, name: []const u8, n: usize) !void {
+    const coords = try allocator.alloc(commiv.Coord, n);
+    defer allocator.free(coords);
+    makeClustered(coords);
+
+    var p = try commiv.Problem.initCoords(allocator, name, .euc_2d, coords);
+    defer p.deinit();
+
+    try runProblem(allocator, &p, null);
+}
+
+fn runTsplibFixtures(allocator: std.mem.Allocator, io: std.Io) !void {
+    var loaded: usize = 0;
+    for (fixtures) |fixture| {
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, fixture.path, allocator, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
+            error.FileNotFound => {
+                std.debug.print("# missing fixture: {s} expected at {s}\n", .{ fixture.name, fixture.path });
+                continue;
+            },
+            else => return err,
+        };
+        defer allocator.free(bytes);
+
+        var diag: commiv.ParseDiagnostic = .{};
+        var p = commiv.parseTsplib(allocator, bytes, .{
+            .diagnostic = &diag,
+            .max_dimension = 10_000,
+            .max_matrix_weights = 25_000_000,
+        }) catch |err| {
+            std.debug.print("# failed fixture: {s} line {} {s}\n", .{ fixture.name, diag.line, diag.message });
+            return err;
+        };
+        defer p.deinit();
+        if (!std.mem.eql(u8, p.name, fixture.name)) {
+            std.debug.print("# fixture name mismatch: expected {s} parsed {s}\n", .{ fixture.name, p.name });
+            return error.InvalidFixtureName;
+        }
+        try reportCandidateCoverage(allocator, io, &p, fixture);
+        try runProblem(allocator, &p, fixture.optimum);
+        loaded += 1;
+    }
+    if (loaded == 0) std.debug.print("# no TSPLIB fixtures loaded; add .tsp files under vendor/tsplib to enable gap benchmarks\n", .{});
+}
+
+fn reportCandidateCoverage(allocator: std.mem.Allocator, io: std.Io, p: *const commiv.Problem, fixture: TsplibFixture) !void {
+    const tour_bytes = std.Io.Dir.cwd().readFileAlloc(io, fixture.tour_path, allocator, .limited(2 * 1024 * 1024)) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer allocator.free(tour_bytes);
+
+    const tour = try parseTourFile(allocator, tour_bytes, p.dimension);
+    defer allocator.free(tour);
+    try p.validateTour(tour);
+
+    const widths = [_]usize{ 4, 8, 12, 24 };
+    for (widths) |requested_width| {
+        const width = @min(requested_width, p.dimension - 1);
+        var oracle = try commiv.solver.DistanceOracle.init(allocator, p, p.dimension * p.dimension);
+        defer oracle.deinit();
+        var stats: commiv.solver.CandidateBuildStats = .{};
+        var candidates = try commiv.solver.buildCandidates(allocator, &oracle, width, .alpha_nearness, 32, 2, &stats);
+        defer candidates.deinit();
+        const covered = countTourEdgesInCandidates(&candidates, tour);
+        const total = p.dimension;
+        const pct = 100.0 * @as(f64, @floatFromInt(covered)) / @as(f64, @floatFromInt(total));
+        std.debug.print("# candidate_coverage,{s},alpha,{},{},{d:.2}\n", .{ p.name, width, covered, pct });
+    }
+}
+
+fn parseTourFile(allocator: std.mem.Allocator, bytes: []const u8, dimension: usize) ![]usize {
+    var tour = try allocator.alloc(usize, dimension);
+    errdefer allocator.free(tour);
+    var count: usize = 0;
+    var in_section = false;
+    var it = std.mem.tokenizeAny(u8, bytes, " \t\r\n");
+    while (it.next()) |token| {
+        if (!in_section) {
+            if (std.mem.eql(u8, token, "TOUR_SECTION")) in_section = true;
+            continue;
+        }
+        const raw = try std.fmt.parseInt(isize, token, 10);
+        if (raw == -1) break;
+        if (raw <= 0 or @as(usize, @intCast(raw)) > dimension) return error.InvalidTourFile;
+        if (count >= dimension) return error.InvalidTourFile;
+        tour[count] = @as(usize, @intCast(raw)) - 1;
+        count += 1;
+    }
+    if (count != dimension) return error.InvalidTourFile;
+    return tour;
+}
+
+fn countTourEdgesInCandidates(candidates: *const commiv.solver.Candidates, tour: []const usize) usize {
+    var covered: usize = 0;
+    for (tour, 0..) |a, idx| {
+        const b = tour[(idx + 1) % tour.len];
+        if (candidateRowContains(candidates.row(a), b) or candidateRowContains(candidates.row(b), a)) covered += 1;
+    }
+    return covered;
+}
+
+fn candidateRowContains(row: []const usize, node: usize) bool {
+    for (row) |candidate| {
+        if (candidate == node) return true;
+    }
+    return false;
+}
+
+fn runProblem(allocator: std.mem.Allocator, p: *const commiv.Problem, optimum: ?u64) !void {
+    for (modes) |mode| try runMode(allocator, p, optimum, mode);
+    if (optimum != null) {
+        for (tsplib_matrix_modes) |mode| try runMode(allocator, p, optimum, mode);
+    }
+    if (commiv.solver.cgal_available) try runMode(allocator, p, optimum, cgal_mode);
+}
+
+fn runMode(allocator: std.mem.Allocator, p: *const commiv.Problem, optimum: ?u64, mode: Mode) !void {
+    const n = p.dimension;
+    const trials = mode.trials orelse if (n >= 500) @as(usize, 4) else @as(usize, 8);
+    const candidate_count = mode.candidate_count orelse if (n >= 500) @as(usize, 8) else @as(usize, 4);
+    const max_passes = mode.max_passes orelse if (n >= 500) @as(usize, 48) else @as(usize, 80);
+    const lk_backtrack_limit = mode.lk_backtrack_limit orelse if (n >= 500) @as(usize, 60_000) else @as(usize, 80_000);
+    const start_ns = monotonicNanos();
+    var result = try commiv.solve(allocator, p, .{
+        .seed = 12345,
+        .trials = trials,
+        .candidate_count = candidate_count,
+        .candidate_mode = mode.candidate_mode,
+        .max_passes = max_passes,
+        .enable_lk = mode.enable_lk,
+        .enable_move_patching = mode.enable_move_patching,
+        .lk_max_depth = 5,
+        .lk_backtrack_limit = lk_backtrack_limit,
+        .max_distance_cache_weights = n * n,
+    });
+    defer result.deinit();
+    const elapsed_ns = monotonicNanos() - start_ns;
+    try p.validateTour(result.tour);
+
+    const opt = optimum orelse 0;
+    const gap_percent = if (optimum) |known|
+        100.0 * (@as(f64, @floatFromInt(result.length)) - @as(f64, @floatFromInt(known))) / @as(f64, @floatFromInt(known))
+    else
+        0.0;
+    std.debug.print("{s},{},{s},{},{},{},{},{d:.3},{d:.3},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}", .{
+        p.name,
+        n,
+        mode.name,
+        result.stats.trials,
+        result.stats.candidate_count,
+        result.length,
+        opt,
+        gap_percent,
+        @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0,
+        result.stats.lk_moves,
+        result.stats.bounded_three_opt_cleanup_moves,
+        result.stats.bounded_three_opt_cleanup_attempts,
+        result.stats.lk_search_nodes,
+        result.stats.max_depth_reached,
+        result.stats.lk_nonseq_attempts,
+        result.stats.lk_nonseq_accepted,
+        result.stats.lk_nonseq_rejected,
+        result.stats.lk_nonseq_deepest_accepted_depth,
+        result.stats.lk_completion_attempts,
+        result.stats.lk_completion_accepted,
+        result.stats.lk_completion_2opt_hits,
+        result.stats.lk_completion_3opt_hits,
+        result.stats.lk_completion_patch_hits,
+        result.stats.lk_completion_rejected,
+    });
+    std.debug.print(",{},{},{},{},{},{},{},{},{},{},{},{},{}\n", .{
+        result.stats.candidate_nearest_edges,
+        result.stats.candidate_alpha_edges,
+        result.stats.candidate_geometric_edges,
+        result.stats.candidate_patch_edges,
+        result.stats.move_plan_attempts,
+        result.stats.move_plan_direct_applies,
+        result.stats.move_plan_invalid_fallbacks,
+        result.stats.move_plan_multi_component_fallbacks,
+        result.stats.move_plan_apply_fallbacks,
+        result.stats.move_plan_fallback_successes,
+        result.stats.move_plan_patch_attempts,
+        result.stats.move_plan_patch_hits,
+        result.stats.move_plan_patch_rejected,
+    });
+}
+
+fn monotonicNanos() u64 {
+    var ts: std.os.linux.timespec = undefined;
+    const rc = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &ts);
+    std.debug.assert(rc == 0);
+    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
+}
+
+fn makeClustered(coords: []commiv.Coord) void {
+    var prng = std.Random.DefaultPrng.init(0xC0FFEE);
+    const random = prng.random();
+    const centers = [_]commiv.Coord{
+        .{ .x = 100, .y = 100 },
+        .{ .x = 900, .y = 120 },
+        .{ .x = 820, .y = 820 },
+        .{ .x = 140, .y = 760 },
+        .{ .x = 500, .y = 480 },
+    };
+    for (coords, 0..) |*coord, i| {
+        const c = centers[i % centers.len];
+        const ring: f64 = @floatFromInt((i * 37) % 53);
+        const jitter_x: f64 = @floatFromInt(random.intRangeLessThan(i32, -35, 36));
+        const jitter_y: f64 = @floatFromInt(random.intRangeLessThan(i32, -35, 36));
+        coord.* = .{
+            .x = c.x + ring * 2.7 + jitter_x,
+            .y = c.y + @mod(ring * 17.0, 91.0) + jitter_y,
+        };
+    }
+}
