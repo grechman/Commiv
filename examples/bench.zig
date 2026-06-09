@@ -7,6 +7,7 @@ const Mode = struct {
     enable_move_patching: bool = false,
     candidate_mode: commiv.solver.CandidateMode,
     trials: ?usize = null,
+    dimension_trials: bool = false,
     candidate_count: ?usize = null,
     max_passes: ?usize = null,
     lk_backtrack_limit: ?usize = null,
@@ -32,6 +33,9 @@ const tsplib_matrix_modes = [_]Mode{
     .{ .name = "alpha-w12-t4", .enable_lk = true, .candidate_mode = .alpha_nearness, .candidate_count = 12, .trials = 4, .max_passes = 64, .lk_backtrack_limit = 80_000 },
     .{ .name = "alpha-w24-t4", .enable_lk = true, .candidate_mode = .alpha_nearness, .candidate_count = 24, .trials = 4, .max_passes = 64, .lk_backtrack_limit = 80_000 },
     .{ .name = "alpha-w24-t8", .enable_lk = true, .candidate_mode = .alpha_nearness, .candidate_count = 24, .trials = 8, .max_passes = 64, .lk_backtrack_limit = 80_000 },
+    // LKH-style trial budget: MaxTrials = DIMENSION with iterated kicks from the
+    // best tour, narrow alpha candidates (coverage is 100% at width 8).
+    .{ .name = "alpha-w8-kick", .enable_lk = true, .candidate_mode = .alpha_nearness, .candidate_count = 8, .dimension_trials = true, .max_passes = 64, .lk_backtrack_limit = 80_000 },
 };
 
 const fixtures = [_]TsplibFixture{
@@ -169,7 +173,7 @@ fn runProblem(allocator: std.mem.Allocator, p: *const commiv.Problem, optimum: ?
 
 fn runMode(allocator: std.mem.Allocator, p: *const commiv.Problem, optimum: ?u64, mode: Mode) !void {
     const n = p.dimension;
-    const trials = mode.trials orelse if (n >= 500) @as(usize, 4) else @as(usize, 8);
+    const trials = if (mode.dimension_trials) n else mode.trials orelse if (n >= 500) @as(usize, 4) else @as(usize, 8);
     const candidate_count = mode.candidate_count orelse if (n >= 500) @as(usize, 8) else @as(usize, 4);
     const max_passes = mode.max_passes orelse if (n >= 500) @as(usize, 48) else @as(usize, 80);
     const lk_backtrack_limit = mode.lk_backtrack_limit orelse if (n >= 500) @as(usize, 60_000) else @as(usize, 80_000);
