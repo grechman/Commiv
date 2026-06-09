@@ -16,7 +16,7 @@ pub const SolveOptions = struct {
     enable_bounded_three_opt_cleanup: bool = true,
     enable_move_patching: bool = false,
     move_patch_min_gain: i64 = 1,
-    lk_completion_patch_min_gain: i64 = 24,
+    lk_completion_patch_min_gain: i64 = 1,
     lk_max_depth: usize = 5,
     lk_backtrack_limit: usize = 100_000,
     lk_nonseq_branch_limit: usize = 2,
@@ -735,6 +735,8 @@ const SolverWorkspace = struct {
     removed_b: []usize,
     added_a: []usize,
     added_b: []usize,
+    lk_active: []bool,
+    lk_active_queue: []usize,
 
     fn init(allocator: std.mem.Allocator, n: usize, max_lk_depth: usize) !SolverWorkspace {
         const best_tour = try allocator.alloc(usize, n);
@@ -786,6 +788,10 @@ const SolverWorkspace = struct {
         errdefer allocator.free(added_a);
         const added_b = try allocator.alloc(usize, max_lk_depth);
         errdefer allocator.free(added_b);
+        const lk_active = try allocator.alloc(bool, n);
+        errdefer allocator.free(lk_active);
+        const lk_active_queue = try allocator.alloc(usize, n);
+        errdefer allocator.free(lk_active_queue);
 
         return .{
             .allocator = allocator,
@@ -813,6 +819,8 @@ const SolverWorkspace = struct {
             .removed_b = removed_b,
             .added_a = added_a,
             .added_b = added_b,
+            .lk_active = lk_active,
+            .lk_active_queue = lk_active_queue,
         };
     }
 
@@ -841,6 +849,8 @@ const SolverWorkspace = struct {
         self.allocator.free(self.removed_b);
         self.allocator.free(self.added_a);
         self.allocator.free(self.added_b);
+        self.allocator.free(self.lk_active);
+        self.allocator.free(self.lk_active_queue);
         self.* = undefined;
     }
 };
@@ -932,6 +942,8 @@ pub fn solve(
             .removed_b = workspace.removed_b,
             .added_a = workspace.added_a,
             .added_b = workspace.added_b,
+            .lk_active = workspace.lk_active,
+            .lk_active_queue = workspace.lk_active_queue,
             .max_passes = options.max_passes,
             .enable_or_opt = options.enable_or_opt,
             .enable_bounded_three_opt_cleanup = options.enable_bounded_three_opt_cleanup,
@@ -1771,6 +1783,49 @@ const LocalSearch = struct {
     lk_backtrack_limit: usize,
     lk_nonseq_branch_limit: usize,
     lk_nodes_this_pass: usize = 0,
+    lk_active: []bool,
+    lk_active_queue: []usize,
+    lk_active_head: usize = 0,
+    lk_active_count: usize = 0,
+
+    // Active-node queue ("don't-look bits", Helsgaun Sec. 3/LKH StoreTour):
+    // only nodes whose neighborhood changed since their last failed search are
+    // re-examined; an improving move reactivates every endpoint it touched.
+    fn lkActivateAll(self: *LocalSearch) void {
+        const n = self.tour.len;
+        @memset(self.lk_active, true);
+        @memcpy(self.lk_active_queue, self.tour);
+        self.lk_active_head = 0;
+        self.lk_active_count = n;
+    }
+
+    fn lkActivate(self: *LocalSearch, node: usize) void {
+        if (self.lk_active[node]) return;
+        self.lk_active[node] = true;
+        const slot = (self.lk_active_head + self.lk_active_count) % self.lk_active_queue.len;
+        self.lk_active_queue[slot] = node;
+        self.lk_active_count += 1;
+    }
+
+    fn lkPopActive(self: *LocalSearch) ?usize {
+        if (self.lk_active_count == 0) return null;
+        const node = self.lk_active_queue[self.lk_active_head];
+        self.lk_active_head = (self.lk_active_head + 1) % self.lk_active_queue.len;
+        self.lk_active_count -= 1;
+        self.lk_active[node] = false;
+        return node;
+    }
+
+    fn lkActivateMoveEndpoints(self: *LocalSearch, removed_count: usize, added_count: usize) void {
+        for (0..removed_count) |i| {
+            self.lkActivate(self.removed_a[i]);
+            self.lkActivate(self.removed_b[i]);
+        }
+        for (0..added_count) |i| {
+            self.lkActivate(self.added_a[i]);
+            self.lkActivate(self.added_b[i]);
+        }
+    }
 
     fn improveWarmup(self: *LocalSearch) !u64 {
         var moves: u64 = 0;
@@ -1790,6 +1845,7 @@ const LocalSearch = struct {
 
     fn improveLK(self: *LocalSearch, stats: *SolveStats) !u64 {
         var moves: u64 = 0;
+        self.lkActivateAll();
         for (0..self.max_passes) |_| {
             self.lk_nodes_this_pass = 0;
             if (self.tour.len >= 256 and self.tour.len < 512 and self.improveGain23Bridge(stats)) {
@@ -1797,9 +1853,10 @@ const LocalSearch = struct {
                 stats.lk_moves += 1;
                 continue;
             }
-            if (self.findLKMove(stats)) {
-                moves += 1;
-                stats.lk_moves += 1;
+            const sweep_moves = self.findLKMove(stats);
+            if (sweep_moves > 0) {
+                moves += sweep_moves;
+                stats.lk_moves += sweep_moves;
                 continue;
             }
             if (self.improveNonSequential4Opt(stats)) {
@@ -2139,25 +2196,33 @@ const LocalSearch = struct {
         return false;
     }
 
-    fn findLKMove(self: *LocalSearch, stats: *SolveStats) bool {
-        const n = self.tour.len;
-        for (0..n) |idx| {
-            const t1 = self.tour[idx];
+    fn findLKMove(self: *LocalSearch, stats: *SolveStats) u64 {
+        var moves: u64 = 0;
+        while (self.lkPopActive()) |t1| {
             var choices = [2]usize{ self.next[t1], self.prev[t1] };
             self.orderTourEdgeChoices(t1, &choices);
 
             for (choices) |t2| {
-                if (self.lk_nodes_this_pass >= self.lk_backtrack_limit) return false;
+                if (self.lk_nodes_this_pass >= self.lk_backtrack_limit) {
+                    // Budget slice exhausted: keep t1 queued so the next pass
+                    // resumes the descent instead of dropping it.
+                    self.lkActivate(t1);
+                    return moves;
+                }
                 stats.lk_attempts += 1;
                 self.lk_t[0] = t1;
                 self.lk_t[1] = t2;
                 self.removed_a[0] = t1;
                 self.removed_b[0] = t2;
                 const gain: i64 = @intCast(self.dist.distance(t1, t2));
-                if (self.searchAdded(1, t2, gain, stats)) return true;
+                if (self.searchAdded(1, t2, gain, stats)) {
+                    moves += 1;
+                    self.lkActivate(t1);
+                    break;
+                }
             }
         }
-        return false;
+        return moves;
     }
 
     fn orderTourEdgeChoices(self: *LocalSearch, base: usize, choices: *[2]usize) void {
@@ -2222,7 +2287,6 @@ const LocalSearch = struct {
             const gain_with_removed = gain + @as(i64, @intCast(self.dist.distance(odd, even)));
             const closing_cost: i64 = @intCast(self.dist.distance(even, t1));
             const closing_gain = gain_with_removed - closing_cost;
-            const try_nonseq = depth >= 3;
 
             if (closing_gain > 0 and !self.edgeInList(even, t1, self.added_a, self.added_b, depth - 1)) {
                 self.added_a[depth - 1] = even;
@@ -2236,7 +2300,6 @@ const LocalSearch = struct {
             if (depth < self.max_lk_depth) {
                 if (self.searchAdded(depth, even, gain_with_removed, stats)) return true;
             }
-            if (try_nonseq and self.tryNonSequentialBridge(depth, even, gain_with_removed, stats)) return true;
         }
         return false;
     }
@@ -2387,70 +2450,6 @@ const LocalSearch = struct {
         return false;
     }
 
-    fn tryNonSequentialBridge(self: *LocalSearch, depth: usize, even: usize, gain: i64, stats: *SolveStats) bool {
-        if (depth < 3 or depth >= self.max_lk_depth or self.lk_nonseq_branch_limit == 0) return false;
-
-        const t1 = self.lk_t[0];
-        const bucket = @min(depth, stats.lk_chain_nonseq_depth_attempts.len - 1);
-        var tried: usize = 0;
-        for (self.candidates.row(even)) |u| {
-            if (tried >= self.lk_nonseq_branch_limit) break;
-            if (u == t1 or self.vertexInSequence(u, 2 * depth)) continue;
-            if (self.isTourEdge(even, u)) continue;
-            if (self.edgeInList(even, u, self.removed_a, self.removed_b, depth)) continue;
-            if (self.edgeInList(even, u, self.added_a, self.added_b, depth - 1)) continue;
-            if (!self.recordLKNode(stats)) return false;
-            stats.lk_nonseq_attempts += 1;
-            stats.lk_chain_nonseq_depth_attempts[bucket] += 1;
-            tried += 1;
-
-            const after_first_add = gain - @as(i64, @intCast(self.dist.distance(even, u)));
-            if (after_first_add <= 0) {
-                stats.lk_nonseq_rejected += 1;
-                stats.lk_chain_nonseq_depth_gain_rejected[bucket] += 1;
-                continue;
-            }
-
-            var choices = [2]usize{ self.next[u], self.prev[u] };
-            self.orderTourEdgeChoices(u, &choices);
-            for (choices) |v| {
-                if (v == t1 or self.vertexInSequence(v, 2 * depth)) continue;
-                if (self.edgeInList(u, v, self.removed_a, self.removed_b, depth)) continue;
-                if (self.edgeInList(u, v, self.added_a, self.added_b, depth - 1)) continue;
-
-                const after_remove = after_first_add + @as(i64, @intCast(self.dist.distance(u, v)));
-                const closing_cost = @as(i64, @intCast(self.dist.distance(v, t1)));
-                if (after_remove <= closing_cost) {
-                    stats.lk_nonseq_rejected += 1;
-                    stats.lk_chain_nonseq_depth_gain_rejected[bucket] += 1;
-                    continue;
-                }
-                if (sameUndirectedEdge(v, t1, even, u) or self.edgeInList(v, t1, self.added_a, self.added_b, depth - 1)) {
-                    stats.lk_nonseq_rejected += 1;
-                    stats.lk_chain_nonseq_depth_apply_rejected[bucket] += 1;
-                    continue;
-                }
-
-                self.added_a[depth - 1] = even;
-                self.added_b[depth - 1] = u;
-                self.removed_a[depth] = u;
-                self.removed_b[depth] = v;
-                self.added_a[depth] = v;
-                self.added_b[depth] = t1;
-                if (self.testAndApplyNonSequentialMove(depth + 1, depth + 1, stats)) {
-                    stats.lk_nonseq_accepted += 1;
-                    stats.lk_chain_nonseq_depth_accepted[bucket] += 1;
-                    stats.lk_nonseq_depth_total += depth + 1;
-                    stats.lk_nonseq_deepest_accepted_depth = @max(stats.lk_nonseq_deepest_accepted_depth, depth + 1);
-                    return true;
-                }
-                stats.lk_nonseq_rejected += 1;
-                stats.lk_chain_nonseq_depth_apply_rejected[bucket] += 1;
-            }
-        }
-        return false;
-    }
-
     fn improveBoundedThreeOptCleanup(self: *LocalSearch, stats: *SolveStats) bool {
         const n = self.tour.len;
         if (n < 6) return false;
@@ -2556,6 +2555,7 @@ const LocalSearch = struct {
 
     fn testAndApplyMove(self: *LocalSearch, removed_count: usize, added_count: usize, stats: *SolveStats) bool {
         if (removed_count == 2 and added_count == 2 and self.applyDepth2ClosingMove()) {
+            self.lkActivateMoveEndpoints(removed_count, added_count);
             stats.lk_applied_depth_total += removed_count;
             stats.lk_deepest_applied_depth = @max(stats.lk_deepest_applied_depth, removed_count);
             if (std.debug.runtime_safety) std.debug.assert(self.debugTourIsValid());
@@ -2651,6 +2651,7 @@ const LocalSearch = struct {
             stats.move_plan_apply_fallbacks += 1;
             return self.applyMoveWithHamiltonianFallback(removed_count, added_count, stats);
         }
+        self.lkActivateMoveEndpoints(removed_count, added_count);
         stats.move_plan_direct_applies += 1;
         return true;
     }
@@ -2742,7 +2743,9 @@ const LocalSearch = struct {
                 &best_bridge1,
             );
         }
-        const required_gain = self.requiredPatchGain(plan, min_gain);
+        // Any positive total gain qualifies (paper: patching accepts on positive
+        // cumulative gain); the final tour-length comparison below is authoritative.
+        const required_gain = @max(min_gain, 1);
         if (best_gain < required_gain or !self.patchBridgesAreSupported(best_bridge0, best_bridge1, best_gain, required_gain)) {
             stats.move_plan_patch_rejected += 1;
             return false;
@@ -2804,6 +2807,14 @@ const LocalSearch = struct {
             self.rebuildState();
             stats.move_plan_patch_rejected += 1;
             return false;
+        }
+        for (final_removed) |edge| {
+            self.lkActivate(edge.a);
+            self.lkActivate(edge.b);
+        }
+        for (final_added) |edge| {
+            self.lkActivate(edge.a);
+            self.lkActivate(edge.b);
         }
         stats.move_plan_patch_hits += 1;
         return true;
@@ -2953,24 +2964,6 @@ const LocalSearch = struct {
         best_bridge1.* = bridge1;
     }
 
-    fn requiredPatchGain(self: *const LocalSearch, plan: *const MovePlan, configured_min_gain: i64) i64 {
-        var required = @max(configured_min_gain, 1);
-        const n = self.tour.len;
-        if (n >= 500) {
-            required = @max(required, 48);
-        } else if (n >= 256) {
-            required = @max(required, 24);
-        } else if (n >= 128) {
-            required = @max(required, 8);
-        }
-        if (plan.smallest_component_size <= 4) {
-            required = @max(required, 32);
-        } else if (plan.smallest_component_size <= 8) {
-            required = @max(required, 16);
-        }
-        return required;
-    }
-
     fn patchBridgesAreSupported(self: *const LocalSearch, bridge0: TourEdge, bridge1: TourEdge, gain: i64, required_gain: i64) bool {
         const n = self.tour.len;
         if (n < 128) return true;
@@ -3094,6 +3087,7 @@ const LocalSearch = struct {
             self.rebuildState();
             return false;
         }
+        self.lkActivateMoveEndpoints(removed_count, added_count);
         stats.move_plan_fallback_successes += 1;
         return true;
     }
@@ -3107,19 +3101,19 @@ const LocalSearch = struct {
         if (!sameUndirectedEdge(self.added_a[0], self.added_b[0], b, c)) return false;
         if (!sameUndirectedEdge(self.added_a[1], self.added_b[1], d, a)) return false;
 
+        // The close adds (b,c) and (d,a). That is only a single-cycle 2-opt when
+        // the removed edges face each other, i.e. tour ...a->b ... d->c...; the
+        // reversal of the b..d segment then removes exactly {(a,b),(d,c)} and adds
+        // exactly {(b,c),(d,a)} — the move whose gain the search verified. The
+        // ...a->b ... c->d... orientation closes into two cycles and must fall
+        // through to the validating applier instead of being reversed blindly.
         const pb = self.pos[b];
-        const pc = self.pos[c];
         const pd = self.pos[d];
-        const pa = self.pos[a];
-        const n = self.tour.len;
-        if (self.next[a] == b and self.next[c] == d and pb <= pc) {
-            self.reverseSegment(pb, pc);
+        if (self.next[a] == b and self.next[d] == c and pb <= pd) {
+            self.reverseSegment(pb, pd);
             self.rebuildState();
             return true;
         }
-        _ = pa;
-        _ = pd;
-        _ = n;
         return false;
     }
 
@@ -3139,8 +3133,11 @@ const LocalSearch = struct {
     fn debugSegmentMatchesFlatMaterialization(self: *LocalSearch) bool {
         if (!useSegmentTour(self.tour.len)) return true;
         var view = self.tourView();
-        view.materialize(self.candidate_tour);
-        if (!std.mem.eql(usize, self.tour, self.candidate_tour)) return false;
+        // Must not materialize into candidate_tour: callers (tryPatchTwoComponents,
+        // planAndApplyMoveInternal) rely on candidate_tour holding the pre-move
+        // snapshot for gain comparison and restore-on-reject.
+        view.materialize(self.move_component);
+        if (!std.mem.eql(usize, self.tour, self.move_component)) return false;
 
         const n = self.tour.len;
         const size = segmentTargetSize(n);
@@ -3801,6 +3798,8 @@ test "bounded LK escapes a constructed 2-opt and Or-opt local optimum" {
         .removed_b = workspace.removed_b,
         .added_a = workspace.added_a,
         .added_b = workspace.added_b,
+        .lk_active = workspace.lk_active,
+        .lk_active_queue = workspace.lk_active_queue,
         .max_passes = 40,
         .enable_or_opt = false,
         .enable_bounded_three_opt_cleanup = false,
