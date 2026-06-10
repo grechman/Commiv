@@ -61,6 +61,9 @@ pub const SolveStats = struct {
     lk_completion_rejected: u64 = 0,
     bounded_three_opt_cleanup_moves: u64 = 0,
     bounded_three_opt_cleanup_attempts: u64 = 0,
+    ipt_merge_attempts: u64 = 0,
+    ipt_merge_transcriptions: u64 = 0,
+    ipt_merge_wins: u64 = 0,
     candidate_nearest_edges: u64 = 0,
     candidate_alpha_edges: u64 = 0,
     candidate_geometric_edges: u64 = 0,
@@ -775,18 +778,23 @@ const SolverWorkspace = struct {
         errdefer allocator.free(move_component);
         const move_component_size = try allocator.alloc(usize, n);
         errdefer allocator.free(move_component_size);
-        const move_edges = try allocator.alloc(TourEdge, 4 * max_lk_depth + 4);
+        // Completion closes may extend a depth-d chain by up to 2 extra removed
+        // edges (3-opt-style close writes index depth+1), so the move arrays are
+        // sized max_lk_depth + 2 and move_edges sized for patching the longest
+        // possible delta: 2 * (removed + added) + 4 slots.
+        const max_move_edges = max_lk_depth + 2;
+        const move_edges = try allocator.alloc(TourEdge, 4 * max_move_edges + 4);
         errdefer allocator.free(move_edges);
         const t_len = std.math.add(usize, std.math.mul(usize, 2, max_lk_depth) catch return error.OutOfMemory, 1) catch return error.OutOfMemory;
         const lk_t = try allocator.alloc(usize, t_len);
         errdefer allocator.free(lk_t);
-        const removed_a = try allocator.alloc(usize, max_lk_depth);
+        const removed_a = try allocator.alloc(usize, max_move_edges);
         errdefer allocator.free(removed_a);
-        const removed_b = try allocator.alloc(usize, max_lk_depth);
+        const removed_b = try allocator.alloc(usize, max_move_edges);
         errdefer allocator.free(removed_b);
-        const added_a = try allocator.alloc(usize, max_lk_depth);
+        const added_a = try allocator.alloc(usize, max_move_edges);
         errdefer allocator.free(added_a);
-        const added_b = try allocator.alloc(usize, max_lk_depth);
+        const added_b = try allocator.alloc(usize, max_move_edges);
         errdefer allocator.free(added_b);
         const lk_active = try allocator.alloc(bool, n);
         errdefer allocator.free(lk_active);
@@ -892,6 +900,9 @@ pub fn solve(
     var workspace = try SolverWorkspace.init(allocator, n, max_lk_depth);
     defer workspace.deinit();
 
+    var ipt = try IptScratch.init(allocator, n);
+    defer ipt.deinit();
+
     var prng = std.Random.DefaultPrng.init(options.seed);
     var random = prng.random();
 
@@ -918,6 +929,10 @@ pub fn solve(
     var restart_threshold: usize = 4;
     var kick_touched: [4][6]usize = undefined;
     var kick_count: usize = 0;
+    // Shadow incumbent for IPT tour merging: best tour ever produced by a
+    // merge (+ polish). Kept out of the kick/restart loop so the baseline
+    // trajectory is undisturbed; folded into the result after the loop.
+    var merged_len: u64 = std.math.maxInt(u64);
     for (0..trials) |trial| {
         // After the first descent, trials are iterated local search: perturb the
         // best tour and let LK re-optimize only the perturbed neighborhood,
@@ -1007,6 +1022,52 @@ pub fn solve(
             }
         }
 
+        // IPT tour merging (LKH's MergeWithTour): recombine the trial tour
+        // with the merge incumbent; every independent differing section
+        // resolves to its shorter alternative, so the merge can beat both
+        // parents even when the trial itself did not. The merge product is
+        // accumulated in a shadow incumbent (ipt.merged) and folded in after
+        // the trial loop: the kick/restart trajectory stays bit-for-bit
+        // identical to the merge-free search, so merge gains are pure upside.
+        // Gated to trials within ~3% of the incumbent so hopeless tours don't
+        // pay the scan.
+        if (options.enable_lk and best_len != std.math.maxInt(u64)) {
+            const use_merged = merged_len < best_len;
+            const ref_tour: []const usize = if (use_merged) ipt.merged else workspace.best_tour;
+            const ref_len = if (use_merged) merged_len else best_len;
+            const trial_len = try oracle.tourLengthUnchecked(workspace.tour);
+            if (trial_len <= ref_len + ref_len / 32) {
+                stats.ipt_merge_attempts += 1;
+                @memcpy(ipt.tour_a, workspace.tour);
+                if (iptMergeTours(&oracle, ipt.tour_a, trial_len, ref_tour, ref_len, &ipt)) |outcome| {
+                    stats.ipt_merge_transcriptions += outcome.transcriptions;
+                    if (outcome.length < ref_len) {
+                        stats.ipt_merge_wins += 1;
+                        if (!outcome.winner_is_a) @memcpy(ipt.tour_a, ipt.tour_b);
+                        // Re-optimize only the neighborhoods around the
+                        // transcribed section boundaries, mirroring the kick
+                        // path's light-descent-then-polish pattern. LK is
+                        // deterministic (no RNG), so polishing the shadow
+                        // tour cannot perturb the main trajectory.
+                        var merge_search = search;
+                        merge_search.tour = ipt.tour_a;
+                        merge_search.rebuildState();
+                        merge_search.lkResetActive();
+                        for (ipt.boundary[0..outcome.boundary_count]) |node| merge_search.lkActivate(node);
+                        const merge_moves = try merge_search.improveLK(&stats, false, false);
+                        stats.improving_moves += merge_moves;
+                        const polish_moves = try merge_search.improveLK(&stats, false, true);
+                        stats.improving_moves += polish_moves;
+                        const merged_now = try oracle.tourLengthUnchecked(ipt.tour_a);
+                        if (merged_now < merged_len) {
+                            merged_len = merged_now;
+                            @memcpy(ipt.merged, ipt.tour_a);
+                        }
+                    }
+                }
+            }
+        }
+
         const len = try oracle.tourLengthUnchecked(workspace.tour);
         if (len < best_len) {
             best_len = len;
@@ -1016,6 +1077,11 @@ pub fn solve(
         } else if (kick_trial) {
             stale_kicks += 1;
         }
+    }
+
+    if (merged_len < best_len) {
+        best_len = merged_len;
+        @memcpy(workspace.best_tour, ipt.merged);
     }
 
     const result_tour = try allocator.dupe(usize, workspace.best_tour);
@@ -1789,6 +1855,311 @@ fn segmentExchangeKick(tour: []usize, random: *std.Random, touched: *[6]usize) v
     std.mem.rotate(usize, tour[i..k], j - i);
 }
 
+// --- Iterative Partial Transcription (tour merging) ------------------------
+//
+// Mobius, Freisleben, Merz, Schreiber, "Combinatorial Optimization by
+// Iterative Partial Transcription", Phys. Rev. E 59(4), 1999 — the mechanism
+// behind LKH's MergeWithTour. Two Hamiltonian cycles over the same nodes are
+// decomposed into shared portions and pairs of alternative subpaths between
+// common endpoints; each independent differing section is resolved to the
+// cheaper alternative, so the merged tour can be strictly shorter than both
+// parents.
+
+const IptScratch = struct {
+    allocator: std.mem.Allocator,
+    tour_a: []usize,
+    tour_b: []usize,
+    merged: []usize,
+    pos_a: []usize,
+    pos_b: []usize,
+    rank_a: []usize,
+    rank_b: []usize,
+    seq_a: []usize,
+    seq_b: []usize,
+    cum_a: []u64,
+    cum_b: []u64,
+    essential: []bool,
+    boundary: []usize,
+
+    fn init(allocator: std.mem.Allocator, n: usize) !IptScratch {
+        const tour_a = try allocator.alloc(usize, n);
+        errdefer allocator.free(tour_a);
+        const tour_b = try allocator.alloc(usize, n);
+        errdefer allocator.free(tour_b);
+        const merged = try allocator.alloc(usize, n);
+        errdefer allocator.free(merged);
+        const pos_a = try allocator.alloc(usize, n);
+        errdefer allocator.free(pos_a);
+        const pos_b = try allocator.alloc(usize, n);
+        errdefer allocator.free(pos_b);
+        const rank_a = try allocator.alloc(usize, n);
+        errdefer allocator.free(rank_a);
+        const rank_b = try allocator.alloc(usize, n);
+        errdefer allocator.free(rank_b);
+        const seq_a = try allocator.alloc(usize, n);
+        errdefer allocator.free(seq_a);
+        const seq_b = try allocator.alloc(usize, n);
+        errdefer allocator.free(seq_b);
+        const cum_a = try allocator.alloc(u64, n + 1);
+        errdefer allocator.free(cum_a);
+        const cum_b = try allocator.alloc(u64, n + 1);
+        errdefer allocator.free(cum_b);
+        const essential = try allocator.alloc(bool, n);
+        errdefer allocator.free(essential);
+        const boundary = try allocator.alloc(usize, n);
+        errdefer allocator.free(boundary);
+        return .{
+            .allocator = allocator,
+            .tour_a = tour_a,
+            .tour_b = tour_b,
+            .merged = merged,
+            .pos_a = pos_a,
+            .pos_b = pos_b,
+            .rank_a = rank_a,
+            .rank_b = rank_b,
+            .seq_a = seq_a,
+            .seq_b = seq_b,
+            .cum_a = cum_a,
+            .cum_b = cum_b,
+            .essential = essential,
+            .boundary = boundary,
+        };
+    }
+
+    fn deinit(self: *IptScratch) void {
+        self.allocator.free(self.tour_a);
+        self.allocator.free(self.tour_b);
+        self.allocator.free(self.merged);
+        self.allocator.free(self.pos_a);
+        self.allocator.free(self.pos_b);
+        self.allocator.free(self.rank_a);
+        self.allocator.free(self.rank_b);
+        self.allocator.free(self.seq_a);
+        self.allocator.free(self.seq_b);
+        self.allocator.free(self.cum_a);
+        self.allocator.free(self.cum_b);
+        self.allocator.free(self.essential);
+        self.allocator.free(self.boundary);
+        self.* = undefined;
+    }
+};
+
+const IptOutcome = struct {
+    length: u64,
+    winner_is_a: bool,
+    transcriptions: usize,
+    boundary_count: usize,
+};
+
+/// Cumulative path cost along `tour` starting at the essential node sitting at
+/// `start_pos`: cum[r] = cost of the tour path from essential rank 0 to
+/// essential rank r (cum[d] = full tour length). Shared shrunken-out runs are
+/// included; they appear identically inside any matched window of both tours,
+/// so they cancel in every gain comparison.
+fn iptFillCumulative(
+    dist: *DistanceOracle,
+    tour: []const usize,
+    start_pos: usize,
+    essential: []const bool,
+    cum: []u64,
+) void {
+    const n = tour.len;
+    var acc: u64 = 0;
+    var rank: usize = 0;
+    for (0..n) |t| {
+        const u = tour[(start_pos + t) % n];
+        if (essential[u]) {
+            cum[rank] = acc;
+            rank += 1;
+        }
+        acc += dist.distance(u, tour[(start_pos + t + 1) % n]);
+    }
+    cum[rank] = acc;
+}
+
+/// Cost of the shrunken-tour path covering k edges starting at rank i.
+fn iptPathCost(cum: []const u64, d: usize, i: usize, k: usize) u64 {
+    const j = i + k;
+    if (j <= d) return cum[j] - cum[i];
+    return (cum[d] - cum[i]) + cum[j - d];
+}
+
+/// Merge `tour_a` (mutated in place) with `best_tour` (copied into
+/// `scratch.tour_b`, then mutated). Returns null when the tours share every
+/// edge or no cost-differing matched section exists. On success
+/// `scratch.boundary[0..boundary_count]` holds the endpoints of every
+/// transcribed section and the shorter of the two merged tours is reported;
+/// when `winner_is_a` is false the winning tour lives in `scratch.tour_b`.
+fn iptMergeTours(
+    dist: *DistanceOracle,
+    tour_a: []usize,
+    len_a_in: u64,
+    best_tour: []const usize,
+    len_b_in: u64,
+    scratch: *IptScratch,
+) ?IptOutcome {
+    const n = tour_a.len;
+    std.debug.assert(best_tour.len == n and scratch.tour_b.len == n);
+    const tour_b = scratch.tour_b;
+    @memcpy(tour_b, best_tour);
+    var len_a = len_a_in;
+    var len_b = len_b_in;
+    var transcriptions: usize = 0;
+    var boundary_count: usize = 0;
+
+    // Shrink once: a node is shared-interior when its undirected neighbor
+    // pair agrees in both tours; everything else is an endpoint of a
+    // differing edge and survives the shrink. The essential set (and with it
+    // the section-size cap d/2) stays FIXED across transcriptions — resolving
+    // one section must not tighten the cap for the remaining ones.
+    for (tour_a, 0..) |node, i| scratch.pos_a[node] = i;
+    for (tour_b, 0..) |node, i| scratch.pos_b[node] = i;
+    var d: usize = 0;
+    for (0..n) |v| {
+        const pa = scratch.pos_a[v];
+        const pb = scratch.pos_b[v];
+        const a1 = tour_a[(pa + n - 1) % n];
+        const a2 = tour_a[(pa + 1) % n];
+        const b1 = tour_b[(pb + n - 1) % n];
+        const b2 = tour_b[(pb + 1) % n];
+        const shared = (a1 == b1 and a2 == b2) or (a1 == b2 and a2 == b1);
+        scratch.essential[v] = !shared;
+        if (!shared) d += 1;
+    }
+    // The smallest transcribable section spans 3 shrunken edges and the cap
+    // is half the shrunken dimension, so fewer than 6 essential nodes cannot
+    // produce a section.
+    if (d < 6) return null;
+
+    outer: while (true) {
+        for (tour_a, 0..) |node, i| scratch.pos_a[node] = i;
+        for (tour_b, 0..) |node, i| scratch.pos_b[node] = i;
+
+        var ia: usize = 0;
+        var ib: usize = 0;
+        for (tour_a) |v| {
+            if (scratch.essential[v]) {
+                scratch.seq_a[ia] = v;
+                scratch.rank_a[v] = ia;
+                ia += 1;
+            }
+        }
+        for (tour_b) |v| {
+            if (scratch.essential[v]) {
+                scratch.seq_b[ib] = v;
+                scratch.rank_b[v] = ib;
+                ib += 1;
+            }
+        }
+        std.debug.assert(ia == d and ib == d);
+
+        iptFillCumulative(dist, tour_a, scratch.pos_a[scratch.seq_a[0]], scratch.essential, scratch.cum_a);
+        iptFillCumulative(dist, tour_b, scratch.pos_b[scratch.seq_b[0]], scratch.essential, scratch.cum_b);
+
+        // Find the smallest matched differing section: a set of nodes that is
+        // a contiguous rank interval in BOTH shrunken tours (pigeonhole: after
+        // k steps along B, landing exactly k ranks ahead in A with every
+        // intermediate rank distance below k means the k+1 visited nodes are
+        // exactly A's ranks si..si+k). Sections larger than d/2 are skipped;
+        // their complement is a section too and is found from the other side.
+        const max_k = d / 2;
+        var best_k: usize = max_k + 1;
+        var best_si: usize = 0;
+        var best_dir_fwd = false;
+        var best_gain: i64 = 0;
+        var best_v: usize = 0;
+        var found = false;
+
+        scan: for (0..d) |si| {
+            const start = scratch.seq_a[si];
+            // A section whose first A-edge is shared with B contains a
+            // smaller section starting one rank later; skip such starts.
+            const a_succ = scratch.seq_a[(si + 1) % d];
+            const rb = scratch.rank_b[start];
+            if (a_succ == scratch.seq_b[(rb + 1) % d] or a_succ == scratch.seq_b[(rb + d - 1) % d]) continue;
+
+            var dir: usize = 0;
+            while (dir < 2) : (dir += 1) {
+                const forward = dir == 0;
+                var max_sub1: usize = 0;
+                var k: usize = 1;
+                while (k <= max_k and k < best_k) : (k += 1) {
+                    const vrank_b = if (forward) (rb + k) % d else (rb + d - k) % d;
+                    const v = scratch.seq_b[vrank_b];
+                    const sub1 = (scratch.rank_a[v] + d - scratch.rank_a[start]) % d;
+                    if (sub1 >= best_k or sub1 > max_k) break;
+                    if (sub1 > max_sub1) {
+                        if (sub1 == k) {
+                            const cost_a = iptPathCost(scratch.cum_a, d, si, k);
+                            const cost_b = if (forward)
+                                iptPathCost(scratch.cum_b, d, rb, k)
+                            else
+                                iptPathCost(scratch.cum_b, d, vrank_b, k);
+                            if (cost_a != cost_b) {
+                                found = true;
+                                best_k = k;
+                                best_si = si;
+                                best_dir_fwd = forward;
+                                best_gain = @as(i64, @intCast(cost_a)) - @as(i64, @intCast(cost_b));
+                                best_v = v;
+                                if (best_k <= 3) break :scan;
+                            }
+                            break;
+                        }
+                        max_sub1 = sub1;
+                    }
+                }
+            }
+        }
+        if (!found) break :outer;
+
+        // Transcribe the cheaper alternative into the more expensive tour.
+        // The full (unshrunken) windows cover identical node sets, so a plain
+        // positional copy keeps both tours Hamiltonian.
+        const start = scratch.seq_a[best_si];
+        const v = best_v;
+        const pa_s = scratch.pos_a[start];
+        const pa_v = scratch.pos_a[v];
+        const span = ((pa_v + n - pa_s) % n) + 1;
+        if (best_gain > 0) {
+            const pb_s = scratch.pos_b[start];
+            if (best_dir_fwd) {
+                std.debug.assert(((scratch.pos_b[v] + n - pb_s) % n) + 1 == span);
+                for (0..span) |t| tour_a[(pa_s + t) % n] = tour_b[(pb_s + t) % n];
+            } else {
+                std.debug.assert(((pb_s + n - scratch.pos_b[v]) % n) + 1 == span);
+                for (0..span) |t| tour_a[(pa_s + t) % n] = tour_b[(pb_s + n - t) % n];
+            }
+            len_a -= @intCast(best_gain);
+        } else {
+            if (best_dir_fwd) {
+                const pb_s = scratch.pos_b[start];
+                for (0..span) |t| tour_b[(pb_s + t) % n] = tour_a[(pa_s + t) % n];
+            } else {
+                // B traverses the section v..start in its own forward
+                // direction, so write A's window reversed.
+                const pb_v = scratch.pos_b[v];
+                for (0..span) |t| tour_b[(pb_v + t) % n] = tour_a[(pa_v + n - t) % n];
+            }
+            len_b -= @intCast(-best_gain);
+        }
+        transcriptions += 1;
+        if (boundary_count + 2 <= scratch.boundary.len) {
+            scratch.boundary[boundary_count] = start;
+            scratch.boundary[boundary_count + 1] = v;
+            boundary_count += 2;
+        }
+    }
+
+    if (transcriptions == 0) return null;
+    return .{
+        .length = @min(len_a, len_b),
+        .winner_is_a = len_a <= len_b,
+        .transcriptions = transcriptions,
+        .boundary_count = boundary_count,
+    };
+}
+
 const LocalSearch = struct {
     dist: *DistanceOracle,
     candidates: *const Candidates,
@@ -1911,11 +2282,6 @@ const LocalSearch = struct {
             // Nonsequential fallbacks run only once the sequential search has
             // drained the active queue (paper: Gain23 after sequential moves fail).
             if (self.tour.len >= 256 and self.tour.len < 512 and self.improveGain23Bridge(stats)) {
-                moves += 1;
-                stats.lk_moves += 1;
-                continue;
-            }
-            if (self.improveNonSequential4Opt(stats)) {
                 moves += 1;
                 stats.lk_moves += 1;
                 continue;
@@ -2181,75 +2547,6 @@ const LocalSearch = struct {
         const to_pos = self.pos[to];
         const span = if (to_pos >= from_pos) to_pos - from_pos + 1 else n - from_pos + to_pos + 1;
         return 2 * span <= n;
-    }
-
-    fn improveNonSequential4Opt(self: *LocalSearch, stats: *SolveStats) bool {
-        if (self.max_lk_depth < 4 or self.lk_nonseq_branch_limit == 0) return false;
-
-        const n = self.tour.len;
-        for (0..n) |i| {
-            const a = self.tour[i];
-            const b = self.tour[(i + 1) % n];
-            const ab = @as(u64, self.dist.distance(a, b));
-            var tried_for_start: usize = 0;
-
-            for (self.candidates.row(a)) |c| {
-                if (tried_for_start >= self.lk_nonseq_branch_limit) break;
-                const j = self.pos[c];
-                if (j <= i + 1 or j + 1 >= n) continue;
-                const d = self.tour[(j + 1) % n];
-                if (d == a or d == b) continue;
-
-                for (self.candidates.row(b)) |e| {
-                    const k = self.pos[e];
-                    if (k <= j + 1 or k + 1 >= n) continue;
-                    const f = self.tour[(k + 1) % n];
-                    if (f == a or f == b or f == c or f == d) continue;
-
-                    for (self.candidates.row(d)) |g| {
-                        const l = self.pos[g];
-                        if (l <= k + 1 or l + 1 >= n) continue;
-                        const h = self.tour[(l + 1) % n];
-                        if (h == a or h == b or h == c or h == d or h == e or h == f) continue;
-                        if (!self.recordLKNode(stats)) return false;
-                        stats.lk_nonseq_attempts += 1;
-                        tried_for_start += 1;
-
-                        const removed = ab + self.dist.distance(c, d) + self.dist.distance(e, f) + self.dist.distance(g, h);
-                        const added = self.dist.distance(a, c) + @as(u64, self.dist.distance(b, e)) + self.dist.distance(d, g) + self.dist.distance(f, h);
-                        if (added >= removed) {
-                            stats.lk_nonseq_rejected += 1;
-                            continue;
-                        }
-
-                        self.removed_a[0] = a;
-                        self.removed_b[0] = b;
-                        self.removed_a[1] = c;
-                        self.removed_b[1] = d;
-                        self.removed_a[2] = e;
-                        self.removed_b[2] = f;
-                        self.removed_a[3] = g;
-                        self.removed_b[3] = h;
-                        self.added_a[0] = a;
-                        self.added_b[0] = c;
-                        self.added_a[1] = b;
-                        self.added_b[1] = e;
-                        self.added_a[2] = d;
-                        self.added_b[2] = g;
-                        self.added_a[3] = f;
-                        self.added_b[3] = h;
-                        if (self.testAndApplyNonSequentialMove(4, 4, stats)) {
-                            stats.lk_nonseq_accepted += 1;
-                            stats.lk_nonseq_depth_total += 4;
-                            stats.lk_nonseq_deepest_accepted_depth = @max(stats.lk_nonseq_deepest_accepted_depth, 4);
-                            return true;
-                        }
-                        stats.lk_nonseq_rejected += 1;
-                    }
-                }
-            }
-        }
-        return false;
     }
 
     fn findLKMove(self: *LocalSearch, stats: *SolveStats) u64 {
@@ -2644,15 +2941,6 @@ const LocalSearch = struct {
         const depth = edge_count + 2;
         stats.lk_applied_depth_total += depth;
         stats.lk_deepest_applied_depth = @max(stats.lk_deepest_applied_depth, depth);
-        if (std.debug.runtime_safety) std.debug.assert(self.debugTourIsValid());
-        if (std.debug.runtime_safety) std.debug.assert(self.debugSegmentMatchesFlatMaterialization());
-        return true;
-    }
-
-    fn testAndApplyNonSequentialMove(self: *LocalSearch, removed_count: usize, added_count: usize, stats: *SolveStats) bool {
-        if (!self.planAndApplyMoveInternal(removed_count, added_count, stats, false, false, true)) return false;
-        stats.lk_applied_depth_total += removed_count;
-        stats.lk_deepest_applied_depth = @max(stats.lk_deepest_applied_depth, removed_count);
         if (std.debug.runtime_safety) std.debug.assert(self.debugTourIsValid());
         if (std.debug.runtime_safety) std.debug.assert(self.debugSegmentMatchesFlatMaterialization());
         return true;
@@ -4175,4 +4463,113 @@ test "heuristic reaches TSPLIB gr17 hardcoded regression target" {
 
     try p.validateTour(result.tour);
     try std.testing.expectEqual(@as(u64, 2085), result.length);
+}
+
+test "IPT merge combines complementary sections from two tours" {
+    const allocator = std.testing.allocator;
+    var coords: [16]problem.Coord = undefined;
+    for (0..16) |i| {
+        const angle = 2.0 * std.math.pi * @as(f64, @floatFromInt(i)) / 16.0;
+        coords[i] = .{ .x = 100.0 * @cos(angle), .y = 100.0 * @sin(angle) };
+    }
+    var p = try problem.Problem.initCoords(allocator, "ipt-circle", .euc_2d, &coords);
+    defer p.deinit();
+    var oracle = try DistanceOracle.init(allocator, &p, p.dimension * p.dimension);
+    defer oracle.deinit();
+
+    var base: [16]usize = undefined;
+    for (0..16) |i| base[i] = i;
+    var tour_a = base;
+    var tour_b = base;
+    // Tour A scrambles one section, tour B a different one; each tour holds
+    // the optimal (circle-order) alternative for the other's bad section.
+    std.mem.swap(usize, &tour_a[3], &tour_a[4]);
+    std.mem.swap(usize, &tour_b[10], &tour_b[11]);
+
+    const len_opt = try oracle.tourLengthUnchecked(&base);
+    const len_a = try oracle.tourLengthUnchecked(&tour_a);
+    const len_b = try oracle.tourLengthUnchecked(&tour_b);
+    try std.testing.expect(len_a > len_opt);
+    try std.testing.expect(len_b > len_opt);
+
+    var scratch = try IptScratch.init(allocator, 16);
+    defer scratch.deinit();
+    const outcome = iptMergeTours(&oracle, &tour_a, len_a, &tour_b, len_b, &scratch) orelse
+        return error.MergeDidNotFire;
+    try std.testing.expect(outcome.length < @min(len_a, len_b));
+    try std.testing.expectEqual(len_opt, outcome.length);
+    const winner: []const usize = if (outcome.winner_is_a) &tour_a else scratch.tour_b;
+    try p.validateTour(winner);
+    try std.testing.expectEqual(outcome.length, try oracle.tourLengthUnchecked(winner));
+    try std.testing.expectEqual(@as(usize, 2), outcome.transcriptions);
+    try std.testing.expectEqual(@as(usize, 4), outcome.boundary_count);
+}
+
+test "IPT merge handles sections traversed in opposite orientation" {
+    const allocator = std.testing.allocator;
+    var coords: [16]problem.Coord = undefined;
+    for (0..16) |i| {
+        const angle = 2.0 * std.math.pi * @as(f64, @floatFromInt(i)) / 16.0;
+        coords[i] = .{ .x = 100.0 * @cos(angle), .y = 100.0 * @sin(angle) };
+    }
+    var p = try problem.Problem.initCoords(allocator, "ipt-circle-rev", .euc_2d, &coords);
+    defer p.deinit();
+    var oracle = try DistanceOracle.init(allocator, &p, p.dimension * p.dimension);
+    defer oracle.deinit();
+
+    var base: [16]usize = undefined;
+    for (0..16) |i| base[i] = i;
+    var tour_a = base;
+    std.mem.swap(usize, &tour_a[3], &tour_a[4]);
+    // Tour B runs the cycle in the opposite global direction, so every
+    // section B contributes appears reversed relative to A; B additionally
+    // scrambles a section A holds in optimal order.
+    var tour_b: [16]usize = undefined;
+    for (0..16) |i| tour_b[i] = 15 - i;
+    std.mem.swap(usize, &tour_b[4], &tour_b[5]);
+
+    const len_opt = try oracle.tourLengthUnchecked(&base);
+    const len_a = try oracle.tourLengthUnchecked(&tour_a);
+    const len_b = try oracle.tourLengthUnchecked(&tour_b);
+    try std.testing.expect(len_a > len_opt);
+    try std.testing.expect(len_b > len_opt);
+
+    var scratch = try IptScratch.init(allocator, 16);
+    defer scratch.deinit();
+    const outcome = iptMergeTours(&oracle, &tour_a, len_a, &tour_b, len_b, &scratch) orelse
+        return error.MergeDidNotFire;
+    try std.testing.expect(outcome.length < @min(len_a, len_b));
+    try std.testing.expectEqual(len_opt, outcome.length);
+    const winner: []const usize = if (outcome.winner_is_a) &tour_a else scratch.tour_b;
+    try p.validateTour(winner);
+    try std.testing.expectEqual(outcome.length, try oracle.tourLengthUnchecked(winner));
+}
+
+test "IPT merge returns null for tours sharing every edge" {
+    const allocator = std.testing.allocator;
+    var coords: [12]problem.Coord = undefined;
+    for (0..12) |i| {
+        const angle = 2.0 * std.math.pi * @as(f64, @floatFromInt(i)) / 12.0;
+        coords[i] = .{ .x = 100.0 * @cos(angle), .y = 100.0 * @sin(angle) };
+    }
+    var p = try problem.Problem.initCoords(allocator, "ipt-identical", .euc_2d, &coords);
+    defer p.deinit();
+    var oracle = try DistanceOracle.init(allocator, &p, p.dimension * p.dimension);
+    defer oracle.deinit();
+
+    // Same cycle, rotated and reflected: no differing edges, nothing to merge.
+    var tour_a: [12]usize = undefined;
+    var tour_b: [12]usize = undefined;
+    for (0..12) |i| {
+        tour_a[i] = (i + 5) % 12;
+        tour_b[i] = (12 - i) % 12;
+    }
+    const len = try oracle.tourLengthUnchecked(&tour_a);
+
+    var scratch = try IptScratch.init(allocator, 12);
+    defer scratch.deinit();
+    try std.testing.expectEqual(
+        @as(?IptOutcome, null),
+        iptMergeTours(&oracle, &tour_a, len, &tour_b, len, &scratch),
+    );
 }
