@@ -13,6 +13,7 @@ const Mode = struct {
     max_passes: ?usize = null,
     lk_backtrack_limit: ?usize = null,
     lk_max_depth: usize = 5,
+    extend_trials: bool = false,
 };
 
 const TsplibFixture = struct {
@@ -36,8 +37,11 @@ const tsplib_matrix_modes = [_]Mode{
     .{ .name = "alpha-w24-t4", .enable_lk = true, .candidate_mode = .alpha_nearness, .candidate_count = 24, .trials = 4, .max_passes = 64, .lk_backtrack_limit = 80_000 },
     .{ .name = "alpha-w24-t8", .enable_lk = true, .candidate_mode = .alpha_nearness, .candidate_count = 24, .trials = 8, .max_passes = 64, .lk_backtrack_limit = 80_000 },
     // LKH-style trial budget: MaxTrials = DIMENSION with iterated kicks from the
-    // best tour, narrow alpha candidates (coverage is 100% at width 8).
-    .{ .name = "alpha-w8-kick", .enable_lk = true, .candidate_mode = .alpha_nearness, .candidate_count = 8, .dimension_trials_scale = 1, .max_passes = 64, .lk_backtrack_limit = 80_000 },
+    // best tour, narrow alpha candidates (coverage is 100% at width 8), and
+    // stagnation-based extension so runs that are still improving at the
+    // dimension budget keep going (the backtracking discipline made trials
+    // several times cheaper than the budget convention assumes).
+    .{ .name = "alpha-w8-kick", .enable_lk = true, .candidate_mode = .alpha_nearness, .candidate_count = 8, .dimension_trials_scale = 1, .max_passes = 64, .lk_backtrack_limit = 80_000, .extend_trials = true },
 };
 
 const fixtures = [_]TsplibFixture{
@@ -192,9 +196,14 @@ fn runMode(allocator: std.mem.Allocator, p: *const commiv.Problem, optimum: ?u64
     const max_passes = mode.max_passes orelse if (n >= 500) @as(usize, 48) else @as(usize, 80);
     const lk_backtrack_limit = mode.lk_backtrack_limit orelse if (n >= 500) @as(usize, 60_000) else @as(usize, 80_000);
     const start_ns = monotonicNanos();
+    // Very large instances pay several ms per trial and keep finding
+    // hairline improvements; factor 2 buys the same quality as 4 there at
+    // half the extension cost.
+    const trial_extension_factor: usize = if (!mode.extend_trials) 0 else if (n >= 1000) 2 else 4;
     var result = try commiv.solve(allocator, p, .{
         .seed = 12345,
         .trials = trials,
+        .trial_extension_factor = trial_extension_factor,
         .candidate_count = candidate_count,
         .candidate_mode = mode.candidate_mode,
         .max_passes = max_passes,

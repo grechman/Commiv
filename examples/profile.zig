@@ -6,8 +6,8 @@ const commiv = @import("commiv");
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const path = init.environ_map.get("PROF_PATH") orelse return error.MissingArg;
-    const trials_arg = init.environ_map.get("PROF_TRIALS") orelse "4";
-    const trials = try std.fmt.parseInt(usize, trials_arg, 10);
+    const trials_arg = init.environ_map.get("PROF_TRIALS") orelse "0";
+    const trials_in = try std.fmt.parseInt(usize, trials_arg, 10);
 
     const bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, path, allocator, .limited(16 * 1024 * 1024));
     defer allocator.free(bytes);
@@ -20,30 +20,43 @@ pub fn main(init: std.process.Init) !void {
     defer p.deinit();
     const n = p.dimension;
 
-    const no_b3o = init.environ_map.get("PROF_NO_B3O") != null;
-    const no_oropt = init.environ_map.get("PROF_NO_OROPT") != null;
-    const nonseq0 = init.environ_map.get("PROF_NONSEQ0") != null;
+    // Defaults mirror the bench's headline alpha-w8-kick mode exactly:
+    // dimension trials, width 8, max_passes 64, backtrack limit 80k.
+    const trials = if (trials_in == 0) n else trials_in;
+    const btdepth_arg = init.environ_map.get("PROF_BTDEPTH") orelse "";
     const depth_arg = init.environ_map.get("PROF_DEPTH") orelse "5";
-    const backtrack_arg = init.environ_map.get("PROF_BACKTRACK") orelse "";
+    const ext_arg = init.environ_map.get("PROF_EXT") orelse "0";
 
     const start_ns = monotonicNanos();
     var result = try commiv.solve(allocator, &p, .{
         .seed = 12345,
         .trials = trials,
-        .candidate_count = if (n >= 500) 8 else 4,
+        .trial_extension_factor = try std.fmt.parseInt(usize, ext_arg, 10),
+        .candidate_count = 8,
         .candidate_mode = .alpha_nearness,
-        .max_passes = if (n >= 500) 48 else 80,
+        .max_passes = 64,
         .enable_lk = true,
-        .enable_bounded_three_opt_cleanup = !no_b3o,
-        .enable_or_opt = !no_oropt,
-        .lk_nonseq_branch_limit = if (nonseq0) 0 else 2,
         .lk_max_depth = try std.fmt.parseInt(usize, depth_arg, 10),
-        .lk_backtrack_limit = if (backtrack_arg.len > 0) try std.fmt.parseInt(usize, backtrack_arg, 10) else if (n >= 500) 60_000 else 80_000,
+        .lk_backtrack_depth = if (btdepth_arg.len > 0) try std.fmt.parseInt(usize, btdepth_arg, 10) else null,
+        .lk_backtrack_limit = 80_000,
         .max_distance_cache_weights = n * n,
     });
     defer result.deinit();
     const elapsed = monotonicNanos() - start_ns;
-    std.debug.print("{s} n={} len={} time={d:.0}ms nodes={}\n", .{ p.name, n, result.length, @as(f64, @floatFromInt(elapsed)) / 1e6, result.stats.lk_search_nodes });
+    std.debug.print("{s} n={} trials={} len={} time={d:.0}ms nodes={} best_trial={}\n", .{ p.name, n, trials, result.length, @as(f64, @floatFromInt(elapsed)) / 1e6, result.stats.lk_search_nodes, result.stats.best_trial });
+
+    if (init.environ_map.get("PROF_TOUR_OUT")) |out_path| {
+        var buf: [64]u8 = undefined;
+        var file = try std.Io.Dir.cwd().createFile(init.io, out_path, .{});
+        defer file.close(init.io);
+        var writer_buf: [4096]u8 = undefined;
+        var fw = file.writer(init.io, &writer_buf);
+        for (result.tour) |node| {
+            const line = try std.fmt.bufPrint(&buf, "{}\n", .{node + 1});
+            try fw.interface.writeAll(line);
+        }
+        try fw.interface.flush();
+    }
 }
 
 fn monotonicNanos() u64 {

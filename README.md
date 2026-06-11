@@ -26,7 +26,7 @@ For larger instances, `solve` runs deterministic multi-start heuristic search:
 - `TourView` abstraction over flat and segment-backed tour views
 - `MovePlan` validation for edge-delta application and two-component patching
 
-Eleven of the seventeen TSPLIB fixtures solve to the known optimum in the headline `alpha-w8-kick` mode, including u574 and fl417; fl1577 matches LKH's RUNS=1 tour at a sixth of its time and lin318 beats it. The remaining gaps are 0.06-0.56% on six instances (see the table below).
+Fourteen of the seventeen TSPLIB fixtures solve to the known optimum in the headline `alpha-w8-kick` mode; fl1577 matches LKH's RUNS=1 tour at a third of its time and lin318 beats it. The remaining gaps are d657 0.008%, rat575 0.089%, pr1002 0.38% (see the table below).
 
 ## Requirements
 
@@ -124,6 +124,7 @@ Main entry points:
 Useful options:
 
 - `trials`
+- `trial_extension_factor`
 - `candidate_count`
 - `candidate_mode`
 - `max_passes`
@@ -145,29 +146,31 @@ Machine-local result from 2026-06-11, one CPU core, headline `alpha-w8-kick` mod
 
 | Instance | n | commiv Length | Gap | Time | LKH Length | LKH Gap | LKH Time |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| berlin52 | 52 | 7542 | 0.000% | 71 ms | 7542 | 0.000% | 0.01 s |
+| berlin52 | 52 | 7542 | 0.000% | 69 ms | 7542 | 0.000% | 0.01 s |
 | eil76 | 76 | 538 | 0.000% | 22 ms | 538 | 0.000% | 0.02 s |
-| kroA100 | 100 | 21282 | 0.000% | 124 ms | 21282 | 0.000% | 0.04 s |
-| bier127 | 127 | 118282 | 0.000% | 275 ms | 118282 | 0.000% | 0.07 s |
-| rat195 | 195 | 2323 | 0.000% | 142 ms | 2323 | 0.000% | 0.72 s |
-| ts225 | 225 | 126643 | 0.000% | 574 ms | 126643 | 0.000% | 0.44 s |
-| a280 | 280 | 2579 | 0.000% | 337 ms | 2579 | 0.000% | 0.57 s |
-| lin318 | 318 | 42029 | 0.000% | 764 ms | 42143 | 0.271% | 0.80 s |
-| rd400 | 400 | 15327 | 0.301% | 389 ms | 15281 | 0.000% | 0.60 s |
-| fl417 | 417 | 11861 | 0.000% | 2.62 s | 11861 | 0.000% | 10.29 s |
-| pcb442 | 442 | 50832 | 0.106% | 261 ms | 50778 | 0.000% | 2.91 s |
-| att532 | 532 | 27703 | 0.061% | 0.97 s | 27686 | 0.000% | 8.82 s |
-| u574 | 574 | 36905 | 0.000% | 2.69 s | 36905 | 0.000% | 4.80 s |
-| rat575 | 575 | 6779 | 0.089% | 0.55 s | 6773 | 0.000% | 2.07 s |
-| d657 | 657 | 48949 | 0.076% | 1.44 s | 48912 | 0.000% | 2.49 s |
-| pr1002 | 1002 | 260487 | 0.557% | 5.58 s | 259045 | 0.000% | 2.96 s |
-| fl1577 | 1577 | 22262 | 0.058% | 24.5 s | 22262 | 0.058% | 145.66 s |
+| kroA100 | 100 | 21282 | 0.000% | 126 ms | 21282 | 0.000% | 0.04 s |
+| bier127 | 127 | 118282 | 0.000% | 351 ms | 118282 | 0.000% | 0.07 s |
+| rat195 | 195 | 2323 | 0.000% | 152 ms | 2323 | 0.000% | 0.72 s |
+| ts225 | 225 | 126643 | 0.000% | 622 ms | 126643 | 0.000% | 0.44 s |
+| a280 | 280 | 2579 | 0.000% | 344 ms | 2579 | 0.000% | 0.57 s |
+| lin318 | 318 | 42029 | 0.000% | 0.91 s | 42143 | 0.271% | 0.80 s |
+| rd400 | 400 | 15281 | 0.000% | 1.05 s | 15281 | 0.000% | 0.60 s |
+| fl417 | 417 | 11861 | 0.000% | 3.32 s | 11861 | 0.000% | 10.29 s |
+| pcb442 | 442 | 50778 | 0.000% | 0.61 s | 50778 | 0.000% | 2.91 s |
+| att532 | 532 | 27686 | 0.000% | 1.99 s | 27686 | 0.000% | 8.82 s |
+| u574 | 574 | 36905 | 0.000% | 4.98 s | 36905 | 0.000% | 4.80 s |
+| rat575 | 575 | 6779 | 0.089% | 0.87 s | 6773 | 0.000% | 2.07 s |
+| d657 | 657 | 48916 | 0.008% | 2.63 s | 48912 | 0.000% | 2.49 s |
+| pr1002 | 1002 | 260033 | 0.381% | 10.95 s | 259045 | 0.000% | 2.96 s |
+| fl1577 | 1577 | 22262 | 0.058% | 43.1 s | 22262 | 0.058% | 145.66 s |
 
 Current read:
 
-- 11 of 17 instances reach the known optimum, every instance up to lin318 plus fl417 and u574. lin318 beats this LKH run outright (LKH missed the optimum at RUNS=1); fl1577 produces the identical tour length at a sixth of LKH's time.
-- Where a gap remains (rd400, pcb442, att532, rat575, d657 at 0.06-0.30%), commiv is 2-11x faster than LKH; pr1002 (0.56%, 5.6 s) is the one instance losing on both axes.
-- Two structural fixes landed on 2026-06-11 after the fixture set grew to 17: alpha-nearness candidate generation was O(n^2 x depth^2) per build — up to O(n^4) on chain-shaped MSTs, 36 s of fl1577's 38 s candidate build — and is now O(n^2) via per-row 1-tree bottleneck traversals (bit-identical candidates); and the LK recursion previously backtracked at every depth, exploding on clustered geometry where a long removed edge makes the positive-gain bound prune nothing — it now follows LKH's discipline (backtrack at levels 1-2, commit below) for n >= 400.
+- 14 of 17 instances reach the known optimum. lin318 beats this LKH run outright (LKH missed the optimum at RUNS=1); fl1577 produces the identical tour length at a third of LKH's time; pcb442, att532, fl417, rat195 are optimal at 3-5x LKH's speed.
+- Residual gaps: d657 0.008% (4 length units), fl1577 0.058% (= LKH), rat575 0.089%, pr1002 0.381%. pr1002 is the only instance losing to LKH on both axes.
+- Tour-diff analysis against LKH's optimal tours shows the residuals are not one missing k-opt move: rat575 differs from the optimum in 67 edges scattered over 59 sections of size <= 2 (pr1002: 91 edges, 83 sections). These geometries are massively degenerate; locally optimal tours sit on broad cost-equal plateaus where the better micro-variant only pays after a neighboring section also changes. Extension-phase kicks therefore add zero-delta 2-opt "plateau drift" (length-preserving reconnections), which is what closed rd400.
+- Structural fixes from 2026-06-11, after the fixture set grew to 17: (1) alpha-nearness candidate generation was O(n^2 x depth^2) per build — up to O(n^4) on chain-shaped MSTs, 36 s of fl1577's 38 s candidate build — and is now O(n^2) via per-row 1-tree bottleneck traversals (bit-identical candidates); (2) the LK recursion previously backtracked at every depth, exploding on clustered geometry where a long removed edge makes the positive-gain bound prune nothing — it now follows LKH's discipline (backtrack at levels 1-2, commit below) for n >= 400, and extension-phase trials always use the cheap discipline; (3) the fixed `trials = dimension` budget was cutting off runs that were still improving (rd400 found its best tour on its final trial) now that trials are several times cheaper — the headline mode extends trials while improvement is at most `dimension` trials old, capped at 4x (2x for n >= 1000).
+- The stagnation window is insurance: pcb442's and att532's optima arrive mid-extension with pre-extension statistics indistinguishable from lin318's (which extends fruitlessly for ~0.1 s). Cutting the window breaks those optima; latency-critical callers can set `trial_extension_factor = 0`.
 - The benchmark uses a single fixed seed (12345). Trajectory-level changes shuffle individual rows by a fraction of a percent; treat single-row deltas across code changes as noise unless they reproduce.
 - The analysis sections below describe the 2026-06-07 state (pre guided-restart/IPT/backtracking rounds) and are kept as history.
 

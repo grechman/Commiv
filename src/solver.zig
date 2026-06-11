@@ -7,6 +7,15 @@ const tsplib = @import("tsplib.zig");
 pub const SolveOptions = struct {
     seed: u64 = 1,
     trials: usize = 16,
+    // Stagnation-based trial extension: when > 0, the trial loop keeps
+    // running past `trials` as long as the incumbent improved within the
+    // last `trials` trials, up to `trial_extension_factor * trials` total.
+    // The backtracking discipline made trials 3-10x cheaper than the LKH
+    // budget the `trials = dimension` convention was calibrated against;
+    // without extension, runs on larger instances stop while still
+    // improving (rd400 found its best tour on its final trial). Converged
+    // runs stop at the stagnation window, so small instances pay nothing.
+    trial_extension_factor: usize = 0,
     candidate_count: usize = 24,
     candidate_mode: CandidateMode = .nearest_distance,
     max_passes: usize = 80,
@@ -969,6 +978,13 @@ pub fn solve(
     const guided_max_dimension: usize = std.math.maxInt(usize);
     var kick_touched: [4][6]usize = undefined;
     var kick_count: usize = 0;
+    var plateau_touched: [16]usize = undefined;
+    var plateau_count: usize = 0;
+    // Exhaustive backtracking is affordable and measurably needed below 400
+    // nodes; extension-phase trials are stale grinding, so they always use
+    // the cheap discipline.
+    const base_backtrack_depth: usize = options.lk_backtrack_depth orelse
+        (if (n < 400) std.math.maxInt(usize) else @as(usize, 2));
     // Shadow incumbent for IPT tour merging: best tour ever produced by a
     // merge (+ polish). Kept out of the kick/restart loop so the baseline
     // trajectory is undisturbed; folded into the result after the loop.
@@ -977,7 +993,13 @@ pub fn solve(
     // construction (LKH's InNextBestTour). The contested sections between it
     // and the current best are exactly where constructions should explore.
     var prev_best_len: u64 = std.math.maxInt(u64);
-    for (0..trials) |trial| {
+    const max_trials = if (options.trial_extension_factor > 1)
+        std.math.mul(usize, trials, options.trial_extension_factor) catch trials
+    else
+        trials;
+    var last_improvement_trial: usize = 0;
+    var trial: usize = 0;
+    while (trial < max_trials and trial - last_improvement_trial < trials) : (trial += 1) {
         // After the first descent, trials are iterated local search: perturb the
         // best tour and let LK re-optimize only the perturbed neighborhood,
         // instead of paying for a cold construction + full descent every trial.
@@ -999,6 +1021,13 @@ pub fn solve(
             for (0..kick_count) |ki| {
                 segmentExchangeKick(workspace.tour, &random, &kick_touched[ki]);
             }
+            // Extension-phase kicks add plateau drift: the base budget has
+            // stalled, so the remaining gap is most likely hiding behind
+            // cost-equal reconnections that bridges alone revisit forever.
+            plateau_count = if (trial >= trials)
+                plateauKick(&oracle, &candidates, workspace.tour, workspace.pos, &random, 4, &plateau_touched)
+            else
+                0;
         } else {
             if (trial > 0 and stale_kicks >= restart_limit) {
                 if (!guided_available) restart_threshold *= 2;
@@ -1072,8 +1101,7 @@ pub fn solve(
             .lk_completion_patch_min_gain = options.lk_completion_patch_min_gain,
             .max_lk_depth = max_lk_depth,
             .lk_backtrack_limit = options.lk_backtrack_limit,
-            .lk_backtrack_depth = options.lk_backtrack_depth orelse
-                (if (n < 400) std.math.maxInt(usize) else 2),
+            .lk_backtrack_depth = if (trial >= trials) @min(base_backtrack_depth, 2) else base_backtrack_depth,
             .lk_nonseq_branch_limit = options.lk_nonseq_branch_limit,
         };
         search.rebuildState();
@@ -1082,6 +1110,7 @@ pub fn solve(
             for (kick_touched[0..kick_count]) |touched| {
                 for (touched) |node| search.lkActivate(node);
             }
+            for (plateau_touched[0 .. 4 * plateau_count]) |node| search.lkActivate(node);
             const lk_moves = try search.improveLK(&stats, false, false);
             stats.improving_moves += lk_moves;
             // Only tours that beat the incumbent earn the expensive fallback
@@ -1189,6 +1218,7 @@ pub fn solve(
                             @memcpy(workspace.prev_best_tour, workspace.best_tour);
                             best_len = merged_now;
                             stats.best_trial = trial;
+                            last_improvement_trial = trial;
                             @memcpy(workspace.best_tour, ipt.tour_a);
                             stale_kicks = 0;
                         }
@@ -1206,12 +1236,14 @@ pub fn solve(
             }
             best_len = len;
             stats.best_trial = trial;
+            last_improvement_trial = trial;
             @memcpy(workspace.best_tour, workspace.tour);
             stale_kicks = 0;
         } else if (kick_trial) {
             stale_kicks += 1;
         }
     }
+    stats.trials = trial;
 
     if (merged_len < best_len) {
         best_len = merged_len;
@@ -2043,6 +2075,78 @@ fn segmentExchangeKick(tour: []usize, random: *std.Random, touched: *[6]usize) v
     const k = random.intRangeLessThan(usize, j + 1, n);
     touched.* = .{ tour[i - 1], tour[i], tour[j - 1], tour[j], tour[k - 1], tour[k] };
     std.mem.rotate(usize, tour[i..k], j - i);
+}
+
+// Plateau kick: apply up to `moves` zero-delta 2-opt reconnections anchored
+// at random tour positions. On degenerate integer geometries (rattled grids,
+// drilling patterns) locally optimal tours sit on broad cost-equal plateaus:
+// the residual gap to the optimum hides in scattered micro-sections whose
+// better variant is cost-equal until a neighboring section also changes
+// (measured on rat575: 67 differing edges vs the optimum in 59 sections of
+// size <= 2). Length-preserving moves walk the plateau without giving up
+// quality, so the follow-up descent starts from a genuinely different tour
+// of equal length. Returns the number of applied moves; their endpoints are
+// recorded in `touched` (4 per move) for LK reactivation.
+fn plateauKick(
+    dist_oracle: *DistanceOracle,
+    candidates: *const Candidates,
+    tour: []usize,
+    pos: []usize,
+    random: *std.Random,
+    moves: usize,
+    touched: []usize,
+) usize {
+    const n = tour.len;
+    std.debug.assert(touched.len >= 4 * moves);
+    for (tour, 0..) |node, idx| pos[node] = idx;
+
+    var applied: usize = 0;
+    var attempts: usize = 0;
+    const max_attempts = 8 * moves;
+    while (applied < moves and attempts < max_attempts) : (attempts += 1) {
+        const i = random.intRangeLessThan(usize, 0, n);
+        const a = tour[i];
+        const b = tour[(i + 1) % n];
+        const d_ab = @as(i64, @intCast(dist_oracle.distance(a, b)));
+        for (candidates.row(a)) |c| {
+            if (c == b or c == a) continue;
+            const j = pos[c];
+            const d = tour[(j + 1) % n];
+            if (d == a) continue;
+            const delta = @as(i64, @intCast(dist_oracle.distance(a, c))) +
+                @as(i64, @intCast(dist_oracle.distance(b, d))) -
+                d_ab - @as(i64, @intCast(dist_oracle.distance(c, d)));
+            if (delta != 0) continue;
+            // 2-opt: reverse the path b..c (positions i+1..j, possibly
+            // wrapping); normalize so the reversed span lies in-bounds.
+            var lo = (i + 1) % n;
+            var hi = j;
+            if (lo > hi) {
+                // Reverse the complementary span d..a instead; same cycle.
+                lo = (j + 1) % n;
+                hi = i;
+                if (lo > hi) continue;
+            }
+            var x = lo;
+            var y = hi;
+            while (x < y) : ({
+                x += 1;
+                y -= 1;
+            }) {
+                std.mem.swap(usize, &tour[x], &tour[y]);
+                pos[tour[x]] = x;
+                pos[tour[y]] = y;
+            }
+            pos[tour[x]] = x;
+            touched[4 * applied + 0] = a;
+            touched[4 * applied + 1] = b;
+            touched[4 * applied + 2] = c;
+            touched[4 * applied + 3] = d;
+            applied += 1;
+            break;
+        }
+    }
+    return applied;
 }
 
 // Guided restart construction, ported from LKH's ChooseInitialTour cases
