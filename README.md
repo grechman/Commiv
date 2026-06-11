@@ -11,18 +11,22 @@ For `n <= 10`, `solve` uses exact brute force with node 0 fixed.
 For larger instances, `solve` runs deterministic multi-start heuristic search:
 
 - nearest-neighbor and farthest-insertion starting tours
+- EUC_2D, CEIL_2D, ATT, and explicit full-matrix TSPLIB metrics
 - deterministic candidate rows
-- pi-adjusted alpha-nearness candidates
+- pi-adjusted alpha-nearness candidates, computed in O(n^2) total via per-row 1-tree bottleneck traversals
 - optional CGAL Delaunay candidate augmentation with `-Dwith-cgal=true`
 - 2-opt and one-node Or-opt warmup
-- bounded sequential LK search
+- bounded sequential LK search with LKH backtracking discipline (exhaustive below 400 nodes, backtrack only at levels 1-2 above)
 - bounded in-recursion 2/3-edge completion oracle
 - partial Gain23-style nonfeasible bridge moves
 - bounded 3-edge cleanup
+- iterated local search: double-bridge kicks from the incumbent with staleness escalation
+- guided restarts ported from LKH `ChooseInitialTour` (alpha-zero backbone construction)
+- IPT tour merging (LKH `MergeWithTour`) of trial tours against the incumbent
 - `TourView` abstraction over flat and segment-backed tour views
 - `MovePlan` validation for edge-delta application and two-component patching
 
-The current quality blocker is still large-instance non-sequential search. Candidate coverage is already good on the benchmark fixtures; rat575 is bad because the move generator is not close enough to LKH `Gain23/BridgeGain`.
+Eleven of the seventeen TSPLIB fixtures solve to the known optimum in the headline `alpha-w8-kick` mode, including u574 and fl417; fl1577 matches LKH's RUNS=1 tour at a sixth of its time and lin318 beats it. The remaining gaps are 0.06-0.56% on six instances (see the table below).
 
 ## Requirements
 
@@ -87,27 +91,19 @@ TMPDIR=/home/grechman/commiv/.zig-cache zig build cgal-probe -Dwith-cgal=true
 
 ## TSPLIB Fixtures
 
-Place these files here:
+Place symmetric TSPLIB `.tsp` files under `vendor/tsplib/`. The benchmark target automatically reports gap against known optima for these fixtures (missing files are reported and skipped):
 
-```text
-vendor/tsplib/berlin52.tsp
-vendor/tsplib/eil76.tsp
-vendor/tsplib/rat195.tsp
-vendor/tsplib/lin318.tsp
-vendor/tsplib/rat575.tsp
-```
-
-The benchmark target automatically reports gap against known optima for those fixtures.
-
-Current fixture optima used by the benchmark:
-
-| Instance | Optimum |
-|---|---:|
-| berlin52 | 7542 |
-| eil76 | 538 |
-| rat195 | 2323 |
-| lin318 | 42029 |
-| rat575 | 6773 |
+| Instance | n | Optimum | Instance | n | Optimum |
+|---|---:|---:|---|---:|---:|
+| berlin52 | 52 | 7542 | rd400 | 400 | 15281 |
+| eil76 | 76 | 538 | fl417 | 417 | 11861 |
+| kroA100 | 100 | 21282 | pcb442 | 442 | 50778 |
+| bier127 | 127 | 118282 | att532 | 532 | 27686 |
+| rat195 | 195 | 2323 | u574 | 574 | 36905 |
+| ts225 | 225 | 126643 | rat575 | 575 | 6773 |
+| a280 | 280 | 2579 | d657 | 657 | 48912 |
+| lin318 | 318 | 42029 | pr1002 | 1002 | 259045 |
+| | | | fl1577 | 1577 | 22249 |
 
 ## Public API
 
@@ -145,33 +141,35 @@ Command:
 taskset -c 0 nice -n 10 zig build bench -Doptimize=ReleaseFast
 ```
 
-Machine-local result from 2026-06-07, one CPU core:
+Machine-local result from 2026-06-11, one CPU core, headline `alpha-w8-kick` mode (fresh-cache build), side by side with LKH-3.0.13 `RUNS=1` on the same machine and core class:
 
-| Instance | Mode | Length | Optimum | Gap | Time |
-|---|---|---:|---:|---:|---:|
-| berlin52 | alpha-lk | 7542 | 7542 | 0.000% | 52 ms |
-| eil76 | alpha-patch-lk | 538 | 538 | 0.000% | 19 ms |
-| rat195 | alpha-lk | 2341 | 2323 | 0.775% | 719 ms |
-| lin318 | alpha-w24-t4 | 43424 | 42029 | 3.319% | 4.05 s |
-| rat575 | alpha-w24-t4 | 7182 | 6773 | 6.039% | 4.32 s |
-
-Recent local LKH baseline with `RUNS=1`:
-
-| Instance | LKH Length | Gap | Time |
-|---|---:|---:|---:|
-| berlin52 | 7542 | 0.000% | ~0 s |
-| eil76 | 538 | 0.000% | 0.01 s |
-| rat195 | 2323 | 0.000% | 0.49 s |
-| lin318 | 42029 | 0.000% | 0.75 s |
-| rat575 | 6774 | 0.015% | 1.46 s |
+| Instance | n | commiv Length | Gap | Time | LKH Length | LKH Gap | LKH Time |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| berlin52 | 52 | 7542 | 0.000% | 71 ms | 7542 | 0.000% | 0.01 s |
+| eil76 | 76 | 538 | 0.000% | 22 ms | 538 | 0.000% | 0.02 s |
+| kroA100 | 100 | 21282 | 0.000% | 124 ms | 21282 | 0.000% | 0.04 s |
+| bier127 | 127 | 118282 | 0.000% | 275 ms | 118282 | 0.000% | 0.07 s |
+| rat195 | 195 | 2323 | 0.000% | 142 ms | 2323 | 0.000% | 0.72 s |
+| ts225 | 225 | 126643 | 0.000% | 574 ms | 126643 | 0.000% | 0.44 s |
+| a280 | 280 | 2579 | 0.000% | 337 ms | 2579 | 0.000% | 0.57 s |
+| lin318 | 318 | 42029 | 0.000% | 764 ms | 42143 | 0.271% | 0.80 s |
+| rd400 | 400 | 15327 | 0.301% | 389 ms | 15281 | 0.000% | 0.60 s |
+| fl417 | 417 | 11861 | 0.000% | 2.62 s | 11861 | 0.000% | 10.29 s |
+| pcb442 | 442 | 50832 | 0.106% | 261 ms | 50778 | 0.000% | 2.91 s |
+| att532 | 532 | 27703 | 0.061% | 0.97 s | 27686 | 0.000% | 8.82 s |
+| u574 | 574 | 36905 | 0.000% | 2.69 s | 36905 | 0.000% | 4.80 s |
+| rat575 | 575 | 6779 | 0.089% | 0.55 s | 6773 | 0.000% | 2.07 s |
+| d657 | 657 | 48949 | 0.076% | 1.44 s | 48912 | 0.000% | 2.49 s |
+| pr1002 | 1002 | 260487 | 0.557% | 5.58 s | 259045 | 0.000% | 2.96 s |
+| fl1577 | 1577 | 22262 | 0.058% | 24.5 s | 22262 | 0.058% | 145.66 s |
 
 Current read:
 
-- Small and medium fixtures are acceptable.
-- `lin318` improved after adding Gain23-style nonfeasible bridge paths: best gap moved from `4.559%` to `3.319%`.
-- `rat575` is still not acceptable. Candidate coverage is 100% at alpha width 8+, so the issue is search/move generation, not missing candidate edges.
-- Ungated generic bridge probing on rat575 produced zero accepted non-sequential moves and 30-87 second runtimes, so the current bridge paths stay gated below 512 nodes.
-- Capped rat575 bridge probing was tested with a total sweep budget around `lk_nonseq_branch_limit * n / 4`. It did not blow up, but it made quality worse: `rat575 alpha-w24-t4` moved from `7182 / 6.039%` to `7187 / 6.113%`, and `lin318 alpha-w24-t4` regressed from `43424 / 3.319%` to `43945 / 4.559%`. Do not keep that as a default.
+- 11 of 17 instances reach the known optimum, every instance up to lin318 plus fl417 and u574. lin318 beats this LKH run outright (LKH missed the optimum at RUNS=1); fl1577 produces the identical tour length at a sixth of LKH's time.
+- Where a gap remains (rd400, pcb442, att532, rat575, d657 at 0.06-0.30%), commiv is 2-11x faster than LKH; pr1002 (0.56%, 5.6 s) is the one instance losing on both axes.
+- Two structural fixes landed on 2026-06-11 after the fixture set grew to 17: alpha-nearness candidate generation was O(n^2 x depth^2) per build — up to O(n^4) on chain-shaped MSTs, 36 s of fl1577's 38 s candidate build — and is now O(n^2) via per-row 1-tree bottleneck traversals (bit-identical candidates); and the LK recursion previously backtracked at every depth, exploding on clustered geometry where a long removed edge makes the positive-gain bound prune nothing — it now follows LKH's discipline (backtrack at levels 1-2, commit below) for n >= 400.
+- The benchmark uses a single fixed seed (12345). Trajectory-level changes shuffle individual rows by a fraction of a percent; treat single-row deltas across code changes as noise unless they reproduce.
+- The analysis sections below describe the 2026-06-07 state (pre guided-restart/IPT/backtracking rounds) and are kept as history.
 
 ## Why Quality Is Still Bad
 

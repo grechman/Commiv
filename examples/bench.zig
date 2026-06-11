@@ -43,15 +43,27 @@ const tsplib_matrix_modes = [_]Mode{
 const fixtures = [_]TsplibFixture{
     .{ .name = "berlin52", .path = "vendor/tsplib/berlin52.tsp", .tour_path = ".zig-cache/lkh-tours/berlin52.tour", .optimum = 7542 },
     .{ .name = "eil76", .path = "vendor/tsplib/eil76.tsp", .tour_path = ".zig-cache/lkh-tours/eil76.tour", .optimum = 538 },
+    .{ .name = "kroA100", .path = "vendor/tsplib/kroA100.tsp", .tour_path = ".zig-cache/lkh-tours/kroA100.tour", .optimum = 21282 },
+    .{ .name = "bier127", .path = "vendor/tsplib/bier127.tsp", .tour_path = ".zig-cache/lkh-tours/bier127.tour", .optimum = 118282 },
     .{ .name = "rat195", .path = "vendor/tsplib/rat195.tsp", .tour_path = ".zig-cache/lkh-tours/rat195.tour", .optimum = 2323 },
+    .{ .name = "ts225", .path = "vendor/tsplib/ts225.tsp", .tour_path = ".zig-cache/lkh-tours/ts225.tour", .optimum = 126643 },
+    .{ .name = "a280", .path = "vendor/tsplib/a280.tsp", .tour_path = ".zig-cache/lkh-tours/a280.tour", .optimum = 2579 },
     .{ .name = "lin318", .path = "vendor/tsplib/lin318.tsp", .tour_path = ".zig-cache/lkh-tours/lin318.tour", .optimum = 42029 },
+    .{ .name = "rd400", .path = "vendor/tsplib/rd400.tsp", .tour_path = ".zig-cache/lkh-tours/rd400.tour", .optimum = 15281 },
+    .{ .name = "fl417", .path = "vendor/tsplib/fl417.tsp", .tour_path = ".zig-cache/lkh-tours/fl417.tour", .optimum = 11861 },
+    .{ .name = "pcb442", .path = "vendor/tsplib/pcb442.tsp", .tour_path = ".zig-cache/lkh-tours/pcb442.tour", .optimum = 50778 },
+    .{ .name = "att532", .path = "vendor/tsplib/att532.tsp", .tour_path = ".zig-cache/lkh-tours/att532.tour", .optimum = 27686 },
+    .{ .name = "u574", .path = "vendor/tsplib/u574.tsp", .tour_path = ".zig-cache/lkh-tours/u574.tour", .optimum = 36905 },
     .{ .name = "rat575", .path = "vendor/tsplib/rat575.tsp", .tour_path = ".zig-cache/lkh-tours/rat575.tour", .optimum = 6773 },
+    .{ .name = "d657", .path = "vendor/tsplib/d657.tsp", .tour_path = ".zig-cache/lkh-tours/d657.tour", .optimum = 48912 },
+    .{ .name = "pr1002", .path = "vendor/tsplib/pr1002.tsp", .tour_path = ".zig-cache/lkh-tours/pr1002.tour", .optimum = 259045 },
+    .{ .name = "fl1577", .path = "vendor/tsplib/fl1577.tsp", .tour_path = ".zig-cache/lkh-tours/fl1577.tour", .optimum = 22249 },
 };
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
-    std.debug.print("instance,dimension,mode,trials,candidate_count,length,optimum,gap_percent,time_ms,lk_moves,bounded_three_opt_cleanup_moves,bounded_three_opt_cleanup_attempts,lk_search_nodes,max_depth_reached,lk_nonseq_attempts,lk_nonseq_accepted,lk_nonseq_rejected,lk_nonseq_deepest_accepted_depth,chain_nonseq_d3_attempts,chain_nonseq_d3_accepted,chain_nonseq_d3_gain_rejected,chain_nonseq_d3_apply_rejected,chain_nonseq_d4_attempts,chain_nonseq_d4_accepted,chain_nonseq_d4_gain_rejected,chain_nonseq_d4_apply_rejected,chain_nonseq_d5p_attempts,chain_nonseq_d5p_accepted,chain_nonseq_d5p_gain_rejected,chain_nonseq_d5p_apply_rejected,lk_completion_attempts,lk_completion_accepted,lk_completion_2opt_hits,lk_completion_3opt_hits,lk_completion_patch_hits,lk_completion_rejected,candidate_nearest_edges,candidate_alpha_edges,candidate_geometric_edges,candidate_patch_edges,move_plan_attempts,move_plan_direct_applies,move_plan_invalid_fallbacks,move_plan_multi_component_fallbacks,move_plan_apply_fallbacks,move_plan_fallback_successes,move_plan_patch_attempts,move_plan_patch_hits,move_plan_patch_rejected\n", .{});
+    std.debug.print("instance,dimension,mode,trials,candidate_count,length,optimum,gap_percent,time_ms,lk_moves,bounded_three_opt_cleanup_moves,bounded_three_opt_cleanup_attempts,lk_search_nodes,max_depth_reached,lk_nonseq_attempts,lk_nonseq_accepted,lk_nonseq_rejected,lk_nonseq_deepest_accepted_depth,chain_nonseq_d3_attempts,chain_nonseq_d3_accepted,chain_nonseq_d3_gain_rejected,chain_nonseq_d3_apply_rejected,chain_nonseq_d4_attempts,chain_nonseq_d4_accepted,chain_nonseq_d4_gain_rejected,chain_nonseq_d4_apply_rejected,chain_nonseq_d5p_attempts,chain_nonseq_d5p_accepted,chain_nonseq_d5p_gain_rejected,chain_nonseq_d5p_apply_rejected,lk_completion_attempts,lk_completion_accepted,lk_completion_2opt_hits,lk_completion_3opt_hits,lk_completion_patch_hits,lk_completion_rejected,candidate_nearest_edges,candidate_alpha_edges,candidate_geometric_edges,candidate_patch_edges,move_plan_attempts,move_plan_direct_applies,move_plan_invalid_fallbacks,move_plan_multi_component_fallbacks,move_plan_apply_fallbacks,move_plan_fallback_successes,move_plan_patch_attempts,move_plan_patch_hits,move_plan_patch_rejected,ipt_merge_attempts,ipt_merge_transcriptions,ipt_merge_wins,guided_trials,guided_polishes,best_trial,guided_search_nodes,merge_search_nodes\n", .{});
     try runGeneratedInstance(allocator, "clustered80", 80);
     try runGeneratedInstance(allocator, "clustered160", 160);
     try runTsplibFixtures(allocator, init.io);
@@ -246,7 +258,7 @@ fn runMode(allocator: std.mem.Allocator, p: *const commiv.Problem, optimum: ?u64
         result.stats.lk_completion_patch_hits,
         result.stats.lk_completion_rejected,
     });
-    std.debug.print(",{},{},{},{},{},{},{},{},{},{},{},{},{}\n", .{
+    std.debug.print(",{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n", .{
         result.stats.candidate_nearest_edges,
         result.stats.candidate_alpha_edges,
         result.stats.candidate_geometric_edges,
@@ -260,6 +272,14 @@ fn runMode(allocator: std.mem.Allocator, p: *const commiv.Problem, optimum: ?u64
         result.stats.move_plan_patch_attempts,
         result.stats.move_plan_patch_hits,
         result.stats.move_plan_patch_rejected,
+        result.stats.ipt_merge_attempts,
+        result.stats.ipt_merge_transcriptions,
+        result.stats.ipt_merge_wins,
+        result.stats.guided_trials,
+        result.stats.guided_polishes,
+        result.stats.best_trial,
+        result.stats.guided_search_nodes,
+        result.stats.merge_search_nodes,
     });
 }
 

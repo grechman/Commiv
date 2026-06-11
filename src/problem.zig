@@ -3,6 +3,7 @@ const std = @import("std");
 pub const DistanceKind = enum {
     euc_2d,
     ceil_2d,
+    att,
     explicit_full_matrix,
 };
 
@@ -124,6 +125,7 @@ pub const Problem = struct {
         return switch (self.distance_kind) {
             .euc_2d => roundedEuclidean(self.coords[a], self.coords[b], .nearest),
             .ceil_2d => roundedEuclidean(self.coords[a], self.coords[b], .ceil),
+            .att => attDistance(self.coords[a], self.coords[b]),
             .explicit_full_matrix => self.matrix[a * self.dimension + b],
         };
     }
@@ -201,11 +203,25 @@ fn validateCoordinateRange(kind: DistanceKind, coords: []const Coord) ProblemErr
     const worst = switch (kind) {
         .euc_2d => @floor(diagonal + 0.5),
         .ceil_2d => @ceil(diagonal),
+        .att => @ceil(diagonal / std.math.sqrt(10.0)) + 1,
         .explicit_full_matrix => unreachable,
     };
     if (worst > @as(f64, @floatFromInt(std.math.maxInt(u32)))) {
         return ProblemError.DistanceOverflow;
     }
+}
+
+// TSPLIB pseudo-Euclidean (ATT): rij = sqrt((dx^2 + dy^2) / 10), rounded to
+// the nearest integer but bumped up by one when rounding went down.
+fn attDistance(a: Coord, b: Coord) u32 {
+    const dx = a.x - b.x;
+    const dy = a.y - b.y;
+    const rij = std.math.sqrt((dx * dx + dy * dy) / 10.0);
+    const tij = @floor(rij + 0.5);
+    const dij = if (tij < rij) tij + 1 else tij;
+    std.debug.assert(dij >= 0);
+    std.debug.assert(dij <= @as(f64, @floatFromInt(std.math.maxInt(u32))));
+    return @intFromFloat(dij);
 }
 
 const Rounding = enum { nearest, ceil };

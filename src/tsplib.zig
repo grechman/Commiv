@@ -79,7 +79,7 @@ const Parser = struct {
                         const dim = header.dimension orelse return self.fail(line_no, "NODE_COORD_SECTION before DIMENSION");
                         try self.validateDimensionLimit(dim, line_no);
                         if (!isCoordType(header.edge_weight_type)) {
-                            return self.fail(line_no, "NODE_COORD_SECTION requires EUC_2D or CEIL_2D");
+                            return self.fail(line_no, "NODE_COORD_SECTION requires EUC_2D, CEIL_2D, or ATT");
                         }
                         try coords.ensureTotalCapacityPrecise(self.allocator, dim);
                         coords.appendNTimesAssumeCapacity(.{ .x = 0, .y = 0 }, dim);
@@ -118,7 +118,12 @@ const Parser = struct {
             if (coord_count != dim) return self.fail(0, "NODE_COORD_SECTION does not contain DIMENSION nodes");
             const owned_coords = try coords.toOwnedSlice(self.allocator);
             defer self.allocator.free(owned_coords);
-            const kind: problem.DistanceKind = if (std.ascii.eqlIgnoreCase(header.edge_weight_type, "EUC_2D")) .euc_2d else .ceil_2d;
+            const kind: problem.DistanceKind = if (std.ascii.eqlIgnoreCase(header.edge_weight_type, "EUC_2D"))
+                .euc_2d
+            else if (std.ascii.eqlIgnoreCase(header.edge_weight_type, "ATT"))
+                .att
+            else
+                .ceil_2d;
             return problem.Problem.initCoords(self.allocator, header.name, kind, owned_coords) catch |err| {
                 return self.problemFail(err);
             };
@@ -260,7 +265,8 @@ fn splitHeader(line: []const u8) ?HeaderPair {
 }
 
 fn isCoordType(kind: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(kind, "EUC_2D") or std.ascii.eqlIgnoreCase(kind, "CEIL_2D");
+    return std.ascii.eqlIgnoreCase(kind, "EUC_2D") or std.ascii.eqlIgnoreCase(kind, "CEIL_2D") or
+        std.ascii.eqlIgnoreCase(kind, "ATT");
 }
 
 fn expectInvalid(input: []const u8, expected_message: []const u8) !void {
@@ -289,6 +295,25 @@ test "parse EUC_2D TSPLIB square" {
     try std.testing.expectEqualStrings("square", p.name);
     try std.testing.expectEqual(@as(usize, 4), p.dimension);
     try std.testing.expectEqual(@as(u64, 4), try p.tourLength(&.{ 0, 1, 2, 3 }));
+}
+
+test "parse ATT uses pseudo-Euclidean rounding" {
+    const allocator = std.testing.allocator;
+    const data =
+        \\NAME: att
+        \\TYPE: TSP
+        \\DIMENSION: 2
+        \\EDGE_WEIGHT_TYPE: ATT
+        \\NODE_COORD_SECTION
+        \\1 0 0
+        \\2 10 0
+        \\EOF
+    ;
+    var diag: ParseDiagnostic = .{};
+    var p = try parse(allocator, data, .{ .diagnostic = &diag });
+    defer p.deinit();
+    // rij = sqrt(100/10) = 3.162..., tij = 3 < rij -> 4.
+    try std.testing.expectEqual(@as(u32, 4), try p.distance(0, 1));
 }
 
 test "parse CEIL_2D rounds up" {
@@ -400,7 +425,7 @@ test "parse rejects missing required headers" {
         \\1 0 0
         \\2 1 0
         \\EOF
-    , "NODE_COORD_SECTION requires EUC_2D or CEIL_2D");
+    , "NODE_COORD_SECTION requires EUC_2D, CEIL_2D, or ATT");
 }
 
 test "parse rejects unsupported type and weight formats" {
