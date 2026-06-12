@@ -1,124 +1,90 @@
-# commiv handoff — 2026-06-12
+# commiv handoff — 2026-06-12 (post round 15)
 
-Working tree state: all changes from rounds 8-10 are **uncommitted** (src/solver.zig,
-src/problem.zig, src/tsplib.zig, examples/bench.zig, examples/profile.zig, README.md,
-12 new vendor/tsplib fixtures). Tests: 41/41 in debug and ReleaseFast. Final table is
-fresh-cache verified and reproduced bit-identically.
+## What we are building (read this first)
 
-## Where we are
+A Zig symmetric-TSP solver core that beats LKH-3 on both axes as n grows: same
+or better accuracy, and a time advantage that gets ENORMOUS with instance size
+(small instances merely need to stay competitive). The core later powers an
+HGS-style VRP layer (constraints via distance-matrix manipulation + penalty
+hooks; ATSP via the 2n transform at the problem layer — the core stays
+symmetric and untouched). 100k+ nodes is explicitly FUTURE scope, not now.
 
-Headline mode `alpha-w8-kick`, seed 12345, one core, vs LKH-3.0.13 RUNS=1 on the same
-machine: **14/17 TSPLIB fixtures at the known optimum.** Full table in README.md.
+Architecture today: ILS (double-bridge kicks + staleness escalation + guided
+LKH-style restarts) over a bounded-LK descent with alpha-nearness candidates;
+size-gated merging — IPT verbatim below n=1000 (those trajectories are tuned
+and bit-identical since round 10), EAX-lite + elite pool + candidate width 5
+at n>=1000; zero-delta plateau drift (2-opt + Or-opt) in the extension phase.
 
-- Beat LKH outright: lin318 (LKH missed the optimum), fl417 (3x faster), pcb442 (5x),
-  att532 (4x), rat195 (5x), fl1577 (identical tour, 43 s vs 146 s).
-- Residual gaps: d657 0.008% (4 units), rat575 0.089% (6 units), pr1002 0.381%.
-- pr1002 is the only row losing to LKH on both axes.
+**Hard targets (user, 2026-06-12):** rl11849 under 15 s and fl1577 under 5 s
+at current-or-better accuracy (today: 160 s probe and 20 s). Ambitious on
+purpose. Watch row: rat575 — gap stuck at 0.089% since round 3, time is fine;
+user is 2/5 satisfied there.
 
-## Decisions, each backed by what we measured
+**State:** 44/44 tests both modes. Round-15 bench: 15/17 original fixtures
+optimal at pinned seed (pr1002 SOLVED 259045), suite ~50 s, no original row
+loses to LKH RUNS=1 on both axes; fl1577 22256 < LKH's 22262 at 7x its speed;
+rl11849 probe 0.800%/160 s vs LKH optimum in 1287.6 s. Tree uncommitted.
 
-1. **Alpha generation rewritten to O(n^2)** (was O(n^2 x depth^2), up to O(n^4) on
-   chain MSTs). Evidence: 36 s of fl1577's 38 s candidate build was `maxMstEdgeOnPath`'s
-   nested ancestor walk per node pair. Now one BFS per row over MST CSR adjacency
-   (`fillTreeBottleneck`/`rowAlphaScore`). Verified bit-identical candidates (same
-   lengths AND same search-node counts).
+**First step for a new agent:** roadmap item 0 (setup), then item 1
+(instrumentation). Do not skip to the fun items — every change below item 1
+gets accepted or rejected against its counters.
 
-2. **LKH backtracking discipline** (`lk_backtrack_depth`, null = auto): sibling
-   alternatives only at chain levels 1-2, first-viable commit below; exhaustive below
-   n=400. Evidence: full-width DFS exploded on clustered geometry (fl417 guided
-   descents 174k nodes each vs pcb442 33k; long removed edges make the gain bound
-   prune nothing); depth-2 everywhere lost rat195/lin318 optima, exhaustive below 400
-   restored them. Depth 3 tested: no better. Extension-phase trials always use the
-   cheap discipline (lin318 1.20 -> 0.91 s).
+## Quick regression protocol (after EVERY major change)
 
-3. **Guided restarts (LKH ChooseInitialTour C/D/E) at every size** + IPT merge
-   adoption. Evidence: removing the old n<512 gate took u574 0.547% -> optimal and
-   fl1577 1.95% -> 0.045%. Divergence budget 12 with 3/4 follow-ref throttle for
-   light-descent sizes; full descent + prev-best second reference below n=300.
+Run these 3 via commiv-profile (build line in Verification), ~35 s total.
+Do NOT include the 20k row here — it is too slow for a tight loop.
 
-4. **Stagnation-based trial extension** (`trial_extension_factor`; bench: 4, 2 for
-   n>=1000). Evidence: every gapped row was still improving at the `trials = n`
-   cutoff (rd400's best tour arrived on its final trial; optimal rows converged by
-   trial ~50). Extension took pcb442/att532 to optimal. The window (= n trials of
-   staleness) is irreducible insurance: pcb442's optimum arrives mid-extension with
-   pre-extension stats strictly staler than lin318's fruitless tail — any rule that
-   trims lin318 provably breaks pcb442. Latency-bound callers set factor 0.
+| Row | Command env | Expectation |
+|---|---|---|
+| rat575 | PROF_PATH=vendor/tsplib/rat575.tsp PROF_EXT=4 | BIT-IDENTICAL (len 6779, best_trial 459) — sub-1000 canary; any drift = you broke the IPT side |
+| pr1002 | PROF_PATH=vendor/tsplib/pr1002.tsp PROF_EXT=2 | len 259045 at seed 12345, ~12 s — the accuracy headline; must not regress |
+| fl1577 | PROF_PATH=vendor/tsplib/fl1577.tsp PROF_EXT=2 | len <= 22262 (beat LKH), time toward the 5 s target (now 20 s) |
 
-5. **Plateau kicks (zero-delta 2-opt drift), extension phase only.** Evidence:
-   tour-diff vs LKH optimal tours showed residuals are NOT a missing k-opt move —
-   rat575 differs in 67 edges across 59 sections of size <= 2 (pr1002: 91/83);
-   degenerate geometries put local optima on cost-equal plateaus where the better
-   micro-variant only pays after a neighboring section also changes. Length-preserving
-   drift walks the plateau for free; it closed rd400 to optimal. More drift shapes
-   (Or-opt/3-opt) are ON HOLD pending EAX (see below).
+Pinned seed for the loop; before declaring a round done, re-check the touched
+rows at seeds {12345, 7, 99} (four pinned-seed mirages in rounds 11-15) and
+run the full bench: `taskset -c 0 nice -n 10 zig build bench -Doptimize=ReleaseFast`.
 
-6. **Dropped permanently, with reasons:**
-   - *Hash revisited-tour cutoff*: memory is fine (fixed ~1 MB table), but LKH's
-     cutoff fires mid-descent and saves little in our light-descent architecture —
-     and it actively fights plateau drift (abandons descents that pass through seen
-     tours en route to new ones).
-   - *5-opt enumeration*: tour-diff proved there is no missing-move target; high
-     complexity; would tax all rows. Out of scope.
-   - *ML/neural*: user decision; only credible slot would be learned candidate
-     generation (NeuroLKH-style), which stays pluggable if ever revisited.
-   - Measured dead knobs (do not retry): lk_max_depth 6-8 (noisy, slower),
-     uniform extension factor 4 at n>=1000 (pr1002 +7 s for nothing), guided
-     cadence 8 below n=800, divergence cap 24, kick-escalation-through-guided.
+## Roadmap (execution order — agreed with user 2026-06-12)
 
-7. **Tour representation roadmap (consolidation rule applies):** flat array is right
-   up to ~2k nodes (flips are 1-3% of runtime). Beyond: ONE counted B-tree with lazy
-   reversal flags, fanout as the dial (B=sqrt(n), height 2 = the classic two-level
-   list; B~128, height 3 = millions of nodes). Chosen over splay trees: query-dominant
-   workload (10-100 queries per update), splay reads mutate the tree, B-tree reads are
-   cache-friendly pure reads with deterministic worst case and reader-friendly
-   concurrency. Literature (Fredman/Johnson/McGeoch/Ostheimer 1995): arrays to ~1k,
-   two-level to ~1e5, splay only past 1e5-1e6 — and memory latency has worsened since.
-   When the B-tree lands it must REPLACE both the flat path and the segment-backed
-   TourView fallback (A-and-sometimes-B rule: keep only the general structure).
+| # | Build | Est. time win | Est. acc win | Key constraint / design note |
+|---|---|---|---|---|
+| 0 | SETUP: 20k bench row — `curl -sL -o vendor/tsplib/d18512.tsp https://raw.githubusercontent.com/mastqe/tsplib/master/d18512.tsp` (n=18512, EUC_2D, optimum 645238); probe-budget fixture like rl11849 (headline_only, fixed_trials); raise bench/profile max_dimension to 20_000 | none | none | distance matrix would be 1.37 GB on a 7 GB box — run with candidate-based distances or accept the squeeze until item 6 lands |
+| 1 | Per-trial cost counters (distance lookups, O(n) passes, flip ops, LK node ops; pr1002/fl1577/rl11849) | none (gate for 2, 6, 8) | none | everything below is accepted/rejected against these numbers |
+| 2 | Incremental bookkeeping: undo-log kicks instead of O(n) memcpy, delta-maintained tour length, no per-trial full-array passes | 2-4x at n>=1k, grows with n | none | pure waste removal, zero acc risk; main lever for the 15 s / 5 s targets |
+| 3 | Voting-freeze (Boyer-Moore/Misra-Gries, k=2 counter slots per node): each merge-gated trial votes its 2 neighbors per node; freeze edge when BOTH endpoints' counters >= threshold; constructions follow frozen edges, LK must not break them | 1.5-3x on degenerate rows | medium (pr1002/rat575/rl11849 class — the rat575 unlock candidate) | FREEZE THE GENERATOR, NEVER THE COMBINER (EAX/IPT must cut through frozen regions — joint section moves are the measured pr1002 mechanism); counters auto-thaw on disagreement = built-in confidence dial; vote only on gated trials; threshold needs measurement (stream is kick-correlated, counters inflate) |
+| 4 | Diversity-aware pool replacement (HGS biased fitness: rank by cost + diversity contribution via symdiff; never evict best) | small | medium on long runs / big n | v1 replace-worst WILL clone-collapse at scale; symdiff machinery already computes the metric |
+| 5 | Pool-pair crossover restarts (seed occasional trials from the EAX product of two pool members) | none | small-medium | true EAX-GA generational step; machinery exists |
+| 6 | On-the-fly distances at n>=10k (drop the big matrix) | 1.5-3x at n>=10k | none | every matrix lookup is a DRAM miss; candidate-distance option half-exists; unblocks the 20k row properly |
+| 7 | FUTURE (100k+ tier): sparse ascent / POPMUSIC candidates | kills O(n^2) build at n>=20k | none | prerequisite for 100k+, which is out of scope for now |
+| 8 | FUTURE (100k+ tier): B-tree tour representation | ~2-3% at n=11849 — not yet | none | flips are ~3% of trial cost (segment two-level rep active at n>=512); build only when item-1 counters show flips >= 10% (projected ~1e5 nodes) |
+| 9 | Multithreaded independent trial streams into one elite pool | ~cores x | medium (best-of-streams) | LAST (user doctrine); converts seed variance into accuracy; LKH is single-threaded |
+| 10 | ATSP via Jonker-Volgenant 2n transform (problem.zig layer) | none (costs 2-4x on asymmetric inputs) | none | capability only; deferred until VRP work |
 
-8. **Next build: EAX-lite (single AB-cycle crossover), replacing IPT.** Rationale:
-   the proven failure mode is scattered sections that only pay JOINTLY; IPT by
-   construction only swaps independently-shorter contiguous sections; an AB-cycle
-   applies interleaved bundles atomically and harvests profit even from equal-length
-   plateau-sibling trials (which IPT discards). Subsumption: a contiguous section
-   swap is exactly one non-splitting AB-cycle, so EAX-1AB covers IPT's move set —
-   after bench parity is verified, DELETE IPT (structure count stays flat).
-   Design: build symmetric-difference adjacency trial-vs-incumbent (O(n), degree<=4),
-   extract AB-cycles, apply best negative-delta cycle, repair subtours with the
-   existing two-component patching, polish boundaries, accept on improvement; same
-   gating as IPT today. ~200-300 lines.
-   Pipeline roles after it lands: zero-delta drift = plateau SAMPLER (generator),
-   EAX = COMBINER. Both stages are needed; they are not redundant.
+## Measured do-not-retry (each cost a round to learn)
 
-9. **Expected cost of EAX-lite + drift (estimate, not measured):** drift is already
-   in the tree and paid for. EAX-1AB adds an O(n) attempt per merge slot (~10-30 us,
-   x500-3000 attempts/run) plus a light polish per win — roughly +2-5% on typical
-   rows, worst ~10-15% on extension-heavy big rows (pr1002/fl1577); partially or
-   fully offset where earlier optima close the stagnation window sooner (rd400
-   pattern). The magnitude-level lead over LKH is not at risk.
+| Rejected | Evidence |
+|---|---|
+| Any stopping rule cutting the n-trial staleness window | improvement gaps heavy-tailed (up to 11x prior max); factor-8 patience cost rat195 4/6->2/6, fl417 5/6->2/6 across seeds |
+| EAX merging below n=1000 (any variant: single/multi-ref, gain/smallest-first, adoption tweaks) | reshuffles knife-edge optima, +10% time; IPT verbatim is strictly better there |
+| EAX without incumbent adoption, or adoption without staleness resets | loses lin318/rd400/pcb442/u574-class optima |
+| Non-splitting-only EAX (no bridge repair) | loses lin318/rd400/pcb442 |
+| Candidate width 6 at n>=1000 | strictly worse than both 5 and 8 |
+| Base-phase plateau drift at n>=1000 | pinned-seed mirage; fl1577 22264->22537 at seed 7 |
+| Pool-sourced kicks | dilutes intensification (round 4) |
+| 5-opt enumeration, hash revisited-tour cutoff, ML candidates | rounds 6-10 decisions; see git history + memory |
+| Identical-trial-streak convergence signal | guided restarts interleave divergent tours every ~4 trials; max streak ~14 |
+| Single-seed gating of any change | four pinned-seed mirages in rounds 11-15; always check seeds {12345, 7, 99} |
 
-10. **Real-life direction** (benchmarks are only a canary): constraints via distance
-    matrix manipulation + penalty hooks (the LKH-3 recipe), eventually an HGS-style
-    VRP layer with our core optimizing the giant tour. Multithreading only at the
-    very end (independent trial streams + crossover merging, default threads=1).
-    CGAL: deprecate the dependency (no measured benefit). GEO metric still
-    unsupported; the n^2 distance cache must yield to candidate-based distances
-    beyond ~10-20k nodes (option already exists).
+## Verification
 
-11. **Deferred cleanups for solver.zig (~5k lines, do NOT trim mid-build):** split
-    inline tests (~1.4k lines) into a test module; modularize candidates/IPT(EAX)/
-    constructions; delete farthestInsertionTour (near-unreachable), the dead
-    chain-nonseq bridge path (zero accepts in every mode), default-off move-patching
-    machinery, and the CGAL path when deprecation lands.
+| What | Command |
+|---|---|
+| Tests | `zig build test` and `zig build test -Doptimize=ReleaseFast` (44) |
+| Full bench (multi-seed headline + rl11849 probe row) | `taskset -c 0 nice -n 10 zig build bench -Doptimize=ReleaseFast` — NEVER run anything else concurrently |
+| Single instance | `commiv-profile` via env PROF_PATH/PROF_TRIALS/PROF_EXT/PROF_SEED/PROF_WIDTH(0=auto)/PROF_TOUR_OUT; build: `zig build-exe -O ReleaseFast --name commiv-profile --dep commiv -Mroot=examples/profile.zig --dep build_options -Mcommiv=src/root.zig -Mbuild_options=<stub: pub const with_cgal = false;>` |
+| LKH baseline | binary `.zig-cache/lkh-bench/LKH`, par pattern `/tmp/lkh-runs/*.par`, optimal tours `.zig-cache/lkh-tours/*.tour` (incl. rl11849) |
+| Canary rule | sub-1000 rows must stay bit-identical (IPT side); lengths reproduce exactly, times are +-15% noise |
 
-## How to verify any change
-
-- `zig build test` and `zig build test -Doptimize=ReleaseFast` (41 tests).
-- `taskset -c 0 nice -n 10 zig build bench -Doptimize=ReleaseFast` — compare all 17
-  rows against README's table; fresh-cache final runs via `--cache-dir`.
-- Single-instance work: `examples/profile.zig` (env: PROF_PATH, PROF_TRIALS,
-  PROF_EXT, PROF_DEPTH, PROF_BTDEPTH, PROF_TOUR_OUT; build line in memory notes).
-  PROF_TOUR_OUT + the awk edge-diff is how the plateau diagnosis was made.
-- LKH baseline: binary at .zig-cache/lkh-bench/LKH, par/logs pattern in /tmp/lkh-runs,
-  optimal tours in .zig-cache/lkh-tours/*.tour (also feed bench coverage rows).
-- Single fixed seed (12345): treat one-row deltas as noise unless they reproduce.
+Deferred cleanups (do NOT trim mid-build): split solver.zig inline tests,
+modularize candidates/EAX/constructions, delete farthestInsertionTour + dead
+chain-nonseq bridge path + default-off move-patching machinery, drop CGAL.

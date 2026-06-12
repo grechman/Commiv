@@ -14,7 +14,7 @@ pub fn main(init: std.process.Init) !void {
     var diag: commiv.ParseDiagnostic = .{};
     var p = try commiv.parseTsplib(allocator, bytes, .{
         .diagnostic = &diag,
-        .max_dimension = 10_000,
+        .max_dimension = 16_000,
         .max_matrix_weights = 25_000_000,
     });
     defer p.deinit();
@@ -26,13 +26,18 @@ pub fn main(init: std.process.Init) !void {
     const btdepth_arg = init.environ_map.get("PROF_BTDEPTH") orelse "";
     const depth_arg = init.environ_map.get("PROF_DEPTH") orelse "5";
     const ext_arg = init.environ_map.get("PROF_EXT") orelse "0";
+    const seed_arg = init.environ_map.get("PROF_SEED") orelse "12345";
+    const width_arg = init.environ_map.get("PROF_WIDTH") orelse "0";
 
     const start_ns = monotonicNanos();
     var result = try commiv.solve(allocator, &p, .{
-        .seed = 12345,
+        .seed = try std.fmt.parseInt(u64, seed_arg, 10),
         .trials = trials,
         .trial_extension_factor = try std.fmt.parseInt(usize, ext_arg, 10),
-        .candidate_count = 8,
+        .candidate_count = blk: {
+            const w = try std.fmt.parseInt(usize, width_arg, 10);
+            break :blk if (w != 0) w else if (n >= 1000) @as(usize, 5) else @as(usize, 8);
+        },
         .candidate_mode = .alpha_nearness,
         .max_passes = 64,
         .enable_lk = true,
@@ -43,7 +48,7 @@ pub fn main(init: std.process.Init) !void {
     });
     defer result.deinit();
     const elapsed = monotonicNanos() - start_ns;
-    std.debug.print("{s} n={} trials={} len={} time={d:.0}ms nodes={} best_trial={}\n", .{ p.name, n, trials, result.length, @as(f64, @floatFromInt(elapsed)) / 1e6, result.stats.lk_search_nodes, result.stats.best_trial });
+    std.debug.print("{s} n={} trials={} len={} time={d:.0}ms nodes={} best_trial={} max_prog_gap={} final_prog_gap={} worst_ratio={}\n", .{ p.name, n, trials, result.length, @as(f64, @floatFromInt(elapsed)) / 1e6, result.stats.lk_search_nodes, result.stats.best_trial, result.stats.eax_max_progress_gap, result.stats.eax_final_progress_gap, result.stats.eax_worst_gap_ratio_x100 });
 
     if (init.environ_map.get("PROF_TOUR_OUT")) |out_path| {
         var buf: [64]u8 = undefined;

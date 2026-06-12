@@ -21,6 +21,11 @@ const TsplibFixture = struct {
     path: []const u8,
     tour_path: []const u8,
     optimum: u64,
+    // Probe-budget rows for very large instances: run only the headline mode,
+    // single seed, fixed trial count, no extension. The row tracks progress
+    // across rounds; a full dimension-scaled budget would take hours.
+    headline_only: bool = false,
+    fixed_trials: ?usize = null,
 };
 
 const modes = [_]Mode{
@@ -41,7 +46,7 @@ const tsplib_matrix_modes = [_]Mode{
     // stagnation-based extension so runs that are still improving at the
     // dimension budget keep going (the backtracking discipline made trials
     // several times cheaper than the budget convention assumes).
-    .{ .name = "alpha-w8-kick", .enable_lk = true, .candidate_mode = .alpha_nearness, .candidate_count = 8, .dimension_trials_scale = 1, .max_passes = 64, .lk_backtrack_limit = 80_000, .extend_trials = true },
+    .{ .name = "alpha-w8-kick", .enable_lk = true, .candidate_mode = .alpha_nearness, .dimension_trials_scale = 1, .max_passes = 64, .lk_backtrack_limit = 80_000, .extend_trials = true },
 };
 
 const fixtures = [_]TsplibFixture{
@@ -62,12 +67,13 @@ const fixtures = [_]TsplibFixture{
     .{ .name = "d657", .path = "vendor/tsplib/d657.tsp", .tour_path = ".zig-cache/lkh-tours/d657.tour", .optimum = 48912 },
     .{ .name = "pr1002", .path = "vendor/tsplib/pr1002.tsp", .tour_path = ".zig-cache/lkh-tours/pr1002.tour", .optimum = 259045 },
     .{ .name = "fl1577", .path = "vendor/tsplib/fl1577.tsp", .tour_path = ".zig-cache/lkh-tours/fl1577.tour", .optimum = 22249 },
+    .{ .name = "rl11849", .path = "vendor/tsplib/rl11849.tsp", .tour_path = ".zig-cache/lkh-tours/rl11849.tour", .optimum = 923288, .headline_only = true, .fixed_trials = 400 },
 };
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
-    std.debug.print("instance,dimension,mode,trials,candidate_count,length,optimum,gap_percent,time_ms,lk_moves,bounded_three_opt_cleanup_moves,bounded_three_opt_cleanup_attempts,lk_search_nodes,max_depth_reached,lk_nonseq_attempts,lk_nonseq_accepted,lk_nonseq_rejected,lk_nonseq_deepest_accepted_depth,chain_nonseq_d3_attempts,chain_nonseq_d3_accepted,chain_nonseq_d3_gain_rejected,chain_nonseq_d3_apply_rejected,chain_nonseq_d4_attempts,chain_nonseq_d4_accepted,chain_nonseq_d4_gain_rejected,chain_nonseq_d4_apply_rejected,chain_nonseq_d5p_attempts,chain_nonseq_d5p_accepted,chain_nonseq_d5p_gain_rejected,chain_nonseq_d5p_apply_rejected,lk_completion_attempts,lk_completion_accepted,lk_completion_2opt_hits,lk_completion_3opt_hits,lk_completion_patch_hits,lk_completion_rejected,candidate_nearest_edges,candidate_alpha_edges,candidate_geometric_edges,candidate_patch_edges,move_plan_attempts,move_plan_direct_applies,move_plan_invalid_fallbacks,move_plan_multi_component_fallbacks,move_plan_apply_fallbacks,move_plan_fallback_successes,move_plan_patch_attempts,move_plan_patch_hits,move_plan_patch_rejected,ipt_merge_attempts,ipt_merge_transcriptions,ipt_merge_wins,guided_trials,guided_polishes,best_trial,guided_search_nodes,merge_search_nodes\n", .{});
+    std.debug.print("instance,dimension,mode,seed,trials,candidate_count,length,optimum,gap_percent,time_ms,lk_moves,bounded_three_opt_cleanup_moves,bounded_three_opt_cleanup_attempts,lk_search_nodes,max_depth_reached,lk_nonseq_attempts,lk_nonseq_accepted,lk_nonseq_rejected,lk_nonseq_deepest_accepted_depth,chain_nonseq_d3_attempts,chain_nonseq_d3_accepted,chain_nonseq_d3_gain_rejected,chain_nonseq_d3_apply_rejected,chain_nonseq_d4_attempts,chain_nonseq_d4_accepted,chain_nonseq_d4_gain_rejected,chain_nonseq_d4_apply_rejected,chain_nonseq_d5p_attempts,chain_nonseq_d5p_accepted,chain_nonseq_d5p_gain_rejected,chain_nonseq_d5p_apply_rejected,lk_completion_attempts,lk_completion_accepted,lk_completion_2opt_hits,lk_completion_3opt_hits,lk_completion_patch_hits,lk_completion_rejected,candidate_nearest_edges,candidate_alpha_edges,candidate_geometric_edges,candidate_patch_edges,move_plan_attempts,move_plan_direct_applies,move_plan_invalid_fallbacks,move_plan_multi_component_fallbacks,move_plan_apply_fallbacks,move_plan_fallback_successes,move_plan_patch_attempts,move_plan_patch_hits,move_plan_patch_rejected,eax_merge_attempts,eax_merge_cycles,eax_merge_wins,guided_trials,guided_polishes,best_trial,guided_search_nodes,merge_search_nodes\n", .{});
     try runGeneratedInstance(allocator, "clustered80", 80);
     try runGeneratedInstance(allocator, "clustered160", 160);
     try runTsplibFixtures(allocator, init.io);
@@ -81,7 +87,7 @@ fn runGeneratedInstance(allocator: std.mem.Allocator, name: []const u8, n: usize
     var p = try commiv.Problem.initCoords(allocator, name, .euc_2d, coords);
     defer p.deinit();
 
-    try runProblem(allocator, &p, null);
+    try runProblem(allocator, &p, null, null);
 }
 
 fn runTsplibFixtures(allocator: std.mem.Allocator, io: std.Io) !void {
@@ -99,7 +105,7 @@ fn runTsplibFixtures(allocator: std.mem.Allocator, io: std.Io) !void {
         var diag: commiv.ParseDiagnostic = .{};
         var p = commiv.parseTsplib(allocator, bytes, .{
             .diagnostic = &diag,
-            .max_dimension = 10_000,
+            .max_dimension = 16_000,
             .max_matrix_weights = 25_000_000,
         }) catch |err| {
             std.debug.print("# failed fixture: {s} line {} {s}\n", .{ fixture.name, diag.line, diag.message });
@@ -111,7 +117,7 @@ fn runTsplibFixtures(allocator: std.mem.Allocator, io: std.Io) !void {
             return error.InvalidFixtureName;
         }
         try reportCandidateCoverage(allocator, io, &p, fixture);
-        try runProblem(allocator, &p, fixture.optimum);
+        try runProblem(allocator, &p, fixture.optimum, fixture);
         loaded += 1;
     }
     if (loaded == 0) std.debug.print("# no TSPLIB fixtures loaded; add .tsp files under vendor/tsplib to enable gap benchmarks\n", .{});
@@ -181,27 +187,47 @@ fn candidateRowContains(row: []const usize, node: usize) bool {
     return false;
 }
 
-fn runProblem(allocator: std.mem.Allocator, p: *const commiv.Problem, optimum: ?u64) !void {
-    for (modes) |mode| try runMode(allocator, p, optimum, mode);
-    if (optimum != null) {
-        for (tsplib_matrix_modes) |mode| try runMode(allocator, p, optimum, mode);
+// The headline mode runs three seeds: single-seed rows misranked variants
+// four times in rounds 11-14 (knife-edge optima flip on trajectory luck).
+// The remaining modes are diagnostics and stay single-seed.
+const headline_seeds = [_]u64{ 12345, 7, 99 };
+
+fn runProblem(allocator: std.mem.Allocator, p: *const commiv.Problem, optimum: ?u64, fixture: ?TsplibFixture) !void {
+    const probe = fixture != null and fixture.?.headline_only;
+    if (!probe) {
+        for (modes) |mode| try runMode(allocator, p, optimum, mode, 12345, null);
     }
-    if (commiv.solver.cgal_available) try runMode(allocator, p, optimum, cgal_mode);
+    if (optimum != null) {
+        for (tsplib_matrix_modes) |mode| {
+            if (!mode.extend_trials) {
+                if (!probe) try runMode(allocator, p, optimum, mode, 12345, null);
+                continue;
+            }
+            if (probe) {
+                try runMode(allocator, p, optimum, mode, 12345, fixture.?.fixed_trials);
+            } else {
+                for (headline_seeds) |seed| try runMode(allocator, p, optimum, mode, seed, null);
+            }
+        }
+    }
+    if (!probe and commiv.solver.cgal_available) try runMode(allocator, p, optimum, cgal_mode, 12345, null);
 }
 
-fn runMode(allocator: std.mem.Allocator, p: *const commiv.Problem, optimum: ?u64, mode: Mode) !void {
+fn runMode(allocator: std.mem.Allocator, p: *const commiv.Problem, optimum: ?u64, mode: Mode, seed: u64, fixed_trials: ?usize) !void {
     const n = p.dimension;
-    const trials = if (mode.dimension_trials_scale > 0) n * mode.dimension_trials_scale else mode.trials orelse if (n >= 500) @as(usize, 4) else @as(usize, 8);
-    const candidate_count = mode.candidate_count orelse if (n >= 500) @as(usize, 8) else @as(usize, 4);
+    const trials = fixed_trials orelse if (mode.dimension_trials_scale > 0) n * mode.dimension_trials_scale else mode.trials orelse if (n >= 500) @as(usize, 4) else @as(usize, 8);
+    const candidate_count = mode.candidate_count orelse if (mode.extend_trials)
+        (if (n >= 1000) @as(usize, 5) else @as(usize, 8))
+    else if (n >= 500) @as(usize, 8) else @as(usize, 4);
     const max_passes = mode.max_passes orelse if (n >= 500) @as(usize, 48) else @as(usize, 80);
     const lk_backtrack_limit = mode.lk_backtrack_limit orelse if (n >= 500) @as(usize, 60_000) else @as(usize, 80_000);
     const start_ns = monotonicNanos();
     // Very large instances pay several ms per trial and keep finding
     // hairline improvements; factor 2 buys the same quality as 4 there at
     // half the extension cost.
-    const trial_extension_factor: usize = if (!mode.extend_trials) 0 else if (n >= 1000) 2 else 4;
+    const trial_extension_factor: usize = if (!mode.extend_trials or fixed_trials != null) 0 else if (n >= 1000) 2 else 4;
     var result = try commiv.solve(allocator, p, .{
-        .seed = 12345,
+        .seed = seed,
         .trials = trials,
         .trial_extension_factor = trial_extension_factor,
         .candidate_count = candidate_count,
@@ -227,10 +253,11 @@ fn runMode(allocator: std.mem.Allocator, p: *const commiv.Problem, optimum: ?u64
     const d5p_gain_rejected = sumTail(result.stats.lk_chain_nonseq_depth_gain_rejected, 5);
     const d5p_apply_rejected = sumTail(result.stats.lk_chain_nonseq_depth_apply_rejected, 5);
 
-    std.debug.print("{s},{},{s},{},{},{},{},{d:.3},{d:.3},{},{},{},{},{},{},{},{},{}", .{
+    std.debug.print("{s},{},{s},{},{},{},{},{},{d:.3},{d:.3},{},{},{},{},{},{},{},{},{}", .{
         p.name,
         n,
         mode.name,
+        seed,
         result.stats.trials,
         result.stats.candidate_count,
         result.length,
@@ -281,9 +308,9 @@ fn runMode(allocator: std.mem.Allocator, p: *const commiv.Problem, optimum: ?u64
         result.stats.move_plan_patch_attempts,
         result.stats.move_plan_patch_hits,
         result.stats.move_plan_patch_rejected,
-        result.stats.ipt_merge_attempts,
-        result.stats.ipt_merge_transcriptions,
-        result.stats.ipt_merge_wins,
+        result.stats.eax_merge_attempts,
+        result.stats.eax_merge_cycles,
+        result.stats.eax_merge_wins,
         result.stats.guided_trials,
         result.stats.guided_polishes,
         result.stats.best_trial,

@@ -22,11 +22,11 @@ For larger instances, `solve` runs deterministic multi-start heuristic search:
 - bounded 3-edge cleanup
 - iterated local search: double-bridge kicks from the incumbent with staleness escalation
 - guided restarts ported from LKH `ChooseInitialTour` (alpha-zero backbone construction)
-- IPT tour merging (LKH `MergeWithTour`) of trial tours against the incumbent
+- size-gated tour merging: IPT (LKH `MergeWithTour`) below n=1000 where the tuned ILS dynamics dominate, EAX-lite (single AB-cycle edge assembly crossover with candidate-bridge subtour repair, multi-reference pool) at n>=1000 where recombination breadth wins
 - `TourView` abstraction over flat and segment-backed tour views
 - `MovePlan` validation for edge-delta application and two-component patching
 
-Fourteen of the seventeen TSPLIB fixtures solve to the known optimum in the headline `alpha-w8-kick` mode; fl1577 matches LKH's RUNS=1 tour at a third of its time and lin318 beats it. The remaining gaps are d657 0.008%, rat575 0.089%, pr1002 0.38% (see the table below).
+Fifteen of the seventeen original TSPLIB fixtures solve to the known optimum in the headline `alpha-w8-kick` mode at the pinned seed — including pr1002, the long-standing weak row — and fl1577 still beats LKH's RUNS=1 tour, now at a seventh of its time. The remaining pinned-seed gaps are d657 0.008%, fl1577 0.031%, rat575 0.089%. The headline mode now runs three seeds so knife-edge variance is visible instead of hidden (see the table below).
 
 ## Requirements
 
@@ -142,32 +142,36 @@ Command:
 taskset -c 0 nice -n 10 zig build bench -Doptimize=ReleaseFast
 ```
 
-Machine-local result from 2026-06-11, one CPU core, headline `alpha-w8-kick` mode (fresh-cache build), side by side with LKH-3.0.13 `RUNS=1` on the same machine and core class:
+Machine-local result from 2026-06-12 (round 15), one CPU core, headline `alpha-w8-kick` mode at seed 12345 (size-gated IPT/EAX merging, elite pool + candidate width 5 at n>=1000), side by side with LKH-3.0.13 `RUNS=1` on the same machine and core class. The bench additionally runs seeds 7 and 99 for this mode (CSV `seed` column):
 
 | Instance | n | commiv Length | Gap | Time | LKH Length | LKH Gap | LKH Time |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | berlin52 | 52 | 7542 | 0.000% | 69 ms | 7542 | 0.000% | 0.01 s |
 | eil76 | 76 | 538 | 0.000% | 22 ms | 538 | 0.000% | 0.02 s |
-| kroA100 | 100 | 21282 | 0.000% | 126 ms | 21282 | 0.000% | 0.04 s |
-| bier127 | 127 | 118282 | 0.000% | 351 ms | 118282 | 0.000% | 0.07 s |
-| rat195 | 195 | 2323 | 0.000% | 152 ms | 2323 | 0.000% | 0.72 s |
-| ts225 | 225 | 126643 | 0.000% | 622 ms | 126643 | 0.000% | 0.44 s |
-| a280 | 280 | 2579 | 0.000% | 344 ms | 2579 | 0.000% | 0.57 s |
-| lin318 | 318 | 42029 | 0.000% | 0.91 s | 42143 | 0.271% | 0.80 s |
-| rd400 | 400 | 15281 | 0.000% | 1.05 s | 15281 | 0.000% | 0.60 s |
-| fl417 | 417 | 11861 | 0.000% | 3.32 s | 11861 | 0.000% | 10.29 s |
-| pcb442 | 442 | 50778 | 0.000% | 0.61 s | 50778 | 0.000% | 2.91 s |
-| att532 | 532 | 27686 | 0.000% | 1.99 s | 27686 | 0.000% | 8.82 s |
-| u574 | 574 | 36905 | 0.000% | 4.98 s | 36905 | 0.000% | 4.80 s |
-| rat575 | 575 | 6779 | 0.089% | 0.87 s | 6773 | 0.000% | 2.07 s |
-| d657 | 657 | 48916 | 0.008% | 2.63 s | 48912 | 0.000% | 2.49 s |
-| pr1002 | 1002 | 260033 | 0.381% | 10.95 s | 259045 | 0.000% | 2.96 s |
-| fl1577 | 1577 | 22262 | 0.058% | 43.1 s | 22262 | 0.058% | 145.66 s |
+| kroA100 | 100 | 21282 | 0.000% | 128 ms | 21282 | 0.000% | 0.04 s |
+| bier127 | 127 | 118282 | 0.000% | 348 ms | 118282 | 0.000% | 0.07 s |
+| rat195 | 195 | 2323 | 0.000% | 151 ms | 2323 | 0.000% | 0.72 s |
+| ts225 | 225 | 126643 | 0.000% | 618 ms | 126643 | 0.000% | 0.44 s |
+| a280 | 280 | 2579 | 0.000% | 342 ms | 2579 | 0.000% | 0.57 s |
+| lin318 | 318 | 42029 | 0.000% | 0.92 s | 42143 | 0.271% | 0.80 s |
+| rd400 | 400 | 15281 | 0.000% | 1.06 s | 15281 | 0.000% | 0.60 s |
+| fl417 | 417 | 11861 | 0.000% | 3.30 s | 11861 | 0.000% | 10.29 s |
+| pcb442 | 442 | 50778 | 0.000% | 0.60 s | 50778 | 0.000% | 2.91 s |
+| att532 | 532 | 27686 | 0.000% | 2.06 s | 27686 | 0.000% | 8.82 s |
+| u574 | 574 | 36905 | 0.000% | 5.06 s | 36905 | 0.000% | 4.80 s |
+| rat575 | 575 | 6779 | 0.089% | 0.96 s | 6773 | 0.000% | 2.07 s |
+| d657 | 657 | 48916 | 0.008% | 2.67 s | 48912 | 0.000% | 2.49 s |
+| pr1002 | 1002 | 259045 | 0.000% | 12.0 s | 259045 | 0.000% | 2.96 s |
+| fl1577 | 1577 | 22256 | 0.031% | 20.0 s | 22262 | 0.058% | 145.66 s |
+| rl11849 | 11849 | 930671 | 0.800% | 160 s (400-trial probe) | 923288 | 0.000% | 1287.6 s |
 
 Current read:
 
-- 14 of 17 instances reach the known optimum. lin318 beats this LKH run outright (LKH missed the optimum at RUNS=1); fl1577 produces the identical tour length at a third of LKH's time; pcb442, att532, fl417, rat195 are optimal at 3-5x LKH's speed.
-- Residual gaps: d657 0.008% (4 length units), fl1577 0.058% (= LKH), rat575 0.089%, pr1002 0.381%. pr1002 is the only instance losing to LKH on both axes.
+- 15 of the 17 original instances reach the known optimum at the pinned seed, including pr1002 (259045 — previously the only row losing to LKH on both axes). fl1577 beats LKH's tour (22256 vs 22262) at a seventh of its time; lin318 beats LKH outright. Total pinned-seed suite time is ~50 s, the fastest state yet. Multi-seed columns show the knife-edge variance openly (e.g. lin318 optimal on 2 of 3 seeds).
+- 2026-06-12, round 15 (the four standing gaps, one round): (1) the headline mode now runs seeds {12345, 7, 99} (`seed` CSV column) — single-seed rows misranked variants four times in rounds 11-14; (2) an elite pool (capacity 6, exact-duplicate dedupe, replace-worst) supplies the EAX merge references at n>=1000, replacing the shadow/best/prev trio — pr1002 mean across seeds improved ~325 units and fl1577 got ~17% faster (kicks still come from the single incumbent; pool-sourced kicks remain measured-dead); (3) candidate width drops to 5 at n>=1000 (LKH's own default), halving big-row trial cost and solving pr1002 at the pinned seed — the trade is fl1577's thinner optimal-edge coverage, so its seeds 7/99 land just above LKH's tour while staying 7-9x faster; (4) rl11849 (n=11849, optimum 923288) is a standing probe-budget row (400 trials, single seed, headline only): 0.800% in 160 s vs LKH's optimum in 1287.6 s — LKH passes our quality ~4 minutes into its run; everything under ~3.5 minutes of wall clock is ours.
+- Residual pinned-seed gaps: d657 0.008% (4 length units), fl1577 0.031% (still below LKH's tour), rat575 0.089%, and the rl11849 probe row 0.800%. No original instance loses to LKH on both axes anymore.
+- 2026-06-12, round 14: plateau kicks gained a zero-delta Or-opt shape (segment relocation) at n>=1000, extension phase only — fl1577 48.2 -> 44.6 s at the same 22254 and pr1002 reaches its best 226 trials earlier; sub-1000 rows bit-identical. rl11849 (n=11849, optimum 923288) added under vendor/tsplib for the large-instance regime; first 200-trial probe: 0.797% gap in 110 s, still improving steadily.
+- 2026-06-12, rounds 11-13: tour merging is now size-gated. EAX-lite (single AB-cycle edge assembly crossover with candidate-bridge subtour repair and a multi-reference pool) fully replaced IPT first; it covers IPT's move set and additionally moves interleaved differing bundles atomically. Measured across six seeds, EAX-everywhere was parity-on-optima but reshuffled knife-edge rows, lengthened runs ~10% (merge wins re-arm the staleness window), and only produced durable gains in the kick-only big-instance regime (fl1577 22254 — IPT never went below 22262 — and occasionally pr1002/rat575). Four EAX variants (single/multi reference, gain-first/smallest-first application order, with/without adoption resets) all showed the same pattern, so IPT was restored verbatim below n=1000 (bit-identical round-10 trajectories) with EAX at n>=1000. Two adaptive stopping rules (identical-trial streaks; progress-gap patience) were measured and REJECTED: pinned-seed time cuts of 35-70% cost rat195/fl417 most of their winning seeds across 6 seeds — improvement gaps are heavy-tailed (up to 11x the prior maximum), so the n-trial staleness window is the insurance premium for expected accuracy. The elite-pool build is expected to replace both mergers with one structure.
 - Tour-diff analysis against LKH's optimal tours shows the residuals are not one missing k-opt move: rat575 differs from the optimum in 67 edges scattered over 59 sections of size <= 2 (pr1002: 91 edges, 83 sections). These geometries are massively degenerate; locally optimal tours sit on broad cost-equal plateaus where the better micro-variant only pays after a neighboring section also changes. Extension-phase kicks therefore add zero-delta 2-opt "plateau drift" (length-preserving reconnections), which is what closed rd400.
 - Structural fixes from 2026-06-11, after the fixture set grew to 17: (1) alpha-nearness candidate generation was O(n^2 x depth^2) per build — up to O(n^4) on chain-shaped MSTs, 36 s of fl1577's 38 s candidate build — and is now O(n^2) via per-row 1-tree bottleneck traversals (bit-identical candidates); (2) the LK recursion previously backtracked at every depth, exploding on clustered geometry where a long removed edge makes the positive-gain bound prune nothing — it now follows LKH's discipline (backtrack at levels 1-2, commit below) for n >= 400, and extension-phase trials always use the cheap discipline; (3) the fixed `trials = dimension` budget was cutting off runs that were still improving (rd400 found its best tour on its final trial) now that trials are several times cheaper — the headline mode extends trials while improvement is at most `dimension` trials old, capped at 4x (2x for n >= 1000).
 - The stagnation window is insurance: pcb442's and att532's optima arrive mid-extension with pre-extension statistics indistinguishable from lin318's (which extends fruitlessly for ~0.1 s). Cutting the window breaks those optima; latency-critical callers can set `trial_extension_factor = 0`.

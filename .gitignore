@@ -1,5 +1,6 @@
 .zig-cache/
 .zig-cache-global/
+.zig-cache-verify/
 zig-out/
 tasks/
 .grechman/
@@ -7,3 +8,4 @@ depwire-output.json
 .codex/
 CMakeFiles/
 .agents/
+.business/

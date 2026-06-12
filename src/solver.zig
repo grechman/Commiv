@@ -79,9 +79,12 @@ pub const SolveStats = struct {
     lk_completion_rejected: u64 = 0,
     bounded_three_opt_cleanup_moves: u64 = 0,
     bounded_three_opt_cleanup_attempts: u64 = 0,
-    ipt_merge_attempts: u64 = 0,
-    ipt_merge_transcriptions: u64 = 0,
-    ipt_merge_wins: u64 = 0,
+    eax_merge_attempts: u64 = 0,
+    eax_merge_cycles: u64 = 0,
+    eax_merge_wins: u64 = 0,
+    eax_max_progress_gap: u64 = 0,
+    eax_final_progress_gap: u64 = 0,
+    eax_worst_gap_ratio_x100: u64 = 0,
     guided_trials: u64 = 0,
     guided_polishes: u64 = 0,
     guided_search_nodes: u64 = 0,
@@ -941,8 +944,12 @@ pub fn solve(
     var workspace = try SolverWorkspace.init(allocator, n, max_lk_depth);
     defer workspace.deinit();
 
+    var eax = try EaxScratch.init(allocator, n);
+    defer eax.deinit();
     var ipt = try IptScratch.init(allocator, n);
     defer ipt.deinit();
+    var elite = try ElitePool.init(allocator, n);
+    defer elite.deinit();
 
     var prng = std.Random.DefaultPrng.init(options.seed);
     var random = prng.random();
@@ -976,19 +983,40 @@ pub fn solve(
     // at every size; the old n < 512 gate predates it (light repairs used to
     // explode on full-width search trees).
     const guided_max_dimension: usize = std.math.maxInt(usize);
+    // Merger size gate (measured 2026-06-12, rounds 11-12): below the gate
+    // the tuned kick/guided ILS dynamics dominate and any merger more eager
+    // than IPT degrades the pinned-seed scoreboard and run time (four EAX
+    // variants measured; each reshuffles knife-edge optima and lengthens
+    // runs through win-driven window re-arms). At and above the gate the
+    // kick-only regime starves for recombination material and EAX is
+    // strictly stronger (fl1577 22254 beats LKH's 22262; IPT never went
+    // below 22262). The elite-pool build is expected to replace both
+    // mergers with one structure (consolidation rule).
+    const eax_min_dimension: usize = 1000;
     var kick_touched: [4][6]usize = undefined;
     var kick_count: usize = 0;
-    var plateau_touched: [16]usize = undefined;
+    var plateau_touched: [24]usize = undefined;
     var plateau_count: usize = 0;
+    // Or-opt drift only at the EAX sizes: it adds a second plateau-move
+    // shape (zero-delta segment relocation — the measured residual sections
+    // on pr1002-class geometries are size <= 2, i.e. relocations, which
+    // 2-opt reversal drift cannot express). Gated so the sub-1000 rows stay
+    // bit-identical to the tuned round-10 trajectories.
+    const plateau_or_opt = n >= eax_min_dimension;
+    const plateau_stride: usize = if (plateau_or_opt) 6 else 4;
     // Exhaustive backtracking is affordable and measurably needed below 400
     // nodes; extension-phase trials are stale grinding, so they always use
     // the cheap discipline.
     const base_backtrack_depth: usize = options.lk_backtrack_depth orelse
         (if (n < 400) std.math.maxInt(usize) else @as(usize, 2));
-    // Shadow incumbent for IPT tour merging: best tour ever produced by a
+    // Shadow incumbent for EAX tour merging: best tour ever produced by a
     // merge (+ polish). Kept out of the kick/restart loop so the baseline
     // trajectory is undisturbed; folded into the result after the loop.
     var merged_len: u64 = std.math.maxInt(u64);
+    // Progress events: main-incumbent improvement OR shadow (merged_len)
+    // improvement. The adaptive stop below keys off the gap between them.
+    var last_progress_trial: usize = 0;
+    var max_progress_gap: usize = 0;
     // Previous distinct incumbent: the second reference tour for guided
     // construction (LKH's InNextBestTour). The contested sections between it
     // and the current best are exactly where constructions should explore.
@@ -997,6 +1025,14 @@ pub fn solve(
         std.math.mul(usize, trials, options.trial_extension_factor) catch trials
     else
         trials;
+    // No adaptive convergence stop: factor-8 progress-gap patience (stop when
+    // quiet 8x longer than the run's longest productive quiet, floor 64) was
+    // measured and REJECTED — at the pinned seed it cut a280/fl417/ts225
+    // time 35-70% with identical lengths, but across 6 seeds it cost rat195
+    // 2 of 4 winning seeds and fl417 3 of 5 with zero rows improving.
+    // Improvement gaps are heavy-tailed (worst must-survive gap = 11x the
+    // prior max); the n-trial window is the insurance premium for expected
+    // accuracy until the generator/combiner finds optima earlier.
     var last_improvement_trial: usize = 0;
     var trial: usize = 0;
     while (trial < max_trials and trial - last_improvement_trial < trials) : (trial += 1) {
@@ -1024,8 +1060,13 @@ pub fn solve(
             // Extension-phase kicks add plateau drift: the base budget has
             // stalled, so the remaining gap is most likely hiding behind
             // cost-equal reconnections that bridges alone revisit forever.
+            // (Arming drift during the base phase at EAX sizes was measured
+            // and rejected: pinned-seed pr1002 259706 looked great, but
+            // across seeds both big rows got strictly worse — fl1577 22264
+            // -> 22537 at seed 7. Same heavy-tail lesson as the stopping
+            // rules: base-budget trajectories stay untouched.)
             plateau_count = if (trial >= trials)
-                plateauKick(&oracle, &candidates, workspace.tour, workspace.pos, &random, 4, &plateau_touched)
+                plateauKick(&oracle, &candidates, workspace.tour, workspace.pos, &random, 4, plateau_or_opt, &plateau_touched)
             else
                 0;
         } else {
@@ -1110,7 +1151,7 @@ pub fn solve(
             for (kick_touched[0..kick_count]) |touched| {
                 for (touched) |node| search.lkActivate(node);
             }
-            for (plateau_touched[0 .. 4 * plateau_count]) |node| search.lkActivate(node);
+            for (plateau_touched[0 .. plateau_stride * plateau_count]) |node| search.lkActivate(node);
             const lk_moves = try search.improveLK(&stats, false, false);
             stats.improving_moves += lk_moves;
             // Only tours that beat the incumbent earn the expensive fallback
@@ -1171,18 +1212,18 @@ pub fn solve(
         // identical to the merge-free search, so merge gains are pure upside.
         // Gated to trials within ~3% of the incumbent so hopeless tours don't
         // pay the scan.
-        if (options.enable_lk and best_len != std.math.maxInt(u64)) {
+        if (n < eax_min_dimension and options.enable_lk and best_len != std.math.maxInt(u64)) {
             const use_merged = merged_len < best_len;
             const ref_tour: []const usize = if (use_merged) ipt.merged else workspace.best_tour;
             const ref_len = if (use_merged) merged_len else best_len;
             const trial_len = try oracle.tourLengthUnchecked(workspace.tour);
             if (trial_len <= ref_len + ref_len / 32) {
-                stats.ipt_merge_attempts += 1;
+                stats.eax_merge_attempts += 1;
                 @memcpy(ipt.tour_a, workspace.tour);
                 if (iptMergeTours(&oracle, ipt.tour_a, trial_len, ref_tour, ref_len, &ipt)) |outcome| {
-                    stats.ipt_merge_transcriptions += outcome.transcriptions;
+                    stats.eax_merge_cycles += outcome.transcriptions;
                     if (outcome.length < ref_len) {
-                        stats.ipt_merge_wins += 1;
+                        stats.eax_merge_wins += 1;
                         const merge_nodes_before = stats.lk_search_nodes;
                         if (!outcome.winner_is_a) @memcpy(ipt.tour_a, ipt.tour_b);
                         // Re-optimize only the neighborhoods around the
@@ -1228,6 +1269,96 @@ pub fn solve(
             }
         }
 
+        // EAX-lite tour merging: recombine the trial tour with the merge
+        // incumbent by applying improving AB-cycles from their symmetric
+        // difference. Subsumes the IPT section transcription it replaced (a
+        // contiguous section swap is one non-splitting AB-cycle) and
+        // additionally moves interleaved differing bundles atomically, so the
+        // merge can beat both parents even when the trial itself did not. The
+        // merge product is accumulated in a shadow incumbent (eax.merged) and
+        // folded in after the trial loop: the kick/restart trajectory stays
+        // bit-for-bit identical to the merge-free search, so merge gains are
+        // pure upside. Gated to trials within ~3% of the incumbent so
+        // hopeless tours don't pay the scan.
+        if (n >= eax_min_dimension and options.enable_lk and best_len != std.math.maxInt(u64)) {
+            const trial_len = try oracle.tourLengthUnchecked(workspace.tour);
+            // References come from the elite pool: a small population of
+            // diverse high-quality tours, each one a structurally different
+            // parent whose symmetric difference against the trial exposes
+            // different AB-cycles. A win must beat the global standard
+            // min(best, merged), not just its own reference. The member
+            // count is snapshotted because wins offer their polished
+            // products back into the pool mid-loop; lens/tours are read per
+            // iteration so a replaced slot stays a consistent pair.
+            const member_count = elite.count;
+            for (0..member_count) |pi| {
+                const ref_tour: []const usize = elite.tours[pi];
+                const ref_len = elite.lens[pi];
+                if (trial_len > ref_len + ref_len / 32) continue;
+                const standard = @min(best_len, merged_len);
+                stats.eax_merge_attempts += 1;
+                @memcpy(eax.tour_a, workspace.tour);
+                {
+                    const outcome = eaxMergeTours(&oracle, &candidates, eax.tour_a, trial_len, ref_tour, ref_len, true, &eax);
+                    stats.eax_merge_cycles += outcome.cycles_applied;
+                    if (outcome.cycles_applied > 0 and outcome.length < standard) {
+                        stats.eax_merge_wins += 1;
+                        const merge_nodes_before = stats.lk_search_nodes;
+                        if (!outcome.winner_is_a) @memcpy(eax.tour_a, eax.tour_b);
+                        // Re-optimize only the neighborhoods around the
+                        // changed edges, mirroring the kick path's
+                        // light-descent-then-polish pattern. LK is
+                        // deterministic (no RNG), so polishing the shadow
+                        // tour cannot perturb the main trajectory.
+                        var merge_search = search;
+                        merge_search.tour = eax.tour_a;
+                        merge_search.rebuildState();
+                        merge_search.lkResetActive();
+                        for (eax.boundary[0..outcome.boundary_count]) |node| merge_search.lkActivate(node);
+                        const merge_moves = try merge_search.improveLK(&stats, false, false);
+                        stats.improving_moves += merge_moves;
+                        const polish_moves = try merge_search.improveLK(&stats, false, true);
+                        stats.improving_moves += polish_moves;
+                        const merged_now = try oracle.tourLengthUnchecked(eax.tour_a);
+                        if (merged_now < merged_len) {
+                            merged_len = merged_now;
+                            @memcpy(eax.merged, eax.tour_a);
+                            const gap = trial - last_progress_trial;
+                            stats.eax_worst_gap_ratio_x100 = @max(stats.eax_worst_gap_ratio_x100, gap * 100 / @max(max_progress_gap, 32));
+                            max_progress_gap = @max(max_progress_gap, gap);
+                            last_progress_trial = trial;
+                        }
+                        elitePoolOffer(&elite, &eax, eax.tour_a, merged_now);
+                        // Adopt the merge product as the main incumbent
+                        // (LKH keeps the merged tour as BetterTour): kicks
+                        // and guided constructions re-base onto it, so
+                        // recombination gains compound instead of sitting in
+                        // the shadow until the end. Both halves are measured
+                        // load-bearing for EAX exactly as they were for IPT:
+                        // dropping adoption loses lin318/rd400/u574/rat575
+                        // outright, and keeping adoption without the
+                        // staleness resets loses lin318/rd400/pcb442/u574 —
+                        // extension-dependent rows need merge wins to re-arm
+                        // the stagnation window.
+                        if (n < guided_max_dimension and merged_now < best_len) {
+                            prev_best_len = best_len;
+                            @memcpy(workspace.prev_best_tour, workspace.best_tour);
+                            best_len = merged_now;
+                            stats.best_trial = trial;
+                            last_improvement_trial = trial;
+                            @memcpy(workspace.best_tour, eax.tour_a);
+                            stale_kicks = 0;
+                        }
+                        stats.merge_search_nodes += stats.lk_search_nodes - merge_nodes_before;
+                    }
+                }
+            }
+            // Every LK-converged trial is pool material: equal-length
+            // plateau siblings and near-elite basins are exactly what the
+            // merger recombines profitably; replace-worst keeps it elite.
+            elitePoolOffer(&elite, &eax, workspace.tour, trial_len);
+        }
+
         const len = try oracle.tourLengthUnchecked(workspace.tour);
         if (len < best_len) {
             if (best_len != std.math.maxInt(u64)) {
@@ -1239,15 +1370,22 @@ pub fn solve(
             last_improvement_trial = trial;
             @memcpy(workspace.best_tour, workspace.tour);
             stale_kicks = 0;
+            if (n >= eax_min_dimension and options.enable_lk) elitePoolOffer(&elite, &eax, workspace.tour, len);
+            const gap = trial - last_progress_trial;
+            stats.eax_worst_gap_ratio_x100 = @max(stats.eax_worst_gap_ratio_x100, gap * 100 / @max(max_progress_gap, 32));
+            max_progress_gap = @max(max_progress_gap, gap);
+            last_progress_trial = trial;
         } else if (kick_trial) {
             stale_kicks += 1;
         }
     }
     stats.trials = trial;
+    stats.eax_max_progress_gap = max_progress_gap;
+    stats.eax_final_progress_gap = trial - last_progress_trial;
 
     if (merged_len < best_len) {
         best_len = merged_len;
-        @memcpy(workspace.best_tour, ipt.merged);
+        @memcpy(workspace.best_tour, if (n < eax_min_dimension) ipt.merged else eax.merged);
     }
 
     const result_tour = try allocator.dupe(usize, workspace.best_tour);
@@ -2077,16 +2215,20 @@ fn segmentExchangeKick(tour: []usize, random: *std.Random, touched: *[6]usize) v
     std.mem.rotate(usize, tour[i..k], j - i);
 }
 
-// Plateau kick: apply up to `moves` zero-delta 2-opt reconnections anchored
-// at random tour positions. On degenerate integer geometries (rattled grids,
+// Plateau kick: apply up to `moves` zero-delta reconnections anchored at
+// random tour positions. On degenerate integer geometries (rattled grids,
 // drilling patterns) locally optimal tours sit on broad cost-equal plateaus:
 // the residual gap to the optimum hides in scattered micro-sections whose
 // better variant is cost-equal until a neighboring section also changes
 // (measured on rat575: 67 differing edges vs the optimum in 59 sections of
 // size <= 2). Length-preserving moves walk the plateau without giving up
 // quality, so the follow-up descent starts from a genuinely different tour
-// of equal length. Returns the number of applied moves; their endpoints are
-// recorded in `touched` (4 per move) for LK reactivation.
+// of equal length. With `or_opt` set, half the attempts are zero-delta
+// segment relocations (1-3 nodes, both orientations) — the scattered
+// residual sections are size <= 2, i.e. relocations, which reversal drift
+// cannot express; the stride of `touched` grows from 4 to 6 per move and
+// the RNG consumption changes, so callers gate it to keep small-instance
+// trajectories untouched. Returns the number of applied moves.
 fn plateauKick(
     dist_oracle: *DistanceOracle,
     candidates: *const Candidates,
@@ -2094,16 +2236,22 @@ fn plateauKick(
     pos: []usize,
     random: *std.Random,
     moves: usize,
+    or_opt: bool,
     touched: []usize,
 ) usize {
     const n = tour.len;
-    std.debug.assert(touched.len >= 4 * moves);
+    const stride: usize = if (or_opt) 6 else 4;
+    std.debug.assert(touched.len >= stride * moves);
     for (tour, 0..) |node, idx| pos[node] = idx;
 
     var applied: usize = 0;
     var attempts: usize = 0;
     const max_attempts = 8 * moves;
     while (applied < moves and attempts < max_attempts) : (attempts += 1) {
+        if (or_opt and random.intRangeLessThan(usize, 0, 2) == 1) {
+            applied += plateauOrOptMove(dist_oracle, candidates, tour, pos, random, touched[stride * applied ..]);
+            continue;
+        }
         const i = random.intRangeLessThan(usize, 0, n);
         const a = tour[i];
         const b = tour[(i + 1) % n];
@@ -2138,15 +2286,85 @@ fn plateauKick(
                 pos[tour[y]] = y;
             }
             pos[tour[x]] = x;
-            touched[4 * applied + 0] = a;
-            touched[4 * applied + 1] = b;
-            touched[4 * applied + 2] = c;
-            touched[4 * applied + 3] = d;
+            touched[stride * applied + 0] = a;
+            touched[stride * applied + 1] = b;
+            touched[stride * applied + 2] = c;
+            touched[stride * applied + 3] = d;
+            if (or_opt) {
+                touched[stride * applied + 4] = a;
+                touched[stride * applied + 5] = b;
+            }
             applied += 1;
             break;
         }
     }
     return applied;
+}
+
+// One zero-delta Or-opt drift attempt: relocate the 1-3 node segment at a
+// random position to sit after a candidate neighbor of its head node, in
+// either orientation, when the relocation is exactly cost-neutral. Returns
+// 1 and records 6 endpoints into `touched` on success, 0 otherwise.
+// Wrapping segments and wrapping insertions are skipped (the array splice
+// stays a single contiguous shift; the anchor position is uniform anyway).
+fn plateauOrOptMove(
+    dist_oracle: *DistanceOracle,
+    candidates: *const Candidates,
+    tour: []usize,
+    pos: []usize,
+    random: *std.Random,
+    touched: []usize,
+) usize {
+    const n = tour.len;
+    const seg_len = random.intRangeLessThan(usize, 1, 4);
+    const i = random.intRangeLessThan(usize, 0, n);
+    if (i == 0 or i + seg_len >= n) return 0;
+    const p = tour[i - 1];
+    const s0 = tour[i];
+    const s1 = tour[i + seg_len - 1];
+    const q = tour[i + seg_len];
+    const removal_gain = @as(i64, @intCast(dist_oracle.distance(p, s0))) +
+        @as(i64, @intCast(dist_oracle.distance(s1, q))) -
+        @as(i64, @intCast(dist_oracle.distance(p, q)));
+    if (removal_gain == 0) return 0;
+
+    for (candidates.row(s0)) |c| {
+        const jc = pos[c];
+        // c inside the segment or directly before it (re-insertion no-op).
+        if (jc + 1 >= i and jc < i + seg_len) continue;
+        if (jc == n - 1) continue;
+        const cn = tour[jc + 1];
+        const d_ccn = @as(i64, @intCast(dist_oracle.distance(c, cn)));
+        const ins_fwd = @as(i64, @intCast(dist_oracle.distance(c, s0))) +
+            @as(i64, @intCast(dist_oracle.distance(s1, cn))) - d_ccn;
+        const ins_rev = @as(i64, @intCast(dist_oracle.distance(c, s1))) +
+            @as(i64, @intCast(dist_oracle.distance(s0, cn))) - d_ccn;
+        const fwd = ins_fwd == removal_gain;
+        if (!fwd and ins_rev != removal_gain) continue;
+
+        var seg: [3]usize = undefined;
+        @memcpy(seg[0..seg_len], tour[i .. i + seg_len]);
+        if (!fwd) std.mem.reverse(usize, seg[0..seg_len]);
+        if (jc > i) {
+            // Shift the gap left, drop the segment in after c.
+            std.mem.copyForwards(usize, tour[i .. jc + 1 - seg_len], tour[i + seg_len .. jc + 1]);
+            @memcpy(tour[jc + 1 - seg_len .. jc + 1], seg[0..seg_len]);
+            for (i..jc + 1) |idx| pos[tour[idx]] = idx;
+        } else {
+            // Shift the gap right, drop the segment in after c.
+            std.mem.copyBackwards(usize, tour[jc + 1 + seg_len .. i + seg_len], tour[jc + 1 .. i]);
+            @memcpy(tour[jc + 1 .. jc + 1 + seg_len], seg[0..seg_len]);
+            for (jc + 1..i + seg_len) |idx| pos[tour[idx]] = idx;
+        }
+        touched[0] = p;
+        touched[1] = q;
+        touched[2] = c;
+        touched[3] = cn;
+        touched[4] = s0;
+        touched[5] = s1;
+        return 1;
+    }
+    return 0;
 }
 
 // Guided restart construction, ported from LKH's ChooseInitialTour cases
@@ -2157,7 +2375,7 @@ fn plateauKick(
 //   (E) the nearest unchosen node.
 // Retaining the alpha-zero backbone keeps the tour near-elite while every
 // alpha>0 stretch diverges through case D — structurally different parents
-// that double-bridge kicks cannot produce and that give IPT merging
+// that double-bridge kicks cannot produce and that give EAX merging
 // independent differing sections to recombine.
 // On return `used` no longer means "chosen": it flags the endpoints of every
 // tour edge absent from both reference tours, i.e. the only neighborhoods a
@@ -2213,7 +2431,7 @@ fn guidedBackboneTour(
         // unconditionally. Unbounded case-D divergence makes the follow-up
         // light descent nearly as expensive as a cold one; the budget keeps
         // guided tours near-elite — few neighborhoods to reactivate, and
-        // localized independent differences, which is exactly what IPT
+        // localized independent differences, which is exactly what EAX
         // merging wants. With max_divergence == maxInt the construction is
         // the faithful LKH C/D/E ladder for full-descent callers.
         if (count == 0 and max_divergence != std.math.maxInt(usize) and
@@ -2570,6 +2788,532 @@ fn iptMergeTours(
         .winner_is_a = len_a <= len_b,
         .transcriptions = transcriptions,
         .boundary_count = boundary_count,
+    };
+}
+
+
+// --- EAX-lite tour merging (single AB-cycle edge assembly crossover) --------
+//
+// Nagata & Kobayashi, "Edge Assembly Crossover: A High-power Genetic
+// Algorithm for the Traveling Salesman Problem" (ICGA 1997), restricted to
+// its single-AB-cycle strategy. The symmetric difference of two Hamiltonian
+// cycles over the same nodes decomposes into AB-cycles: closed walks
+// alternating A-only and B-only edges (every node carries as many A-only as
+// B-only incidences, so a greedy alternating walk can never get stuck and
+// closes exactly when a B-edge returns to its start). Applying one cycle to
+// a parent removes that parent's edges of the cycle and installs the other
+// parent's atomically. A contiguous-section difference is a non-splitting
+// AB-cycle — exactly the IPT transcription move this replaced — while
+// interleaved differing sections, which IPT could not touch by construction,
+// form splitting cycles whose subtours are reconnected with candidate-row
+// 2-opt bridges (LKH PatchCycles shape). Cycle deltas are local, so
+// equal-length parents (plateau siblings) still expose strictly negative
+// cycles — merge material the IPT gain test discarded as zero.
+
+const eax_none = std.math.maxInt(usize);
+
+const EaxScratch = struct {
+    allocator: std.mem.Allocator,
+    tour_a: []usize,
+    tour_b: []usize,
+    merged: []usize,
+    adj_a0: []usize,
+    adj_a1: []usize,
+    adj_b0: []usize,
+    adj_b1: []usize,
+    // Unconsumed symmetric-difference half-edges, compacted per node
+    // (slot 0 fills before slot 1, eax_none marks empty).
+    sd_a0: []usize,
+    sd_a1: []usize,
+    sd_b0: []usize,
+    sd_b1: []usize,
+    // AB-cycles as concatenated traversal node lists plus per-cycle metadata;
+    // edge i of a cycle runs nodes[i] -> nodes[(i + 1) % len], even i are
+    // A-edges. delta = cost(B-edges) - cost(A-edges).
+    cycle_nodes: []usize,
+    cycle_start: []usize,
+    cycle_len: []usize,
+    cycle_delta: []i64,
+    cycle_order: []usize,
+    // Working adjacency for one application attempt + component labeling.
+    work0: []usize,
+    work1: []usize,
+    comp: []usize,
+    comp_size: []usize,
+    comp_members: []usize,
+    boundary: []usize,
+
+    fn init(allocator: std.mem.Allocator, n: usize) !EaxScratch {
+        var self: EaxScratch = undefined;
+        self.allocator = allocator;
+        const fields = [_]*[]usize{
+            &self.tour_a,      &self.tour_b,    &self.merged,
+            &self.adj_a0,      &self.adj_a1,    &self.adj_b0,
+            &self.adj_b1,      &self.sd_a0,     &self.sd_a1,
+            &self.sd_b0,       &self.sd_b1,     &self.cycle_start,
+            &self.cycle_len,   &self.cycle_order, &self.work0,
+            &self.work1,       &self.comp,      &self.comp_size,
+            &self.comp_members, &self.boundary,
+        };
+        var allocated: usize = 0;
+        errdefer for (fields[0..allocated]) |field| allocator.free(field.*);
+        for (fields) |field| {
+            field.* = try allocator.alloc(usize, n);
+            allocated += 1;
+        }
+        self.cycle_nodes = try allocator.alloc(usize, 2 * n);
+        errdefer allocator.free(self.cycle_nodes);
+        self.cycle_delta = try allocator.alloc(i64, n);
+        return self;
+    }
+
+    fn deinit(self: *EaxScratch) void {
+        const fields = [_][]usize{
+            self.tour_a,      self.tour_b,    self.merged,
+            self.adj_a0,      self.adj_a1,    self.adj_b0,
+            self.adj_b1,      self.sd_a0,     self.sd_a1,
+            self.sd_b0,       self.sd_b1,     self.cycle_start,
+            self.cycle_len,   self.cycle_order, self.work0,
+            self.work1,       self.comp,      self.comp_size,
+            self.comp_members, self.boundary,  self.cycle_nodes,
+        };
+        for (fields) |field| self.allocator.free(field);
+        self.allocator.free(self.cycle_delta);
+        self.* = undefined;
+    }
+};
+
+// --- Elite pool -------------------------------------------------------------
+//
+// Small population of diverse elite tours used as EAX merge references at
+// n >= eax_min_dimension. Research-backed: population-based EAX is the state
+// of the art at 10k+ nodes, and the kick-only regime otherwise starves the
+// merger for structurally different parents. Replacement policy: exact
+// duplicates are dropped (identical edge sets imply identical length, so
+// only equal-length members are compared), otherwise the worst member is
+// replaced once the pool is full and the offer beats it. Kicks still come
+// from the single incumbent — pool-sourced kicks were measured dead in
+// round 4 (they dilute intensification).
+const elite_pool_capacity = 6;
+
+const ElitePool = struct {
+    allocator: std.mem.Allocator,
+    tours: [elite_pool_capacity][]usize,
+    lens: [elite_pool_capacity]u64,
+    count: usize,
+
+    fn init(allocator: std.mem.Allocator, n: usize) !ElitePool {
+        var self: ElitePool = undefined;
+        self.allocator = allocator;
+        self.count = 0;
+        var allocated: usize = 0;
+        errdefer for (self.tours[0..allocated]) |t| allocator.free(t);
+        for (&self.tours) |*slot| {
+            slot.* = try allocator.alloc(usize, n);
+            allocated += 1;
+        }
+        return self;
+    }
+
+    fn deinit(self: *ElitePool) void {
+        for (self.tours) |t| self.allocator.free(t);
+        self.* = undefined;
+    }
+};
+
+/// True when the tours have identical undirected edge sets (rotations and
+/// reflections of one another). Uses the scratch adjacency arrays.
+fn eaxToursShareAllEdges(scratch: *EaxScratch, a: []const usize, b: []const usize) bool {
+    eaxFillAdjacency(a, scratch.adj_a0, scratch.adj_a1);
+    eaxFillAdjacency(b, scratch.adj_b0, scratch.adj_b1);
+    for (scratch.adj_a0, scratch.adj_a1, scratch.adj_b0, scratch.adj_b1) |a0, a1, b0, b1| {
+        if (!((a0 == b0 and a1 == b1) or (a0 == b1 and a1 == b0))) return false;
+    }
+    return true;
+}
+
+fn elitePoolOffer(pool: *ElitePool, scratch: *EaxScratch, tour: []const usize, len: u64) void {
+    for (0..pool.count) |i| {
+        if (pool.lens[i] == len and eaxToursShareAllEdges(scratch, pool.tours[i], tour)) return;
+    }
+    if (pool.count < elite_pool_capacity) {
+        @memcpy(pool.tours[pool.count], tour);
+        pool.lens[pool.count] = len;
+        pool.count += 1;
+        return;
+    }
+    var worst: usize = 0;
+    for (1..elite_pool_capacity) |i| {
+        if (pool.lens[i] > pool.lens[worst]) worst = i;
+    }
+    if (len < pool.lens[worst]) {
+        @memcpy(pool.tours[worst], tour);
+        pool.lens[worst] = len;
+    }
+}
+
+const EaxOutcome = struct {
+    length: u64,
+    winner_is_a: bool,
+    cycles_applied: usize,
+    boundary_count: usize,
+    // A-only half-edge count of the initial symmetric difference; 0 means the
+    // trial and the reference share every edge — the trial generator
+    // re-converged into the incumbent and produced no new tour material.
+    // This is the solver's convergence (diversity-exhaustion) signal.
+    initial_symdiff: usize,
+};
+
+fn eaxFillAdjacency(tour: []const usize, nbr0: []usize, nbr1: []usize) void {
+    const n = tour.len;
+    for (tour, 0..) |node, i| {
+        nbr0[node] = tour[(i + n - 1) % n];
+        nbr1[node] = tour[(i + 1) % n];
+    }
+}
+
+fn eaxSlotAdd(s0: []usize, s1: []usize, node: usize, value: usize) void {
+    if (s0[node] == eax_none) {
+        s0[node] = value;
+    } else {
+        std.debug.assert(s1[node] == eax_none);
+        s1[node] = value;
+    }
+}
+
+fn eaxSlotRemove(s0: []usize, s1: []usize, node: usize, value: usize) void {
+    if (s0[node] == value) {
+        s0[node] = s1[node];
+        s1[node] = eax_none;
+    } else {
+        std.debug.assert(s1[node] == value);
+        s1[node] = eax_none;
+    }
+}
+
+/// Fill the symmetric-difference half-edge slots from the parents' adjacency.
+/// Returns the number of A-only directed half-edges (== B-only count; 0 means
+/// the tours share every edge).
+fn eaxFillSymdiff(scratch: *EaxScratch, n: usize) usize {
+    @memset(scratch.sd_a0[0..n], eax_none);
+    @memset(scratch.sd_a1[0..n], eax_none);
+    @memset(scratch.sd_b0[0..n], eax_none);
+    @memset(scratch.sd_b1[0..n], eax_none);
+    var count: usize = 0;
+    for (0..n) |v| {
+        for ([2]usize{ scratch.adj_a0[v], scratch.adj_a1[v] }) |u| {
+            if (u != scratch.adj_b0[v] and u != scratch.adj_b1[v]) {
+                eaxSlotAdd(scratch.sd_a0, scratch.sd_a1, v, u);
+                count += 1;
+            }
+        }
+        for ([2]usize{ scratch.adj_b0[v], scratch.adj_b1[v] }) |u| {
+            if (u != scratch.adj_a0[v] and u != scratch.adj_a1[v]) {
+                eaxSlotAdd(scratch.sd_b0, scratch.sd_b1, v, u);
+            }
+        }
+    }
+    return count;
+}
+
+/// Decompose the symmetric difference into AB-cycles by greedy alternating
+/// walks, consuming the half-edge slots. Deterministic (always slot 0 first).
+fn eaxExtractCycles(dist: *DistanceOracle, scratch: *EaxScratch, n: usize) usize {
+    var cycle_count: usize = 0;
+    var buf_used: usize = 0;
+    for (0..n) |v| {
+        while (scratch.sd_a0[v] != eax_none) {
+            const start = buf_used;
+            var delta: i64 = 0;
+            var cur = v;
+            while (true) {
+                const au = scratch.sd_a0[cur];
+                eaxSlotRemove(scratch.sd_a0, scratch.sd_a1, cur, au);
+                eaxSlotRemove(scratch.sd_a0, scratch.sd_a1, au, cur);
+                scratch.cycle_nodes[buf_used] = cur;
+                buf_used += 1;
+                delta -= @as(i64, dist.distance(cur, au));
+                cur = au;
+                const bu = scratch.sd_b0[cur];
+                eaxSlotRemove(scratch.sd_b0, scratch.sd_b1, cur, bu);
+                eaxSlotRemove(scratch.sd_b0, scratch.sd_b1, bu, cur);
+                scratch.cycle_nodes[buf_used] = cur;
+                buf_used += 1;
+                delta += @as(i64, dist.distance(cur, bu));
+                cur = bu;
+                if (cur == v) break;
+            }
+            scratch.cycle_start[cycle_count] = start;
+            scratch.cycle_len[cycle_count] = buf_used - start;
+            scratch.cycle_delta[cycle_count] = delta;
+            cycle_count += 1;
+        }
+    }
+    return cycle_count;
+}
+
+/// Reconnect the subtours left by a splitting cycle application into one
+/// Hamiltonian cycle: repeatedly merge the smallest live component into
+/// another via the cheapest candidate-row 2-opt bridge (LKH PatchCycles
+/// shape). Returns the summed bridge delta, or null when some component has
+/// no candidate edge leaving it. Bridge endpoints are appended to `boundary`.
+fn eaxRepairComponents(
+    dist: *DistanceOracle,
+    candidates: *const Candidates,
+    scratch: *EaxScratch,
+    n: usize,
+    comp_count: usize,
+    boundary_count: *usize,
+) ?i64 {
+    var remaining = comp_count;
+    var total: i64 = 0;
+    while (remaining > 1) {
+        var small: usize = eax_none;
+        for (0..comp_count) |cid| {
+            if (scratch.comp_size[cid] == 0) continue;
+            if (small == eax_none or scratch.comp_size[cid] < scratch.comp_size[small]) small = cid;
+        }
+        var member_count: usize = 0;
+        for (0..n) |node| {
+            if (scratch.comp[node] == small) {
+                scratch.comp_members[member_count] = node;
+                member_count += 1;
+            }
+        }
+        var best_delta: i64 = std.math.maxInt(i64);
+        var best_a: usize = 0;
+        var best_a2: usize = 0;
+        var best_c: usize = 0;
+        var best_c2: usize = 0;
+        for (scratch.comp_members[0..member_count]) |a| {
+            const a_nbrs = [2]usize{ scratch.work0[a], scratch.work1[a] };
+            for (candidates.row(a)) |c| {
+                if (scratch.comp[c] == small) continue;
+                const c_nbrs = [2]usize{ scratch.work0[c], scratch.work1[c] };
+                const d_ac = @as(i64, dist.distance(a, c));
+                for (a_nbrs) |a2| {
+                    for (c_nbrs) |c2| {
+                        const delta = d_ac +
+                            @as(i64, dist.distance(a2, c2)) -
+                            @as(i64, dist.distance(a, a2)) -
+                            @as(i64, dist.distance(c, c2));
+                        if (delta < best_delta) {
+                            best_delta = delta;
+                            best_a = a;
+                            best_a2 = a2;
+                            best_c = c;
+                            best_c2 = c2;
+                        }
+                    }
+                }
+            }
+        }
+        if (best_delta == std.math.maxInt(i64)) return null;
+        eaxSlotRemove(scratch.work0, scratch.work1, best_a, best_a2);
+        eaxSlotRemove(scratch.work0, scratch.work1, best_a2, best_a);
+        eaxSlotRemove(scratch.work0, scratch.work1, best_c, best_c2);
+        eaxSlotRemove(scratch.work0, scratch.work1, best_c2, best_c);
+        eaxSlotAdd(scratch.work0, scratch.work1, best_a, best_c);
+        eaxSlotAdd(scratch.work0, scratch.work1, best_c, best_a);
+        eaxSlotAdd(scratch.work0, scratch.work1, best_a2, best_c2);
+        eaxSlotAdd(scratch.work0, scratch.work1, best_c2, best_a2);
+        const target = scratch.comp[best_c];
+        for (scratch.comp_members[0..member_count]) |node| scratch.comp[node] = target;
+        scratch.comp_size[target] += member_count;
+        scratch.comp_size[small] = 0;
+        remaining -= 1;
+        total += best_delta;
+        for ([4]usize{ best_a, best_a2, best_c, best_c2 }) |node| {
+            if (boundary_count.* >= scratch.boundary.len) break;
+            scratch.boundary[boundary_count.*] = node;
+            boundary_count.* += 1;
+        }
+    }
+    return total;
+}
+
+fn eaxMaterialize(work0: []const usize, work1: []const usize, tour: []usize) void {
+    var prev: usize = eax_none;
+    var cur: usize = 0;
+    for (tour) |*slot| {
+        slot.* = cur;
+        const nxt = if (work0[cur] != prev) work0[cur] else work1[cur];
+        prev = cur;
+        cur = nxt;
+    }
+    std.debug.assert(cur == 0);
+}
+
+/// Apply one AB-cycle to `target_tour` (the A parent when `to_a`): remove the
+/// target's cycle edges, install the other parent's, repair any subtour split,
+/// and commit only on a strict length improvement. Returns the new length on
+/// acceptance; the target tour and `boundary` are untouched on rejection.
+fn eaxTryApplyCycle(
+    dist: *DistanceOracle,
+    candidates: *const Candidates,
+    scratch: *EaxScratch,
+    cycle: usize,
+    to_a: bool,
+    target_tour: []usize,
+    len_target: u64,
+    allow_split: bool,
+    boundary_count: *usize,
+) ?u64 {
+    const n = target_tour.len;
+    eaxFillAdjacency(target_tour, scratch.work0, scratch.work1);
+    const nodes = scratch.cycle_nodes[scratch.cycle_start[cycle]..][0..scratch.cycle_len[cycle]];
+    // Removals before additions: per cycle node the removed and added
+    // incidence counts match, so the adjacency never exceeds two slots.
+    for (nodes, 0..) |u, i| {
+        if ((i % 2 == 0) == to_a) {
+            const w = nodes[(i + 1) % nodes.len];
+            eaxSlotRemove(scratch.work0, scratch.work1, u, w);
+            eaxSlotRemove(scratch.work0, scratch.work1, w, u);
+        }
+    }
+    for (nodes, 0..) |u, i| {
+        if ((i % 2 == 0) != to_a) {
+            const w = nodes[(i + 1) % nodes.len];
+            eaxSlotAdd(scratch.work0, scratch.work1, u, w);
+            eaxSlotAdd(scratch.work0, scratch.work1, w, u);
+        }
+    }
+
+    var comp_count: usize = 0;
+    @memset(scratch.comp[0..n], eax_none);
+    for (0..n) |s| {
+        if (scratch.comp[s] != eax_none) continue;
+        var size: usize = 0;
+        var prev: usize = eax_none;
+        var cur = s;
+        while (true) {
+            scratch.comp[cur] = comp_count;
+            size += 1;
+            const nxt = if (scratch.work0[cur] != prev) scratch.work0[cur] else scratch.work1[cur];
+            prev = cur;
+            cur = nxt;
+            if (cur == s) break;
+        }
+        scratch.comp_size[comp_count] = size;
+        comp_count += 1;
+    }
+
+    var total_delta: i64 = if (to_a) scratch.cycle_delta[cycle] else -scratch.cycle_delta[cycle];
+    const boundary_before = boundary_count.*;
+    if (comp_count > 1) {
+        if (!allow_split) return null;
+        total_delta += eaxRepairComponents(dist, candidates, scratch, n, comp_count, boundary_count) orelse {
+            boundary_count.* = boundary_before;
+            return null;
+        };
+    }
+    const new_len_signed = @as(i64, @intCast(len_target)) + total_delta;
+    if (new_len_signed < 0 or @as(u64, @intCast(new_len_signed)) >= len_target) {
+        boundary_count.* = boundary_before;
+        return null;
+    }
+    for (nodes) |node| {
+        if (boundary_count.* >= scratch.boundary.len) break;
+        scratch.boundary[boundary_count.*] = node;
+        boundary_count.* += 1;
+    }
+    eaxMaterialize(scratch.work0, scratch.work1, target_tour);
+    return @intCast(new_len_signed);
+}
+
+/// Per round, only the cheapest few improving cycles are attempted: a
+/// non-splitting improving cycle always commits, so the cap can only skip
+/// splitting cycles whose repair already ate the gain for cheaper siblings.
+const eax_max_attempts_per_round = 8;
+
+/// Merge `tour_a` (mutated in place) with `best_tour` (copied into
+/// `scratch.tour_b`, then mutated): repeatedly apply the AB-cycle application
+/// with the best estimated outcome until none improves. Always returns a
+/// report; `cycles_applied` == 0 means no application committed (and
+/// `initial_symdiff` == 0 additionally means the tours share every edge). On
+/// success `scratch.boundary[0..boundary_count]` holds the endpoints of every
+/// changed edge and the shorter of the two merged tours is reported; when
+/// `winner_is_a` is false the winning tour lives in `scratch.tour_b`.
+fn eaxMergeTours(
+    dist: *DistanceOracle,
+    candidates: *const Candidates,
+    tour_a: []usize,
+    len_a_in: u64,
+    best_tour: []const usize,
+    len_b_in: u64,
+    allow_split: bool,
+    scratch: *EaxScratch,
+) EaxOutcome {
+    const n = tour_a.len;
+    std.debug.assert(best_tour.len == n and scratch.tour_b.len == n);
+    @memcpy(scratch.tour_b, best_tour);
+    var len_a = len_a_in;
+    var len_b = len_b_in;
+    var cycles_applied: usize = 0;
+    var boundary_count: usize = 0;
+    var initial_symdiff: usize = 0;
+    var first_round = true;
+
+    // Each committed application strictly shrinks len_a + len_b, so the loop
+    // terminates without an iteration cap.
+    outer: while (true) {
+        eaxFillAdjacency(tour_a, scratch.adj_a0, scratch.adj_a1);
+        eaxFillAdjacency(scratch.tour_b, scratch.adj_b0, scratch.adj_b1);
+        const symdiff = eaxFillSymdiff(scratch, n);
+        if (first_round) {
+            initial_symdiff = symdiff;
+            first_round = false;
+        }
+        if (symdiff == 0) break;
+        const cycle_count = eaxExtractCycles(dist, scratch, n);
+
+        // A negative-delta cycle improves A, a positive one improves B;
+        // order the improving applications by estimated resulting length.
+        // (Smallest-cycle-first, IPT's order, was measured: it recovers d657
+        // but loses lin318 seeds and worsens pr1002 — another reshuffle, not
+        // a win; the gate below keeps IPT itself where IPT is better.)
+        var order_count: usize = 0;
+        for (0..cycle_count) |c| {
+            const delta = scratch.cycle_delta[c];
+            if (delta == 0) continue;
+            const est = if (delta < 0)
+                len_a - @as(u64, @intCast(-delta))
+            else
+                len_b - @as(u64, @intCast(delta));
+            var slot = order_count;
+            while (slot > 0) : (slot -= 1) {
+                const other = scratch.cycle_order[slot - 1];
+                const odelta = scratch.cycle_delta[other];
+                const oest = if (odelta < 0)
+                    len_a - @as(u64, @intCast(-odelta))
+                else
+                    len_b - @as(u64, @intCast(odelta));
+                if (oest <= est) break;
+                scratch.cycle_order[slot] = other;
+            }
+            scratch.cycle_order[slot] = c;
+            order_count += 1;
+        }
+
+        for (scratch.cycle_order[0..@min(order_count, eax_max_attempts_per_round)]) |c| {
+            const to_a = scratch.cycle_delta[c] < 0;
+            const target_tour = if (to_a) tour_a else scratch.tour_b;
+            const len_target = if (to_a) len_a else len_b;
+            if (eaxTryApplyCycle(dist, candidates, scratch, c, to_a, target_tour, len_target, allow_split, &boundary_count)) |new_len| {
+                if (to_a) len_a = new_len else len_b = new_len;
+                cycles_applied += 1;
+                continue :outer;
+            }
+        }
+        break :outer;
+    }
+
+    return .{
+        .length = @min(len_a, len_b),
+        .winner_is_a = len_a <= len_b,
+        .cycles_applied = cycles_applied,
+        .boundary_count = boundary_count,
+        .initial_symdiff = initial_symdiff,
     };
 }
 
@@ -4885,6 +5629,171 @@ test "heuristic reaches TSPLIB gr17 hardcoded regression target" {
 
     try p.validateTour(result.tour);
     try std.testing.expectEqual(@as(u64, 2085), result.length);
+}
+
+test "EAX merge combines complementary sections from two tours" {
+    const allocator = std.testing.allocator;
+    var coords: [16]problem.Coord = undefined;
+    for (0..16) |i| {
+        const angle = 2.0 * std.math.pi * @as(f64, @floatFromInt(i)) / 16.0;
+        coords[i] = .{ .x = 100.0 * @cos(angle), .y = 100.0 * @sin(angle) };
+    }
+    var p = try problem.Problem.initCoords(allocator, "eax-circle", .euc_2d, &coords);
+    defer p.deinit();
+    var oracle = try DistanceOracle.init(allocator, &p, p.dimension * p.dimension);
+    defer oracle.deinit();
+    var candidate_stats: CandidateBuildStats = .{};
+    var candidates = try buildCandidates(allocator, &oracle, 8, .nearest_distance, 32, 2, &candidate_stats);
+    defer candidates.deinit();
+
+    var base: [16]usize = undefined;
+    for (0..16) |i| base[i] = i;
+    var tour_a = base;
+    var tour_b = base;
+    // Tour A scrambles one section, tour B a different one; each tour holds
+    // the optimal (circle-order) alternative for the other's bad section.
+    // Both differences are non-splitting AB-cycles, one improving each parent.
+    std.mem.swap(usize, &tour_a[3], &tour_a[4]);
+    std.mem.swap(usize, &tour_b[10], &tour_b[11]);
+
+    const len_opt = try oracle.tourLengthUnchecked(&base);
+    const len_a = try oracle.tourLengthUnchecked(&tour_a);
+    const len_b = try oracle.tourLengthUnchecked(&tour_b);
+    try std.testing.expect(len_a > len_opt);
+    try std.testing.expect(len_b > len_opt);
+
+    var scratch = try EaxScratch.init(allocator, 16);
+    defer scratch.deinit();
+    const outcome = eaxMergeTours(&oracle, &candidates, &tour_a, len_a, &tour_b, len_b, true, &scratch);
+    try std.testing.expect(outcome.initial_symdiff > 0);
+    try std.testing.expect(outcome.length < @min(len_a, len_b));
+    try std.testing.expectEqual(len_opt, outcome.length);
+    const winner: []const usize = if (outcome.winner_is_a) &tour_a else scratch.tour_b;
+    try p.validateTour(winner);
+    try std.testing.expectEqual(outcome.length, try oracle.tourLengthUnchecked(winner));
+    try std.testing.expectEqual(@as(usize, 2), outcome.cycles_applied);
+}
+
+test "EAX merge handles sections traversed in opposite orientation" {
+    const allocator = std.testing.allocator;
+    var coords: [16]problem.Coord = undefined;
+    for (0..16) |i| {
+        const angle = 2.0 * std.math.pi * @as(f64, @floatFromInt(i)) / 16.0;
+        coords[i] = .{ .x = 100.0 * @cos(angle), .y = 100.0 * @sin(angle) };
+    }
+    var p = try problem.Problem.initCoords(allocator, "eax-circle-rev", .euc_2d, &coords);
+    defer p.deinit();
+    var oracle = try DistanceOracle.init(allocator, &p, p.dimension * p.dimension);
+    defer oracle.deinit();
+    var candidate_stats: CandidateBuildStats = .{};
+    var candidates = try buildCandidates(allocator, &oracle, 8, .nearest_distance, 32, 2, &candidate_stats);
+    defer candidates.deinit();
+
+    var base: [16]usize = undefined;
+    for (0..16) |i| base[i] = i;
+    var tour_a = base;
+    std.mem.swap(usize, &tour_a[3], &tour_a[4]);
+    // Tour B runs the cycle in the opposite global direction (invisible to
+    // the undirected symmetric difference) and scrambles a section A holds
+    // in optimal order.
+    var tour_b: [16]usize = undefined;
+    for (0..16) |i| tour_b[i] = 15 - i;
+    std.mem.swap(usize, &tour_b[4], &tour_b[5]);
+
+    const len_opt = try oracle.tourLengthUnchecked(&base);
+    const len_a = try oracle.tourLengthUnchecked(&tour_a);
+    const len_b = try oracle.tourLengthUnchecked(&tour_b);
+    try std.testing.expect(len_a > len_opt);
+    try std.testing.expect(len_b > len_opt);
+
+    var scratch = try EaxScratch.init(allocator, 16);
+    defer scratch.deinit();
+    const outcome = eaxMergeTours(&oracle, &candidates, &tour_a, len_a, &tour_b, len_b, true, &scratch);
+    try std.testing.expect(outcome.initial_symdiff > 0);
+    try std.testing.expect(outcome.length < @min(len_a, len_b));
+    try std.testing.expectEqual(len_opt, outcome.length);
+    const winner: []const usize = if (outcome.winner_is_a) &tour_a else scratch.tour_b;
+    try p.validateTour(winner);
+    try std.testing.expectEqual(outcome.length, try oracle.tourLengthUnchecked(winner));
+}
+
+test "EAX merge returns null for tours sharing every edge" {
+    const allocator = std.testing.allocator;
+    var coords: [12]problem.Coord = undefined;
+    for (0..12) |i| {
+        const angle = 2.0 * std.math.pi * @as(f64, @floatFromInt(i)) / 12.0;
+        coords[i] = .{ .x = 100.0 * @cos(angle), .y = 100.0 * @sin(angle) };
+    }
+    var p = try problem.Problem.initCoords(allocator, "eax-identical", .euc_2d, &coords);
+    defer p.deinit();
+    var oracle = try DistanceOracle.init(allocator, &p, p.dimension * p.dimension);
+    defer oracle.deinit();
+    var candidate_stats: CandidateBuildStats = .{};
+    var candidates = try buildCandidates(allocator, &oracle, 8, .nearest_distance, 32, 2, &candidate_stats);
+    defer candidates.deinit();
+
+    // Same cycle, rotated and reflected: no differing edges, nothing to merge.
+    var tour_a: [12]usize = undefined;
+    var tour_b: [12]usize = undefined;
+    for (0..12) |i| {
+        tour_a[i] = (i + 5) % 12;
+        tour_b[i] = (12 - i) % 12;
+    }
+    const len = try oracle.tourLengthUnchecked(&tour_a);
+
+    var scratch = try EaxScratch.init(allocator, 12);
+    defer scratch.deinit();
+    const outcome = eaxMergeTours(&oracle, &candidates, &tour_a, len, &tour_b, len, true, &scratch);
+    try std.testing.expectEqual(@as(usize, 0), outcome.initial_symdiff);
+    try std.testing.expectEqual(@as(usize, 0), outcome.cycles_applied);
+    try std.testing.expectEqual(len, outcome.length);
+}
+
+test "EAX merge repairs a splitting AB-cycle with candidate bridges" {
+    const allocator = std.testing.allocator;
+    // Two 2x2 clusters. Tour B visits cluster {0,1,6,7} then {4,5,2,3} (two
+    // inter-cluster crossings, length 36). Tour A is B with its two interior
+    // segments exchanged (a double bridge), length 76. The cheapest AB-cycle
+    // applied to A removes two long edges but splits the tour into two
+    // 4-node subtours; the candidate-bridge repair must reconnect them. The
+    // best bridge cuts both remaining long edges (delta -20), landing on the
+    // length-32 optimum — strictly better than either parent.
+    const coords = [8]problem.Coord{
+        .{ .x = 0, .y = 0 },
+        .{ .x = 0, .y = 2 },
+        .{ .x = 12, .y = 0 },
+        .{ .x = 12, .y = 2 },
+        .{ .x = 14, .y = 2 },
+        .{ .x = 14, .y = 0 },
+        .{ .x = 2, .y = 2 },
+        .{ .x = 2, .y = 0 },
+    };
+    var p = try problem.Problem.initCoords(allocator, "eax-split", .euc_2d, &coords);
+    defer p.deinit();
+    var oracle = try DistanceOracle.init(allocator, &p, p.dimension * p.dimension);
+    defer oracle.deinit();
+    var candidate_stats: CandidateBuildStats = .{};
+    var candidates = try buildCandidates(allocator, &oracle, 7, .nearest_distance, 32, 2, &candidate_stats);
+    defer candidates.deinit();
+
+    var tour_a = [8]usize{ 0, 5, 2, 7, 4, 1, 6, 3 };
+    var tour_b = [8]usize{ 0, 1, 6, 7, 4, 5, 2, 3 };
+    const len_a = try oracle.tourLengthUnchecked(&tour_a);
+    const len_b = try oracle.tourLengthUnchecked(&tour_b);
+    try std.testing.expectEqual(@as(u64, 76), len_a);
+    try std.testing.expectEqual(@as(u64, 36), len_b);
+
+    var scratch = try EaxScratch.init(allocator, 8);
+    defer scratch.deinit();
+    const outcome = eaxMergeTours(&oracle, &candidates, &tour_a, len_a, &tour_b, len_b, true, &scratch);
+    try std.testing.expect(outcome.initial_symdiff > 0);
+    try std.testing.expectEqual(@as(u64, 32), outcome.length);
+    // Two applications: the splitting cycle + repair takes A to 32, then a
+    // follow-up cycle lifts B to the same tour before the parents converge.
+    try std.testing.expectEqual(@as(usize, 2), outcome.cycles_applied);
+    try std.testing.expect(outcome.winner_is_a);
+    try p.validateTour(&tour_a);
+    try std.testing.expectEqual(outcome.length, try oracle.tourLengthUnchecked(&tour_a));
 }
 
 test "IPT merge combines complementary sections from two tours" {
