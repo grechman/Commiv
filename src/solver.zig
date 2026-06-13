@@ -3840,16 +3840,16 @@ const LocalSearch = struct {
         const n = self.tour.len;
         for (0..n) |i| {
             const s1 = self.tour[i];
-            const s2 = self.next[s1];
+            const s2 = self.tourNext(s1);
             const removed_first: i64 = @intCast(self.dist.distance(s1, s2));
             var breadth: usize = 0;
 
             for (self.candidates.row(s2)) |s3| {
                 if (breadth >= self.lk_nonseq_branch_limit) break;
                 if (s3 == s1 or s3 == s2 or self.isTourEdge(s2, s3)) continue;
-                const s4 = self.next[s3];
+                const s4 = self.tourNext(s3);
                 if (s4 == s1 or s4 == s2) continue;
-                if (self.pos[s3] <= self.pos[s2]) continue;
+                if (self.tourSeq(s3) <= self.tourSeq(s2)) continue;
                 if (!self.segmentIsNoMoreThanHalf(s2, s3)) continue;
 
                 const gain =
@@ -3903,7 +3903,7 @@ const LocalSearch = struct {
         var t1 = segment.from;
         var scanned: usize = 0;
         while (t1 != segment.to and scanned < self.tour.len) : (scanned += 1) {
-            const t2 = self.next[t1];
+            const t2 = self.tourNext(t1);
             defer t1 = t2;
             if (self.isExcludedGain23BaseEdge(t1, t2, s1, s2, s3, s4, std.math.maxInt(usize), std.math.maxInt(usize))) continue;
 
@@ -3917,7 +3917,7 @@ const LocalSearch = struct {
                 if (gain1 <= 0) continue;
                 breadth2 += 1;
 
-                var choices = [2]usize{ self.next[t3], self.prev[t3] };
+                var choices = [2]usize{ self.tourNext(t3), self.tourPrev(t3) };
                 self.orderTourEdgeChoices(t3, &choices);
                 for (choices) |t4| {
                     if (t4 == t1 or t4 == t2) continue;
@@ -4028,7 +4028,7 @@ const LocalSearch = struct {
             if (after_second_add <= 0) continue;
             breadth4 += 1;
 
-            var choices = [2]usize{ self.next[s5], self.prev[s5] };
+            var choices = [2]usize{ self.tourNext(s5), self.tourPrev(s5) };
             self.orderTourEdgeChoices(s5, &choices);
             for (choices) |s6| {
                 if (s6 == s1 or s6 == s2 or s6 == s3 or s6 == s4) continue;
@@ -4088,13 +4088,13 @@ const LocalSearch = struct {
             // started elsewhere reaches them deeper, so escape paths are kept —
             // unlike the hard LK-respect reject. Pure search-initiation pruning.
             if (self.soft_freeze and
-                self.softFrozenEdge(t1, self.next[t1]) and
-                self.softFrozenEdge(t1, self.prev[t1]))
+                self.softFrozenEdge(t1, self.tourNext(t1)) and
+                self.softFrozenEdge(t1, self.tourPrev(t1)))
             {
                 stats.freeze_move_rejections += 1;
                 continue;
             }
-            var choices = [2]usize{ self.next[t1], self.prev[t1] };
+            var choices = [2]usize{ self.tourNext(t1), self.tourPrev(t1) };
             self.orderTourEdgeChoices(t1, &choices);
 
             for (choices) |t2| {
@@ -4170,7 +4170,7 @@ const LocalSearch = struct {
         if (!self.recordLKNode(stats)) return false;
         stats.max_depth_reached = @max(stats.max_depth_reached, depth);
 
-        var choices = [2]usize{ self.next[odd], self.prev[odd] };
+        var choices = [2]usize{ self.tourNext(odd), self.tourPrev(odd) };
         self.orderTourEdgeChoices(odd, &choices);
         const sequence_len_before_even = 2 * depth - 1;
         const t1 = self.lk_t[0];
@@ -4232,7 +4232,7 @@ const LocalSearch = struct {
                 continue;
             }
 
-            var choices = [2]usize{ self.next[u], self.prev[u] };
+            var choices = [2]usize{ self.tourNext(u), self.tourPrev(u) };
             self.orderTourEdgeChoices(u, &choices);
             for (choices) |v| {
                 if (v == t1 or self.vertexInSequence(v, 2 * depth)) continue;
@@ -4285,7 +4285,7 @@ const LocalSearch = struct {
                 continue;
             }
 
-            var first_remove_choices = [2]usize{ self.next[u], self.prev[u] };
+            var first_remove_choices = [2]usize{ self.tourNext(u), self.tourPrev(u) };
             self.orderTourEdgeChoices(u, &first_remove_choices);
             for (first_remove_choices) |v| {
                 if (v == t1 or self.vertexInSequence(v, 2 * depth)) continue;
@@ -4309,7 +4309,7 @@ const LocalSearch = struct {
                     const after_second_add = after_first_remove - @as(i64, @intCast(self.dist.distance(v, w)));
                     if (after_second_add <= 0) continue;
 
-                    var second_remove_choices = [2]usize{ self.next[w], self.prev[w] };
+                    var second_remove_choices = [2]usize{ self.tourNext(w), self.tourPrev(w) };
                     self.orderTourEdgeChoices(w, &second_remove_choices);
                     for (second_remove_choices) |x| {
                         if (x == t1 or x == even or x == u or x == v) continue;
@@ -4358,18 +4358,20 @@ const LocalSearch = struct {
 
         for (0..n) |i| {
             const a = self.tour[i];
+            // Bounded 3-opt cleanup sweep: next/prev cache is stale (see
+            // improve2Opt note) — read successors from tour[]; tourSeq is fine.
             const b = self.tour[(i + 1) % n];
             const ab = @as(u64, self.dist.distance(a, b));
 
             for (self.candidates.row(a)) |c| {
-                const j = self.pos[c];
+                const j = self.tourSeq(c);
                 if (j <= i + 1 or j + 1 >= n) continue;
                 const d = self.tour[(j + 1) % n];
                 if (d == a or d == b) continue;
                 const cd = @as(u64, self.dist.distance(c, d));
 
                 for (self.candidates.row(d)) |e| {
-                    const k = self.pos[e];
+                    const k = self.tourSeq(e);
                     if (k <= j + 1 or k + 1 >= n) continue;
                     const f = self.tour[(k + 1) % n];
                     if (f == a or f == b or f == c or f == d) continue;
@@ -4950,10 +4952,10 @@ const LocalSearch = struct {
         // exactly {(b,c),(d,a)} — the move whose gain the search verified. The
         // ...a->b ... c->d... orientation closes into two cycles and must fall
         // through to the validating applier instead of being reversed blindly.
-        const pb = self.pos[b];
-        const pd = self.pos[d];
-        if (self.next[a] == b and self.next[d] == c and pb <= pd) {
-            self.reverseSegment(pb, pd);
+        const pb = self.tourSeq(b);
+        const pd = self.tourSeq(d);
+        if (self.tourNext(a) == b and self.tourNext(d) == c and pb <= pd) {
+            self.reverseBetween(b, d);
             self.rebuildState();
             return true;
         }
@@ -5042,8 +5044,8 @@ const LocalSearch = struct {
     }
 
     fn preferredFirstNeighbor(self: *LocalSearch, start: usize, a: usize, b: usize) usize {
-        if (self.next[start] == a) return a;
-        if (self.next[start] == b) return b;
+        if (self.tourNext(start) == a) return a;
+        if (self.tourNext(start) == b) return b;
         return @min(a, b);
     }
 
@@ -5086,11 +5088,14 @@ const LocalSearch = struct {
         const n = self.tour.len;
         for (0..n) |i| {
             const a = self.tour[i];
+            // Warm-up sweeps mutate via reverseSegment (tour+pos only), so the
+            // next/prev cache is stale here — read successors from tour[]/pos[].
+            // Only tourSeq/reverseBetween (pos-based, always current) use the seam.
             const b = self.tour[(i + 1) % n];
             const old_ab = self.dist.distance(a, b);
 
             for (self.candidates.row(a)) |c| {
-                const j = self.pos[c];
+                const j = self.tourSeq(c);
                 if (j <= i + 1) continue;
                 if (i == 0 and j == n - 1) continue;
                 const d = self.tour[(j + 1) % n];
@@ -5100,7 +5105,7 @@ const LocalSearch = struct {
                 const new_ac = self.dist.distance(a, c);
                 const new_bd = self.dist.distance(b, d);
                 if (@as(u64, old_ab) + old_cd > @as(u64, new_ac) + new_bd) {
-                    self.reverseSegment(i + 1, j);
+                    self.reverseBetween(b, c);
                     return true;
                 }
             }
@@ -5114,13 +5119,14 @@ const LocalSearch = struct {
 
         for (0..n) |i| {
             const b = self.tour[i];
+            // Warm-up sweep: next/prev cache is stale (see improve2Opt note).
             const a = self.tour[(i + n - 1) % n];
             const c = self.tour[(i + 1) % n];
             const remove_old = @as(u64, self.dist.distance(a, b)) + self.dist.distance(b, c);
             const remove_new = self.dist.distance(a, c);
 
             for (self.candidates.row(b)) |x| {
-                const j = self.pos[x];
+                const j = self.tourSeq(x);
                 const y = self.tour[(j + 1) % n];
                 if (x == a or x == b or x == c or y == a or y == b) continue;
                 if ((j + 1) % n == i) continue;
@@ -5143,6 +5149,33 @@ const LocalSearch = struct {
             }
         }
         return false;
+    }
+
+    // --- Tour ADT seam (architecture H2) ------------------------------------
+    // The search/move logic reaches the tour ONLY through these accessors, never
+    // through the raw next/prev/pos arrays. For the array representation they are
+    // identity wrappers (inlined, zero cost), so this is a no-op refactor; the
+    // point is the boundary — swapping in a two-level list (math.html R1) becomes
+    // a reimplementation of this surface plus the node-based segment queries
+    // (circularSegmentSize / nodeInCircularSegment / segmentIsNoMoreThanHalf /
+    // between / isTourEdge), with no call-site churn. tourSeq returns an opaque
+    // tour-order token: comparing two tokens is valid in any representation;
+    // arithmetic on it (token+1) is array-specific and confined to the warm-up
+    // sweeps that R1 rewrites as next()-walks.
+    inline fn tourNext(self: *const LocalSearch, c: usize) usize {
+        return self.next[c];
+    }
+    inline fn tourPrev(self: *const LocalSearch, c: usize) usize {
+        return self.prev[c];
+    }
+    inline fn tourSeq(self: *const LocalSearch, c: usize) usize {
+        return self.pos[c];
+    }
+    // Reverse the tour segment running from `first_node` to `last_node` in tour
+    // order (caller guarantees first precedes last). Node-based so callers never
+    // name raw positions.
+    fn reverseBetween(self: *LocalSearch, first_node: usize, last_node: usize) void {
+        self.reverseSegment(self.tourSeq(first_node), self.tourSeq(last_node));
     }
 
     fn reverseSegment(self: *LocalSearch, first: usize, last: usize) void {
@@ -5217,8 +5250,7 @@ const LocalSearch = struct {
     }
 
     fn isTourEdge(self: *const LocalSearch, a: usize, b: usize) bool {
-        var view = self.tourView();
-        return view.next(a) == b or view.prev(a) == b;
+        return self.tourNext(a) == b or self.tourPrev(a) == b;
     }
 
     fn tourView(self: anytype) TourView {
