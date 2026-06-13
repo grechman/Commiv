@@ -25,12 +25,58 @@ optimal at pinned seed (pr1002 SOLVED 259045), suite ~50 s, no original row
 loses to LKH RUNS=1 on both axes; fl1577 22256 < LKH's 22262 at 7x its speed;
 rl11849 probe 0.800%/160 s vs LKH optimum in 1287.6 s. Tree uncommitted.
 
-**First step for a new agent:** items 0-3 are DONE and COMMITTED (round 17,
-2026-06-13). Commits: e89460b (items 0+1 checkpoint), 334f860 (item 2),
-6e3c654 (item 3). NEXT is open — likely item 4 (diversity-aware pool) or
-item 6 (on-the-fly distances, also unblocks the d18512 row + reveals the real
-item-2/item-6 win). The dominant speed lever (per-move O(n) applyEdges rebuild)
-is item-8-shaped and stays FUTURE.
+**First step for a new agent:** items 0-2 DONE/COMMITTED; item 3 is CLOSED as a
+structural dead end (round 18 — see below + item3.md). NEXT is item 4
+(diversity-aware pool) or item 6 (on-the-fly distances, also unblocks the d18512
+row + reveals the real item-2/item-6 win). The dominant speed lever (per-move
+O(n) applyEdges rebuild) is item-8-shaped and stays FUTURE.
+
+ROUND-18 RESULT — ITEM 3 (voting-freeze) IS DEAD, PROVEN, NOT JUST SUSPECTED:
+The round-17 revival plan blamed vote-stream correlation/impurity and hoped a
+diverse vote source would fix it. Round 18 MEASURED that and it is wrong.
+- **Purity is irrelevant.** Single-run frozen sets are already ~96% pure
+  (rat575 8 traps/241, d657 14 traps/350); de-trapping them (freeze only
+  frozen∩optimal) makes results WORSE (rat575 6780->6794, d657 48955->48972).
+- **A perfectly pure backbone still loses accuracy.** Injecting a 100%-pure
+  subset of the KNOWN-OPTIMAL edges as a hard freeze on pr1002 gives 260027-260217
+  (~0.4% worse) vs 259045, at 2.7-5.5x speed. The frozen edges are IN the
+  optimum, yet freezing them blocks it: LK reaches better tours by temporarily
+  breaking-and-rebuilding edges the final tour keeps. Hard-fixing ANY edge
+  removes that trajectory. The speed can't convert to accuracy (8x budget still
+  floors at 260027).
+- **Soft freeze (LKH-style, deprioritize-don't-forbid): built + measured.**
+  Marginal speed (lk_nodes is not the dominant cost; tour_rebuilds is) and STILL
+  loses accuracy (pr1002 259410 @ recall 0.5).
+- **The only positive** — kick-only freeze gives rat575 a real mean gain (12
+  seeds: 6782.83 -> 6780.42), but needs continuous freeze (staleness-gating it
+  kills the gain) and regresses still-productive d657/pr1002. A plateau-degeneracy
+  gate (tied_node_frac>0.7) ships it with no accuracy regression BUT costs ~8%
+  time on big high-plateau fl1577, collapsing to a single-fixture overfit for a
+  0.037% gain. Not worth a default change.
+- **Recommendation:** stop the diverse-vote-source work (items 5/9 won't rescue
+  freeze — purity was never the blocker). Freeze subsystem is a DELETE candidate
+  for the next cleanup. Round-18 additions (inject_frozen, edge_freeze_soft,
+  edge_freeze_stale_window, frozen_edges_out + tools/edgeset.py, tools/plateau.py)
+  are default-off measurement scaffolding kept for reproducibility; OFF path
+  bit-identical, 44 tests pass. Full record in item3.md.
+
+ROUND-17 RESULTS:
+- **Item 2 (delta-maintained tour length): SHIPPED.** Bit-identical (rat575
+  6779/459, pr1002 259045, fl1577 22256; all sub-1000 fixtures unchanged; 44
+  tests both modes). Wall-clock NEUTRAL in the cached regime (pinned pr1002
+  A/B ~12.64 s vs ~12.71 s — lookups are L2/L3 hits, not DRAM misses, so
+  cutting per-trial scans doesn't move time). It removes the per-trial O(n)
+  scans, which is real budget in the future UNCACHED n>=10k path (item 6). The
+  big cached-regime lever (per-move rebuild) is item 8, out of item-2 scope.
+- **Item 3 (voting-freeze): BUILT, MEASURED, SHIPPED DEFAULT-OFF.** It is real
+  but instance-specific, NOT a general accuracy win — see the do-not-retry
+  table. The literal-spec LK-respecting variant is strictly worse everywhere.
+  The kick-only variant unlocks rat575 across all 3 seeds (6779/6779/6788 ->
+  6776/6777/6777) but regresses d657 (+100) and pr1002 (+363) by the same
+  freezing, with no separating threshold. Defaults are the validated kick-only
+  m384/f95 config; enable via SolveOptions.enable_edge_freeze for rat575-class
+  plateau instances only. [ROUND 18: the "future diverse vote source" hope here
+  is DISPROVEN — purity is not the blocker. See round-18 result above.]
 
 ROUND-17 RESULTS:
 - **Item 2 (delta-maintained tour length): SHIPPED.** Bit-identical (rat575
@@ -80,7 +126,7 @@ run the full bench: `taskset -c 0 nice -n 10 zig build bench -Doptimize=ReleaseF
 | 0 | ✓DONE r16. SETUP: 20k bench row — `curl -sL -o vendor/tsplib/d18512.tsp https://raw.githubusercontent.com/mastqe/tsplib/master/d18512.tsp` (n=18512, EUC_2D, optimum 645238); probe-budget fixture like rl11849 (headline_only, fixed_trials); raise bench/profile max_dimension to 20_000 | none | none | distance matrix would be 1.37 GB on a 7 GB box — run with candidate-based distances or accept the squeeze until item 6 lands. NOTE r16: fixed_trials mirrored rl11849=400, but the matrix squeeze makes that ~hours; the full bench was NOT run with this row. Lower it (or gate on item 6) before enabling in the always-run suite. |
 | 1 | ✓DONE r16. Per-trial cost counters (distance lookups, O(n) passes, flip ops, LK node ops; pr1002/fl1577/rl11849) | none (gate for 2, 6, 8) | none | everything below is accepted/rejected against these numbers. See "Item-1 measured counters" below. |
 | 2 | ✓DONE r17 (334f860). Delta-maintained tour length. Bit-identical; wall-clock NEUTRAL in the cached regime (the part that ships). Undo-log kicks / killing the per-move rebuild are item-8-shaped (array rep forces O(n)/move via between()/pos[]) and were correctly NOT attempted — out of item-2's zero-acc-risk scope. | NEUTRAL cached / real in uncached n>=10k (item 6) | none | the roadmap's "2-4x" assumed the per-move rebuild dies too; it doesn't here (item 8). |
-| 3 | ✓DONE r17 (6e3c654), SHIPPED DEFAULT-OFF. Voting-freeze (Misra-Gries k=2/node) built per spec + a kick-only variant. Literal spec (LK-respect) strictly worse. Kick-only unlocks rat575 (all 3 seeds) but regresses d657+pr1002, no separating threshold => fails the suite gate. | n/a | rat575-only (instance-specific, NOT general) | see do-not-retry. Combiner cut-through works; root limit is the kick-correlated vote stream — needs a DIVERSE source (items 5/9) to generalize. |
+| 3 | ✗CLOSED r18 — STRUCTURAL DEAD END (proven). Voting-freeze gains nothing general: a 100%-pure backbone still loses accuracy under freeze (LK needs break-and-rebuild of even optimal edges), soft freeze too, and purity was never the blocker (r17's diverse-vote-source plan is void). Only positive is a 0.037% rat575 niche gated by an overfit detector. Delete candidate. | none | none (rat575 niche 0.037%) | full post-mortem in item3.md. Do NOT pursue items 5/9 to "fix" freeze. |
 | 4 | Diversity-aware pool replacement (HGS biased fitness: rank by cost + diversity contribution via symdiff; never evict best) | small | medium on long runs / big n | v1 replace-worst WILL clone-collapse at scale; symdiff machinery already computes the metric |
 | 5 | Pool-pair crossover restarts (seed occasional trials from the EAX product of two pool members) | none | small-medium | true EAX-GA generational step; machinery exists |
 | 6 | On-the-fly distances at n>=10k (drop the big matrix) | 1.5-3x at n>=10k | none | every matrix lookup is a DRAM miss; candidate-distance option half-exists; unblocks the 20k row properly |
@@ -139,7 +185,12 @@ Gate readings (direct from the plan's own thresholds):
 | Single-seed gating of any change | four pinned-seed mirages in rounds 11-15; always check seeds {12345, 7, 99} |
 | Voting-freeze enabled GLOBALLY / by default (item 3) | r17: helps rat575 (all 3 seeds, 6782->6777 mean) but regresses d657 (+100) and pr1002 (+363); no threshold separates the gain from the regression (when rat575 gains, d657 loses, and vice versa). Shipped default-off as opt-in. |
 | Voting-freeze with LK respecting frozen edges (the literal spec) | r17: strictly worse everywhere — over-constrains the descent. min64/frac85 freezes 90% of rat575's edges (515/575), 254k move rejections -> 6836. Only the KICK-ONLY variant (LK full power, perturbation avoids frozen edges) ever beats baseline. |
-| Voting-freeze over a kick-correlated / distinct-incumbent stream | r17: both over-freeze because the vote stream lacks cross-basin diversity (incumbents are incremental => correlated; 9 incumbents still froze 380/575). Consensus = current attractor, not true backbone. Would need a genuinely diverse vote source (elite-pool members / combiner products — items 5/9) to be meaningful. |
+| Voting-freeze over a kick-correlated / distinct-incumbent stream | r17 suspected, **r18 DISPROVEN as the cause**: a diverse vote source does give a near-pure backbone (16-seed consensus 99.8-100% pure) but it does NOT help — see the structural rows below. Purity was never the blocker. |
+| Voting-freeze: ANY diverse/purer vote source (item 3 idea #1, items 5/9) | r18: single-run frozen sets are already ~96% pure; **de-trapping them (freeze only frozen∩optimal) makes results WORSE** (rat575 6780->6794, d657 48955->48972). The traps aren't the problem. Building a diverse vote source is wasted effort. |
+| Voting-freeze: hard LK-respect, even of a 100%-PURE backbone | r18: injecting a subset of the KNOWN-OPTIMAL edges as a hard freeze on pr1002 gives 260027-260217 (~0.4% worse) vs 259045, at 2.7-5.5x speed. Structural: LK reaches better tours by temporarily breaking-and-rebuilding edges the final tour keeps; hard-fixing any edge (even optimal) removes that trajectory. 8x budget still floors at 260027 — speed can't convert to accuracy. |
+| Voting-freeze: soft freeze (LKH-style, skip search initiation in backbone, never forbid) | r18: built + measured. Marginal speed (lk_search_nodes is not the dominant cost — tour_rebuilds is) and STILL loses accuracy (pr1002 259410 @ recall 0.5) — skipping initiation misses the same break-and-rebuild improvements. |
+| Voting-freeze: staleness-gating to protect productive instances | r18: NEUTRALIZES the feature. d657 protected at window>=256 but rat575 reverts to 6779 (gain gone) — the rat575 escape needs CONTINUOUS freeze from early. No single window wins both. |
+| Voting-freeze: plateau-degeneracy auto-gate (tied_node_frac) | r18: separates rat575 (0.824) from d657/pr1002 (0.303/0.467) and ships the rat575 +2.5-mean gain with no accuracy regression — BUT fl1577 is high-plateau (0.983) and freeze costs it ~8% TIME for zero gain (hard target <5s). Collapses to a small-AND-plateau single-fixture overfit for 0.037%. Item 3 closed; freeze is a delete candidate. |
 
 ## Verification
 

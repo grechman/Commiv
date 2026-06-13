@@ -36,6 +36,32 @@ pub fn main(init: std.process.Init) !void {
     // 1=LK respects frozen edges (default), 0=kick-only freeze.
     const freeze_mode_arg = init.environ_map.get("PROF_FREEZE_MODE") orelse "0";
     const freeze_lk_arg = init.environ_map.get("PROF_FREEZE_LK") orelse "1";
+    const freeze_stale_arg = init.environ_map.get("PROF_FREEZE_STALE") orelse "0";
+    const freeze_soft_arg = init.environ_map.get("PROF_FREEZE_SOFT") orelse "0";
+
+    var frozen_edges: std.ArrayList(u32) = .empty;
+    defer frozen_edges.deinit(allocator);
+    const want_frozen = init.environ_map.get("PROF_FROZEN_OUT");
+
+    // Item-3 revival: load an injected backbone (1-indexed "u v" per line),
+    // pack lo<<32|hi and sort ascending for binary search inside the solver.
+    var inject: std.ArrayList(u64) = .empty;
+    defer inject.deinit(allocator);
+    if (init.environ_map.get("PROF_FROZEN_IN")) |in_path| {
+        const txt = try std.Io.Dir.cwd().readFileAlloc(init.io, in_path, allocator, .limited(8 * 1024 * 1024));
+        defer allocator.free(txt);
+        var it = std.mem.tokenizeAny(u8, txt, " \n\r\t");
+        while (it.next()) |a_tok| {
+            const b_tok = it.next() orelse break;
+            const a = (try std.fmt.parseInt(usize, a_tok, 10)) - 1;
+            const b = (try std.fmt.parseInt(usize, b_tok, 10)) - 1;
+            const lo = @min(a, b);
+            const hi = @max(a, b);
+            try inject.append(allocator, (@as(u64, @intCast(lo)) << 32) | @as(u64, @intCast(hi)));
+        }
+        std.mem.sort(u64, inject.items, {}, std.sort.asc(u64));
+        std.debug.print("  inject: loaded {} frozen backbone edges\n", .{inject.items.len});
+    }
 
     const start_ns = monotonicNanos();
     var result = try commiv.solve(allocator, &p, .{
@@ -58,6 +84,10 @@ pub fn main(init: std.process.Init) !void {
         .edge_freeze_fraction_x100 = try std.fmt.parseInt(u32, freeze_frac_arg, 10),
         .edge_freeze_vote_mode = if ((try std.fmt.parseInt(u8, freeze_mode_arg, 10)) != 0) .distinct_incumbents else .gated_trials,
         .edge_freeze_lk_respect = (try std.fmt.parseInt(u8, freeze_lk_arg, 10)) != 0,
+        .edge_freeze_stale_window = try std.fmt.parseInt(usize, freeze_stale_arg, 10),
+        .edge_freeze_soft = (try std.fmt.parseInt(u8, freeze_soft_arg, 10)) != 0,
+        .frozen_edges_out = if (want_frozen != null) &frozen_edges else null,
+        .inject_frozen = inject.items,
     });
     defer result.deinit();
     const elapsed = monotonicNanos() - start_ns;
@@ -85,6 +115,21 @@ pub fn main(init: std.process.Init) !void {
             "  freeze: votes={} decrements={} move_rejections={} frozen_edges_final={}/{}\n",
             .{ st.freeze_votes, st.freeze_decrements, st.freeze_move_rejections, st.frozen_edges_final, n },
         );
+    }
+
+    if (want_frozen) |out_path| {
+        var buf: [64]u8 = undefined;
+        var file = try std.Io.Dir.cwd().createFile(init.io, out_path, .{});
+        defer file.close(init.io);
+        var writer_buf: [4096]u8 = undefined;
+        var fw = file.writer(init.io, &writer_buf);
+        var i: usize = 0;
+        while (i + 1 < frozen_edges.items.len) : (i += 2) {
+            // 1-indexed to match the .tour / PROF_TOUR_OUT convention.
+            const line = try std.fmt.bufPrint(&buf, "{} {}\n", .{ frozen_edges.items[i] + 1, frozen_edges.items[i + 1] + 1 });
+            try fw.interface.writeAll(line);
+        }
+        try fw.interface.flush();
     }
 
     if (init.environ_map.get("PROF_TOUR_OUT")) |out_path| {
