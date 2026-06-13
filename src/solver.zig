@@ -1172,11 +1172,12 @@ pub fn solve(
                 for (touched) |node| search.lkActivate(node);
             }
             for (plateau_touched[0 .. plateau_stride * plateau_count]) |node| search.lkActivate(node);
+            try search.syncLength();
             const lk_moves = try search.improveLK(&stats, false, false);
             stats.improving_moves += lk_moves;
             // Only tours that beat the incumbent earn the expensive fallback
             // sweeps (Gain23 bridge / 4-opt / bounded 3-opt polish).
-            if (try oracle.tourLengthUnchecked(workspace.tour) < best_len) {
+            if (search.current_length < best_len) {
                 const polish_moves = try search.improveLK(&stats, false, true);
                 stats.improving_moves += polish_moves;
             }
@@ -1192,6 +1193,7 @@ pub fn solve(
                 stats.warmup_moves += warmup_moves;
                 stats.improving_moves += warmup_moves;
                 search.rebuildState();
+                try search.syncLength();
                 const lk_moves = try search.improveLK(&stats, true, true);
                 stats.improving_moves += lk_moves;
             } else {
@@ -1203,9 +1205,10 @@ pub fn solve(
                 for (workspace.used, 0..) |touched, node| {
                     if (touched) search.lkActivate(node);
                 }
+                try search.syncLength();
                 const lk_moves = try search.improveLK(&stats, false, false);
                 stats.improving_moves += lk_moves;
-                if (try oracle.tourLengthUnchecked(workspace.tour) < best_len) {
+                if (search.current_length < best_len) {
                     stats.guided_polishes += 1;
                     const polish_moves = try search.improveLK(&stats, false, true);
                     stats.improving_moves += polish_moves;
@@ -1217,6 +1220,7 @@ pub fn solve(
             stats.warmup_moves += warmup_moves;
             stats.improving_moves += warmup_moves;
             search.rebuildState();
+            try search.syncLength();
             if (options.enable_lk) {
                 const lk_moves = try search.improveLK(&stats, true, true);
                 stats.improving_moves += lk_moves;
@@ -1236,7 +1240,7 @@ pub fn solve(
             const use_merged = merged_len < best_len;
             const ref_tour: []const usize = if (use_merged) ipt.merged else workspace.best_tour;
             const ref_len = if (use_merged) merged_len else best_len;
-            const trial_len = try oracle.tourLengthUnchecked(workspace.tour);
+            const trial_len = search.current_length;
             if (trial_len <= ref_len + ref_len / 32) {
                 stats.eax_merge_attempts += 1;
                 @memcpy(ipt.tour_a, workspace.tour);
@@ -1301,7 +1305,7 @@ pub fn solve(
         // pure upside. Gated to trials within ~3% of the incumbent so
         // hopeless tours don't pay the scan.
         if (n >= eax_min_dimension and options.enable_lk and best_len != std.math.maxInt(u64)) {
-            const trial_len = try oracle.tourLengthUnchecked(workspace.tour);
+            const trial_len = search.current_length;
             // References come from the elite pool: a small population of
             // diverse high-quality tours, each one a structurally different
             // parent whose symmetric difference against the trial exposes
@@ -1379,7 +1383,14 @@ pub fn solve(
             elitePoolOffer(&elite, &eax, workspace.tour, trial_len);
         }
 
-        const len = try oracle.tourLengthUnchecked(workspace.tour);
+        // Roadmap item 2: read the delta-maintained length instead of rescanning.
+        // Debug builds verify it against a fresh scan so any missed/incorrect
+        // move delta surfaces as a test failure rather than a silent drift.
+        if (std.debug.runtime_safety) {
+            const scanned = try oracle.tourLengthUnchecked(workspace.tour);
+            std.debug.assert(search.current_length == scanned);
+        }
+        const len = search.current_length;
         if (len < best_len) {
             if (best_len != std.math.maxInt(u64)) {
                 prev_best_len = best_len;
@@ -3383,6 +3394,13 @@ const LocalSearch = struct {
     lk_active_queue: []usize,
     lk_active_head: usize = 0,
     lk_active_count: usize = 0,
+    // Roadmap item 2 (incremental bookkeeping): the tour length, maintained
+    // delta-style so the trial loop reads it in O(1) instead of rescanning the
+    // whole tour (the per-trial full-array scans the item-1 counters measured).
+    // syncLength() reseeds it from one scan after each construction/kick; every
+    // move applier folds in its exact edge delta. Debug builds assert it against
+    // a fresh scan at the end of each trial, so any drift fails the test suite.
+    current_length: u64 = 0,
 
     // Active-node queue ("don't-look bits", Helsgaun Sec. 3/LKH StoreTour):
     // only nodes whose neighborhood changed since their last failed search are
@@ -4099,6 +4117,7 @@ const LocalSearch = struct {
 
     fn testAndApplyMove(self: *LocalSearch, removed_count: usize, added_count: usize, stats: *SolveStats) bool {
         if (removed_count == 2 and added_count == 2 and self.applyDepth2ClosingMove()) {
+            self.applyLengthDeltaArrays(removed_count, added_count);
             self.lkActivateMoveEndpoints(removed_count, added_count);
             stats.lk_applied_depth_total += removed_count;
             stats.lk_deepest_applied_depth = @max(stats.lk_deepest_applied_depth, removed_count);
@@ -4189,6 +4208,7 @@ const LocalSearch = struct {
             stats.move_plan_apply_fallbacks += 1;
             return self.applyMoveWithHamiltonianFallback(removed_count, added_count, stats);
         }
+        self.applyLengthDeltaArrays(removed_count, added_count);
         self.lkActivateMoveEndpoints(removed_count, added_count);
         stats.move_plan_direct_applies += 1;
         return true;
@@ -4339,6 +4359,9 @@ const LocalSearch = struct {
             stats.move_plan_patch_rejected += 1;
             return false;
         }
+        // Patch rewrites the edge set; current_length comes straight from the
+        // after-scan this path already computed (no extra cost, exact).
+        self.current_length = after_len;
         for (final_removed) |edge| {
             self.lkActivate(edge.a);
             self.lkActivate(edge.b);
@@ -4563,6 +4586,7 @@ const LocalSearch = struct {
             self.rebuildState();
             return false;
         }
+        self.applyLengthDeltaArrays(removed_count, added_count);
         self.lkActivateMoveEndpoints(removed_count, added_count);
         stats.move_plan_fallback_successes += 1;
         return true;
@@ -4797,6 +4821,28 @@ const LocalSearch = struct {
         self.stats.tour_rebuilds += 1;
         var view = self.tourView();
         view.rebuild();
+    }
+
+    // Roadmap item 2: reseed current_length from a single full scan. Called
+    // once per trial after the tour is constructed/kicked/warmed-up, just
+    // before the first LK descent; everything after maintains it by delta.
+    fn syncLength(self: *LocalSearch) !void {
+        self.current_length = try self.dist.tourLengthUnchecked(self.tour);
+    }
+
+    // Fold an applied move's exact length delta into current_length. The move
+    // is read from removed_a/b + added_a/b: the direct-apply path, the
+    // Hamiltonian fallback, and the depth-2 closing move all apply exactly that
+    // edge set. (Patch moves rewrite the edge set, so they set current_length
+    // from their own after-scan instead of calling this.)
+    fn applyLengthDeltaArrays(self: *LocalSearch, removed_count: usize, added_count: usize) void {
+        var added_sum: u64 = 0;
+        for (0..added_count) |i| added_sum += self.dist.distance(self.added_a[i], self.added_b[i]);
+        var removed_sum: u64 = 0;
+        for (0..removed_count) |i| removed_sum += self.dist.distance(self.removed_a[i], self.removed_b[i]);
+        // current_length includes the removed edges, so current_length +
+        // added_sum >= removed_sum; no unsigned underflow.
+        self.current_length = self.current_length + added_sum - removed_sum;
     }
 
     fn isTourEdge(self: *const LocalSearch, a: usize, b: usize) bool {
@@ -5293,6 +5339,7 @@ test "bounded LK escapes a constructed 2-opt and Or-opt local optimum" {
         .lk_nonseq_branch_limit = 8,
     };
     search.rebuildState();
+    try search.syncLength();
     const start_len = try oracle.tourLengthUnchecked(workspace.tour);
     try std.testing.expectEqual(@as(u64, 197), start_len);
     try std.testing.expect(!try search.improve2Opt());
