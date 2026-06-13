@@ -25,9 +25,23 @@ optimal at pinned seed (pr1002 SOLVED 259045), suite ~50 s, no original row
 loses to LKH RUNS=1 on both axes; fl1577 22256 < LKH's 22262 at 7x its speed;
 rl11849 probe 0.800%/160 s vs LKH optimum in 1287.6 s. Tree uncommitted.
 
-**First step for a new agent:** roadmap item 0 (setup), then item 1
-(instrumentation). Do not skip to the fun items — every change below item 1
-gets accepted or rejected against its counters.
+**First step for a new agent:** items 0 + 1 are DONE (round 16, 2026-06-13;
+tree uncommitted). USER DECISION 2026-06-13: speed is accepted — item 2
+(incremental bookkeeping) is DEFERRED, not next. NEXT = **item 3, the
+Boyer-Moore / Misra-Gries voting-freeze** (accuracy; the rat575 unlock
+candidate). Build it against the item-3 constraints in the roadmap table
+verbatim: k=2 counter slots/node, vote the 2 tour-neighbors per node on GATED
+trials only, freeze an edge when BOTH endpoints' counters >= threshold,
+constructions follow frozen edges + LK must not break them, but FREEZE THE
+GENERATOR NEVER THE COMBINER (EAX/IPT must still cut through frozen regions),
+counters auto-thaw on disagreement, threshold needs measurement (kick-correlated
+stream inflates counters). Gate every change on: rat575 bit-identical canary +
+the 3-row quick regression + full multi-seed bench at seeds {12345,7,99}.
+Item-1 counters remain the speed yardstick if item 2 is ever revived (the full
+O(n) applyEdges rebuild per accepted move is the measured dominant lever).
+
+d18512 400-trial headline (round 16, seed 12345, EXT 0, width auto=5):
+652023 / 1.051% / 167.6 s — rl11849-scale, fixed_trials=400 is fine.
 
 ## Quick regression protocol (after EVERY major change)
 
@@ -48,8 +62,8 @@ run the full bench: `taskset -c 0 nice -n 10 zig build bench -Doptimize=ReleaseF
 
 | # | Build | Est. time win | Est. acc win | Key constraint / design note |
 |---|---|---|---|---|
-| 0 | SETUP: 20k bench row — `curl -sL -o vendor/tsplib/d18512.tsp https://raw.githubusercontent.com/mastqe/tsplib/master/d18512.tsp` (n=18512, EUC_2D, optimum 645238); probe-budget fixture like rl11849 (headline_only, fixed_trials); raise bench/profile max_dimension to 20_000 | none | none | distance matrix would be 1.37 GB on a 7 GB box — run with candidate-based distances or accept the squeeze until item 6 lands |
-| 1 | Per-trial cost counters (distance lookups, O(n) passes, flip ops, LK node ops; pr1002/fl1577/rl11849) | none (gate for 2, 6, 8) | none | everything below is accepted/rejected against these numbers |
+| 0 | ✓DONE r16. SETUP: 20k bench row — `curl -sL -o vendor/tsplib/d18512.tsp https://raw.githubusercontent.com/mastqe/tsplib/master/d18512.tsp` (n=18512, EUC_2D, optimum 645238); probe-budget fixture like rl11849 (headline_only, fixed_trials); raise bench/profile max_dimension to 20_000 | none | none | distance matrix would be 1.37 GB on a 7 GB box — run with candidate-based distances or accept the squeeze until item 6 lands. NOTE r16: fixed_trials mirrored rl11849=400, but the matrix squeeze makes that ~hours; the full bench was NOT run with this row. Lower it (or gate on item 6) before enabling in the always-run suite. |
+| 1 | ✓DONE r16. Per-trial cost counters (distance lookups, O(n) passes, flip ops, LK node ops; pr1002/fl1577/rl11849) | none (gate for 2, 6, 8) | none | everything below is accepted/rejected against these numbers. See "Item-1 measured counters" below. |
 | 2 | Incremental bookkeeping: undo-log kicks instead of O(n) memcpy, delta-maintained tour length, no per-trial full-array passes | 2-4x at n>=1k, grows with n | none | pure waste removal, zero acc risk; main lever for the 15 s / 5 s targets |
 | 3 | Voting-freeze (Boyer-Moore/Misra-Gries, k=2 counter slots per node): each merge-gated trial votes its 2 neighbors per node; freeze edge when BOTH endpoints' counters >= threshold; constructions follow frozen edges, LK must not break them | 1.5-3x on degenerate rows | medium (pr1002/rat575/rl11849 class — the rat575 unlock candidate) | FREEZE THE GENERATOR, NEVER THE COMBINER (EAX/IPT must cut through frozen regions — joint section moves are the measured pr1002 mechanism); counters auto-thaw on disagreement = built-in confidence dial; vote only on gated trials; threshold needs measurement (stream is kick-correlated, counters inflate) |
 | 4 | Diversity-aware pool replacement (HGS biased fitness: rank by cost + diversity contribution via symdiff; never evict best) | small | medium on long runs / big n | v1 replace-worst WILL clone-collapse at scale; symdiff machinery already computes the metric |
@@ -59,6 +73,40 @@ run the full bench: `taskset -c 0 nice -n 10 zig build bench -Doptimize=ReleaseF
 | 8 | FUTURE (100k+ tier): B-tree tour representation | ~2-3% at n=11849 — not yet | none | flips are ~3% of trial cost (segment two-level rep active at n>=512); build only when item-1 counters show flips >= 10% (projected ~1e5 nodes) |
 | 9 | Multithreaded independent trial streams into one elite pool | ~cores x | medium (best-of-streams) | LAST (user doctrine); converts seed variance into accuracy; LKH is single-threaded |
 | 10 | ATSP via Jonker-Volgenant 2n transform (problem.zig layer) | none (costs 2-4x on asymmetric inputs) | none | capability only; deferred until VRP work |
+
+## Item-1 measured counters (round 16, 2026-06-13)
+
+Counters added to `SolveStats` (always-on, like lk_search_nodes): `distance_lookups`,
+`tour_length_scans` (full O(n) tour-length recompute), `tour_rebuilds` (full O(n) tour-state
+rebuild = every applyEdges move-apply + rebuildState), `flip_ops`/`flip_elements` (segment
+reversals). LK node ops stay in `lk_search_nodes`. Reset after the one-time candidate build,
+so they measure the trial loop only. `commiv-profile` prints a `cost:` line. Non-perturbing:
+rat575 still 6779/best_trial 459, pr1002 259045, fl1577 22256, rl11849 0.800%/156s — all
+bit-exact vs round 15.
+
+Pinned seed 12345. Distances are CACHED at every n here (matrix fits), so each lookup is an
+L2/L3 hit, not the DRAM miss item 6 attacks — these numbers are *counts*, not cycles.
+
+| Row | n | dist_lookups/trial | length_scans | tour_rebuilds | tour_rebuilds × n | flip_ops | flip_elements | lk_nodes/trial |
+|---|---|---|---|---|---|---|---|---|
+| rat575 | 575 | 42,315 | 10,154 | 86,108 | 4.95e7 | 809 | 60,532 | 1,174 |
+| pr1002 | 1002 | 92,216 | 42,926 | 906,700 | 9.09e8 | 4,529 | 278,264 | 4,207 |
+| fl1577 | 1577 | 75,256 | 40,647 | 1,036,650 | 1.63e9 | 4,843 | 614,930 | 1,961 |
+| rl11849 | 11849 | 1,846,407 | 32,784 | 698,474 | 8.28e9 | 4,141 | 2,015,171 | 17,848 |
+
+Gate readings (direct from the plan's own thresholds):
+- **Item 2 (incremental bookkeeping) is the dominant lever and it grows with n, exactly as
+  predicted.** Every accepted LK move pays a full O(n) `applyEdges` rebuild. The O(n)
+  rebuild element-work (`tour_rebuilds × n`) is ~5x the distance-lookup count at pr1002 and
+  ~11x at rl11849. Killing the full rebuild (delta-maintained next/prev + segment patch
+  instead of whole-tour walk) is the main lever for the 15 s / 5 s targets.
+- **Item 8 (B-tree tour rep) stays FUTURE — gate NOT met.** `flip_elements` is tiny:
+  2.0e6 at rl11849 vs 8.3e9 rebuild element-work (<0.03%), far under the "flips >= 10% of
+  trial cost" build trigger. The 2-opt/Or-opt segment reversals are not where the time goes.
+- **Item 6 (on-the-fly distances) unverifiable from these rows** — all cached, so lookups are
+  cheap hits. The lever only appears when the matrix is dropped (n>=10k uncached); needs the
+  forced-uncached measurement item 6 introduces. d18512 single-trial probe (cached, 1.37 GB)
+  = 56 s, len 656749 (~1.78%).
 
 ## Measured do-not-retry (each cost a round to learn)
 

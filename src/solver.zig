@@ -111,6 +111,17 @@ pub const SolveStats = struct {
     distance_cache_nodes: usize = 0,
     distance_cache_weights: usize = 0,
     uncached_coordinate_distances: u64 = 0,
+    // Per-trial cost counters (roadmap item 1): the levers below are accepted
+    // or rejected against these. distance_lookups gates on-the-fly distances
+    // (item 6); tour_length_scans/tour_rebuilds gate incremental bookkeeping
+    // (item 2); flip_ops/flip_elements gate the B-tree tour rep (item 8); LK
+    // node ops already live in lk_search_nodes. All measured over the trial
+    // loop only (the one-time candidate build is excluded, cf. resetCounters).
+    distance_lookups: u64 = 0,
+    tour_length_scans: u64 = 0,
+    tour_rebuilds: u64 = 0,
+    flip_ops: u64 = 0,
+    flip_elements: u64 = 0,
 };
 
 pub const SolveResult = struct {
@@ -661,6 +672,8 @@ pub const DistanceOracle = struct {
     matrix: []const u32,
     owned_matrix: []u32,
     uncached_coordinate_distances: u64 = 0,
+    lookups: u64 = 0,
+    length_scans: u64 = 0,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -713,11 +726,16 @@ pub const DistanceOracle = struct {
         return self.matrix.len != 0;
     }
 
-    fn resetUncachedCounter(self: *DistanceOracle) void {
+    // Zeroes the per-trial cost counters after the one-time candidate build so
+    // they measure only the trial loop (roadmap item 1).
+    fn resetCounters(self: *DistanceOracle) void {
         self.uncached_coordinate_distances = 0;
+        self.lookups = 0;
+        self.length_scans = 0;
     }
 
     fn distance(self: *DistanceOracle, a: usize, b: usize) u32 {
+        self.lookups += 1;
         if (self.matrix.len != 0) return self.matrix[a * self.p.dimension + b];
         if (self.p.distance_kind != .explicit_full_matrix) self.uncached_coordinate_distances += 1;
         return self.p.distanceUnchecked(a, b);
@@ -725,6 +743,7 @@ pub const DistanceOracle = struct {
 
     fn tourLengthUnchecked(self: *DistanceOracle, tour: []const usize) problem.ProblemError!u64 {
         std.debug.assert(tour.len == self.p.dimension);
+        self.length_scans += 1;
         var total: u64 = 0;
         for (0..tour.len) |i| {
             const a = tour[i];
@@ -937,7 +956,7 @@ pub fn solve(
     var candidate_stats: CandidateBuildStats = .{};
     var candidates = try buildCandidates(allocator, &oracle, width, options.candidate_mode, options.alpha_ascent_iterations, options.alpha_nearest_patch_count, &candidate_stats);
     defer candidates.deinit();
-    oracle.resetUncachedCounter();
+    oracle.resetCounters();
 
     const min_lk_depth: usize = if (options.enable_bounded_three_opt_cleanup) 3 else 2;
     const max_lk_depth = if (options.enable_lk) @min(@max(options.lk_max_depth, min_lk_depth), n - 1) else min_lk_depth;
@@ -1109,6 +1128,7 @@ pub fn solve(
 
         var search = LocalSearch{
             .dist = &oracle,
+            .stats = &stats,
             .candidates = &candidates,
             .tour = workspace.tour,
             .pos = workspace.pos,
@@ -1391,6 +1411,8 @@ pub fn solve(
     const result_tour = try allocator.dupe(usize, workspace.best_tour);
     errdefer allocator.free(result_tour);
     stats.uncached_coordinate_distances = oracle.uncached_coordinate_distances;
+    stats.distance_lookups = oracle.lookups;
+    stats.tour_length_scans = oracle.length_scans;
     return .{
         .allocator = allocator,
         .tour = result_tour,
@@ -3319,6 +3341,10 @@ fn eaxMergeTours(
 
 const LocalSearch = struct {
     dist: *DistanceOracle,
+    // Trial-loop cost counters (roadmap item 1) accumulate here directly:
+    // tour mutations (reverseSegment / applyEdges rebuilds) live in this
+    // struct, not in the ephemeral TourView, so they vote into stats in place.
+    stats: *SolveStats,
     candidates: *const Candidates,
     tour: []usize,
     pos: []usize,
@@ -4156,6 +4182,7 @@ const LocalSearch = struct {
             stats.move_plan_apply_fallbacks += 1;
             return self.applyMoveWithHamiltonianFallback(removed_count, added_count, stats);
         }
+        self.stats.tour_rebuilds += 1;
         // applyEdges only succeeds after walking a single Hamiltonian cycle and
         // rebuilding; the O(n) re-validation is debug-build paranoia.
         if (std.debug.runtime_safety and (!self.debugTourIsValid() or !self.debugSegmentMatchesFlatMaterialization())) {
@@ -4287,6 +4314,7 @@ const LocalSearch = struct {
             stats.move_plan_patch_rejected += 1;
             return false;
         }
+        self.stats.tour_rebuilds += 1;
         if (std.debug.runtime_safety and (!self.debugTourIsValid() or !self.debugSegmentMatchesFlatMaterialization())) {
             @memcpy(self.tour, self.candidate_tour);
             self.rebuildState();
@@ -4751,6 +4779,8 @@ const LocalSearch = struct {
     }
 
     fn reverseSegment(self: *LocalSearch, first: usize, last: usize) void {
+        self.stats.flip_ops += 1;
+        self.stats.flip_elements += last - first + 1;
         std.mem.reverse(usize, self.tour[first .. last + 1]);
         for (first..last + 1) |idx| {
             self.pos[self.tour[idx]] = idx;
@@ -4764,6 +4794,7 @@ const LocalSearch = struct {
     }
 
     fn rebuildState(self: *LocalSearch) void {
+        self.stats.tour_rebuilds += 1;
         var view = self.tourView();
         view.rebuild();
     }
@@ -5221,8 +5252,10 @@ test "bounded LK escapes a constructed 2-opt and Or-opt local optimum" {
     defer workspace.deinit();
     for (workspace.tour, 0..) |*node, i| node.* = i;
 
+    var stats: SolveStats = .{};
     var search = LocalSearch{
         .dist = &oracle,
+        .stats = &stats,
         .candidates = &candidates,
         .tour = workspace.tour,
         .pos = workspace.pos,
@@ -5265,7 +5298,6 @@ test "bounded LK escapes a constructed 2-opt and Or-opt local optimum" {
     try std.testing.expect(!try search.improve2Opt());
     try std.testing.expect(!try search.improveOrOpt1());
 
-    var stats: SolveStats = .{};
     const lk_moves = try search.improveLK(&stats, true, true);
     const end_len = try oracle.tourLengthUnchecked(workspace.tour);
     try std.testing.expect(lk_moves > 0);

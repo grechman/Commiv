@@ -68,6 +68,7 @@ const fixtures = [_]TsplibFixture{
     .{ .name = "pr1002", .path = "vendor/tsplib/pr1002.tsp", .tour_path = ".zig-cache/lkh-tours/pr1002.tour", .optimum = 259045 },
     .{ .name = "fl1577", .path = "vendor/tsplib/fl1577.tsp", .tour_path = ".zig-cache/lkh-tours/fl1577.tour", .optimum = 22249 },
     .{ .name = "rl11849", .path = "vendor/tsplib/rl11849.tsp", .tour_path = ".zig-cache/lkh-tours/rl11849.tour", .optimum = 923288, .headline_only = true, .fixed_trials = 400 },
+    .{ .name = "d18512", .path = "vendor/tsplib/d18512.tsp", .tour_path = ".zig-cache/lkh-tours/d18512.tour", .optimum = 645238, .headline_only = true, .fixed_trials = 400 },
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -105,7 +106,7 @@ fn runTsplibFixtures(allocator: std.mem.Allocator, io: std.Io) !void {
         var diag: commiv.ParseDiagnostic = .{};
         var p = commiv.parseTsplib(allocator, bytes, .{
             .diagnostic = &diag,
-            .max_dimension = 16_000,
+            .max_dimension = 20_000,
             .max_matrix_weights = 25_000_000,
         }) catch |err| {
             std.debug.print("# failed fixture: {s} line {} {s}\n", .{ fixture.name, diag.line, diag.message });

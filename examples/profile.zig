@@ -14,7 +14,7 @@ pub fn main(init: std.process.Init) !void {
     var diag: commiv.ParseDiagnostic = .{};
     var p = try commiv.parseTsplib(allocator, bytes, .{
         .diagnostic = &diag,
-        .max_dimension = 16_000,
+        .max_dimension = 20_000,
         .max_matrix_weights = 25_000_000,
     });
     defer p.deinit();
@@ -49,6 +49,24 @@ pub fn main(init: std.process.Init) !void {
     defer result.deinit();
     const elapsed = monotonicNanos() - start_ns;
     std.debug.print("{s} n={} trials={} len={} time={d:.0}ms nodes={} best_trial={} max_prog_gap={} final_prog_gap={} worst_ratio={}\n", .{ p.name, n, trials, result.length, @as(f64, @floatFromInt(elapsed)) / 1e6, result.stats.lk_search_nodes, result.stats.best_trial, result.stats.eax_max_progress_gap, result.stats.eax_final_progress_gap, result.stats.eax_worst_gap_ratio_x100 });
+
+    // Roadmap item-1 per-trial cost breakdown (gates items 2/6/8). Trial-loop
+    // only; the one-time candidate build is excluded by oracle.resetCounters.
+    const st = result.stats;
+    const trials_f = @as(f64, @floatFromInt(@max(st.trials, 1)));
+    std.debug.print(
+        "  cost: dist_lookups={} ({d:.0}/trial) length_scans={} tour_rebuilds={} flip_ops={} flip_elements={} lk_nodes={} ({d:.0}/trial)\n",
+        .{
+            st.distance_lookups,
+            @as(f64, @floatFromInt(st.distance_lookups)) / trials_f,
+            st.tour_length_scans,
+            st.tour_rebuilds,
+            st.flip_ops,
+            st.flip_elements,
+            st.lk_search_nodes,
+            @as(f64, @floatFromInt(st.lk_search_nodes)) / trials_f,
+        },
+    );
 
     if (init.environ_map.get("PROF_TOUR_OUT")) |out_path| {
         var buf: [64]u8 = undefined;
