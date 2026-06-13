@@ -28,6 +28,14 @@ pub fn main(init: std.process.Init) !void {
     const ext_arg = init.environ_map.get("PROF_EXT") orelse "0";
     const seed_arg = init.environ_map.get("PROF_SEED") orelse "12345";
     const width_arg = init.environ_map.get("PROF_WIDTH") orelse "0";
+    // Roadmap item 3 measurement knobs (default off => bit-identical baseline).
+    const freeze_arg = init.environ_map.get("PROF_FREEZE") orelse "0";
+    const freeze_minvotes_arg = init.environ_map.get("PROF_FREEZE_MINVOTES") orelse "64";
+    const freeze_frac_arg = init.environ_map.get("PROF_FREEZE_FRAC") orelse "85";
+    // PROF_FREEZE_MODE: 0=gated trials, 1=distinct incumbents. PROF_FREEZE_LK:
+    // 1=LK respects frozen edges (default), 0=kick-only freeze.
+    const freeze_mode_arg = init.environ_map.get("PROF_FREEZE_MODE") orelse "0";
+    const freeze_lk_arg = init.environ_map.get("PROF_FREEZE_LK") orelse "1";
 
     const start_ns = monotonicNanos();
     var result = try commiv.solve(allocator, &p, .{
@@ -45,6 +53,11 @@ pub fn main(init: std.process.Init) !void {
         .lk_backtrack_depth = if (btdepth_arg.len > 0) try std.fmt.parseInt(usize, btdepth_arg, 10) else null,
         .lk_backtrack_limit = 80_000,
         .max_distance_cache_weights = n * n,
+        .enable_edge_freeze = (try std.fmt.parseInt(u8, freeze_arg, 10)) != 0,
+        .edge_freeze_min_votes = try std.fmt.parseInt(u32, freeze_minvotes_arg, 10),
+        .edge_freeze_fraction_x100 = try std.fmt.parseInt(u32, freeze_frac_arg, 10),
+        .edge_freeze_vote_mode = if ((try std.fmt.parseInt(u8, freeze_mode_arg, 10)) != 0) .distinct_incumbents else .gated_trials,
+        .edge_freeze_lk_respect = (try std.fmt.parseInt(u8, freeze_lk_arg, 10)) != 0,
     });
     defer result.deinit();
     const elapsed = monotonicNanos() - start_ns;
@@ -67,6 +80,12 @@ pub fn main(init: std.process.Init) !void {
             @as(f64, @floatFromInt(st.lk_search_nodes)) / trials_f,
         },
     );
+    if (st.freeze_votes > 0) {
+        std.debug.print(
+            "  freeze: votes={} decrements={} move_rejections={} frozen_edges_final={}/{}\n",
+            .{ st.freeze_votes, st.freeze_decrements, st.freeze_move_rejections, st.frozen_edges_final, n },
+        );
+    }
 
     if (init.environ_map.get("PROF_TOUR_OUT")) |out_path| {
         var buf: [64]u8 = undefined;
