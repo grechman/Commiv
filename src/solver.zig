@@ -578,6 +578,14 @@ const SegmentTourView = struct {
     }
 
     fn rebuildSegments(self: *SegmentTourView) void {
+        // Roadmap item 8 / per-move-rebuild kill: the two-level segment structure
+        // (segment_of_node/rank_in_segment/segment_*) is NEVER read by solver
+        // logic — between()/next()/prev() all use pos[] and the flat next/prev
+        // arrays. Its only reader is debugSegmentMatchesFlatMaterialization, which
+        // runs only under runtime_safety. So in release it is pure O(n)/move
+        // waste; skip it. Debug builds still maintain + validate it. Bit-identical
+        // either way because the structure never influences a move decision.
+        if (!std.debug.runtime_safety) return;
         const n = self.flat.tour.len;
         const size = @max(self.target_segment_size, 1);
         self.segment_count = 0;
@@ -5443,10 +5451,15 @@ test "segment TourView agrees with flat backend" {
     segment.rebuild();
 
     try std.testing.expectEqual(@as(usize, 3), segmentTargetSize(segment_tour.len));
-    try std.testing.expectEqual(@as(usize, 0), segment_of_node[0]);
-    try std.testing.expectEqual(@as(usize, 1), segment_of_node[3]);
-    try std.testing.expectEqual(@as(usize, 2), segment_of_node[8]);
-    try std.testing.expectEqual(@as(usize, 2), rank_in_segment[5]);
+    // The two-level segment index is only built/maintained under runtime_safety
+    // (it is debug-only validation state — never read by solver logic). In
+    // ReleaseFast it is intentionally left unbuilt, so only assert it in debug.
+    if (std.debug.runtime_safety) {
+        try std.testing.expectEqual(@as(usize, 0), segment_of_node[0]);
+        try std.testing.expectEqual(@as(usize, 1), segment_of_node[3]);
+        try std.testing.expectEqual(@as(usize, 2), segment_of_node[8]);
+        try std.testing.expectEqual(@as(usize, 2), rank_in_segment[5]);
+    }
 
     for (0..segment_tour.len) |node| {
         try std.testing.expectEqual(flat.next(node), segment.next(node));
