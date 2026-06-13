@@ -25,11 +25,43 @@ optimal at pinned seed (pr1002 SOLVED 259045), suite ~50 s, no original row
 loses to LKH RUNS=1 on both axes; fl1577 22256 < LKH's 22262 at 7x its speed;
 rl11849 probe 0.800%/160 s vs LKH optimum in 1287.6 s. Tree uncommitted.
 
-**First step for a new agent:** items 0-2 DONE/COMMITTED; item 3 is CLOSED as a
-structural dead end (round 18 — see below + item3.md). NEXT is item 4
-(diversity-aware pool) or item 6 (on-the-fly distances, also unblocks the d18512
-row + reveals the real item-2/item-6 win). The dominant speed lever (per-move
-O(n) applyEdges rebuild) is item-8-shaped and stays FUTURE.
+**First step for a new agent:** items 0-2 DONE/COMMITTED; item 3 CLOSED (round 18,
+dead end). Round 19 examined items 4 + 6 (both underdeliver vs estimate) and
+started the per-move-rebuild lever. NEXT is the per-move O(n) retrace (see
+ROUND-19 below + ~/.claude/plans/commiv/per-move-rebuild.md).
+
+ROUND-19 RESULTS (2026-06-13):
+- **Item 4 (diversity-aware pool): BUILT, MEASURED, REVERTED — deferred behind
+  item 6.** Full HGS biased-fitness survivor selection (pairwise-symdiff
+  diversity + cost rank, never evict best). NO gain on any current fixture:
+  pr1002 best case only ties 259045 (regresses at higher weight), fl1577 flat,
+  rl11849 +/-150 noise. Clone-collapse only bites when a run is BOTH long enough
+  to collapse the pool AND still short of optimal — pr1002/fl1577 saturate first,
+  rl11849 runs too few trials. That regime needs d18512 / long runs (gated behind
+  item 6). Dependency is backwards. Reverted clean. Plan + weight sweep in
+  ~/.claude/plans/commiv/item4-diversity-pool.md.
+- **Item 6 (on-the-fly distances): SPEED PREMISE REFUTED.** The on-the-fly path
+  already exists (DistanceOracle falls back to coords when the matrix isn't
+  built; default cap 4M already skips it for n>2000 — only bench/profile FORCE
+  n*n). Measured forced-uncached: rl11849 cached 158.0s vs on-the-fly 154.7s =
+  TIME-NEUTRAL (within noise), identical length. fl1577 likewise. Distance
+  lookups are NOT the bottleneck (the per-move rebuild is). Item 6's real value
+  is MEMORY only (no n*n matrix => d18512 1.37GB and 100k+ become feasible), not
+  the roadmap's "1.5-3x". Actionable change deferred: stop forcing n*n in
+  bench/profile + re-enable d18512 (memory-safe on-the-fly). PROF_MAXCACHE knob
+  added to profile.zig. Plan in item6-onthefly-distances.md.
+- **Per-move rebuild (the real hard-target lever, user-chosen): Stage 1 SHIPPED
+  (bfe57c3).** The two-level segment index (segment_of_node/rank_in_segment/
+  segment_*) is rebuilt O(n)/move but NEVER read by solver logic (between/next/
+  prev use pos[] + flat arrays); only debugSegmentMatchesFlatMaterialization
+  reads it, under runtime_safety. Gated rebuildSegments behind runtime_safety =>
+  pure dead-work removal in release. BIT-IDENTICAL every bench row (15/17 optimal
+  preserved); TIME -6% to -11% growing with n (rl11849 158->140.5s). 44 tests
+  both modes, full bench clean. Stage 2a (fuse flat.rebuild into the applyEdges
+  retrace) = bit-identical but WASH (the removed rebuild is a cache-cheap
+  sequential pass; the cost is the random-access RETRACE that re-canonicalizes
+  the cycle) — reverted. The retrace is what must die: see Stage 2b in the plan
+  (incremental 2-opt/Or-opt handlers, then the O(sqrt n) two-level list).
 
 ROUND-18 RESULT — ITEM 3 (voting-freeze) IS DEAD, PROVEN, NOT JUST SUSPECTED:
 The round-17 revival plan blamed vote-stream correlation/impurity and hoped a
@@ -127,11 +159,11 @@ run the full bench: `taskset -c 0 nice -n 10 zig build bench -Doptimize=ReleaseF
 | 1 | ✓DONE r16. Per-trial cost counters (distance lookups, O(n) passes, flip ops, LK node ops; pr1002/fl1577/rl11849) | none (gate for 2, 6, 8) | none | everything below is accepted/rejected against these numbers. See "Item-1 measured counters" below. |
 | 2 | ✓DONE r17 (334f860). Delta-maintained tour length. Bit-identical; wall-clock NEUTRAL in the cached regime (the part that ships). Undo-log kicks / killing the per-move rebuild are item-8-shaped (array rep forces O(n)/move via between()/pos[]) and were correctly NOT attempted — out of item-2's zero-acc-risk scope. | NEUTRAL cached / real in uncached n>=10k (item 6) | none | the roadmap's "2-4x" assumed the per-move rebuild dies too; it doesn't here (item 8). |
 | 3 | ✗CLOSED r18 — STRUCTURAL DEAD END (proven). Voting-freeze gains nothing general: a 100%-pure backbone still loses accuracy under freeze (LK needs break-and-rebuild of even optimal edges), soft freeze too, and purity was never the blocker (r17's diverse-vote-source plan is void). Only positive is a 0.037% rat575 niche gated by an overfit detector. Delete candidate. | none | none (rat575 niche 0.037%) | full post-mortem in item3.md. Do NOT pursue items 5/9 to "fix" freeze. |
-| 4 | Diversity-aware pool replacement (HGS biased fitness: rank by cost + diversity contribution via symdiff; never evict best) | small | medium on long runs / big n | v1 replace-worst WILL clone-collapse at scale; symdiff machinery already computes the metric |
+| 4 | ~DEFERRED r19 (built+measured+reverted). HGS biased-fitness pool: NO gain on any current fixture (pr1002 ties at best/regresses, fl1577 flat, rl11849 noise). Clone-collapse needs a run BOTH collapsed AND short-of-optimal; no current fixture is in that regime — needs d18512/long runs, gated behind item 6. Revisit AFTER item 6. | none yet | none yet (regime-blocked) | item4-diversity-pool.md has the build + weight sweep; redo is cheap |
 | 5 | Pool-pair crossover restarts (seed occasional trials from the EAX product of two pool members) | none | small-medium | true EAX-GA generational step; machinery exists |
-| 6 | On-the-fly distances at n>=10k (drop the big matrix) | 1.5-3x at n>=10k | none | every matrix lookup is a DRAM miss; candidate-distance option half-exists; unblocks the 20k row properly |
+| 6 | On-the-fly distances at n>=10k (drop the big matrix). r19: SPEED PREMISE REFUTED — rl11849 cached 158s vs on-the-fly 155s = NEUTRAL (lookups aren't the bottleneck; the per-move rebuild is). Path already exists (default cap skips the matrix for n>2000; only bench/profile force n*n). | ~0 (NOT 1.5-3x) | none | real value is MEMORY: drop n*n => d18512 1.37GB + 100k+ feasible. Remaining work: stop forcing n*n in bench/profile + re-enable d18512. |
 | 7 | FUTURE (100k+ tier): sparse ascent / POPMUSIC candidates | kills O(n^2) build at n>=20k | none | prerequisite for 100k+, which is out of scope for now |
-| 8 | FUTURE (100k+ tier): B-tree tour representation | ~2-3% at n=11849 — not yet | none | flips are ~3% of trial cost (segment two-level rep active at n>=512); build only when item-1 counters show flips >= 10% (projected ~1e5 nodes) |
+| 8 | Per-move O(n) rebuild kill (the real rl11849<15s/fl1577<5s lever per item-1). r19 Stage 1 SHIPPED (bfe57c3): deleted the dead-in-release segment rebuild, -6..-11% bit-identical. NEXT: kill the O(n) applyEdges RETRACE (it re-canonicalizes the cycle = the actual cost; NOT the rebuild bookkeeping — fusing that was a measured wash). Two paths: (A) incremental 2-opt/Or-opt handlers (extend the depth-2 fast path; medium risk, bit-identical layout-matching), then (B) O(sqrt n) two-level list (big). | A: large at n>=1e3; B: the 100k+ tier | none (bit-identical) | the segment_reversed bit exists for B but the O(sqrt n) ops were never written. per-move-rebuild.md. |
 | 9 | Multithreaded independent trial streams into one elite pool | ~cores x | medium (best-of-streams) | LAST (user doctrine); converts seed variance into accuracy; LKH is single-threaded |
 | 10 | ATSP via Jonker-Volgenant 2n transform (problem.zig layer) | none (costs 2-4x on asymmetric inputs) | none | capability only; deferred until VRP work |
 
@@ -191,6 +223,9 @@ Gate readings (direct from the plan's own thresholds):
 | Voting-freeze: soft freeze (LKH-style, skip search initiation in backbone, never forbid) | r18: built + measured. Marginal speed (lk_search_nodes is not the dominant cost — tour_rebuilds is) and STILL loses accuracy (pr1002 259410 @ recall 0.5) — skipping initiation misses the same break-and-rebuild improvements. |
 | Voting-freeze: staleness-gating to protect productive instances | r18: NEUTRALIZES the feature. d657 protected at window>=256 but rat575 reverts to 6779 (gain gone) — the rat575 escape needs CONTINUOUS freeze from early. No single window wins both. |
 | Voting-freeze: plateau-degeneracy auto-gate (tied_node_frac) | r18: separates rat575 (0.824) from d657/pr1002 (0.303/0.467) and ships the rat575 +2.5-mean gain with no accuracy regression — BUT fl1577 is high-plateau (0.983) and freeze costs it ~8% TIME for zero gain (hard target <5s). Collapses to a small-AND-plateau single-fixture overfit for 0.037%. Item 3 closed; freeze is a delete candidate. |
+| Item 4 HGS biased-fitness pool on the CURRENT fixtures | r19: no fixture is in the clone-collapse-with-headroom regime (pr1002/fl1577 saturate before collapse matters; rl11849 too few trials). pr1002 ties at best/regresses at higher weight; fl1577 flat; rl11849 noise. Build it AFTER item 6 lands d18512/long runs, not before. |
+| Item 6 on-the-fly distances FOR SPEED | r19: rl11849 cached 158s vs on-the-fly 155s = neutral. Distance lookups are not the bottleneck (the per-move rebuild is). On-the-fly is a MEMORY enabler (d18512/100k+), not a speedup. |
+| Fusing flat.rebuild into the applyEdges retrace (per-move rebuild Stage 2a) | r19: bit-identical but a measured WASH. The removed pass (flat.rebuild) is a cache-cheap sequential walk over tour[] (~47KB, L2); the cost is the RANDOM-ACCESS retrace that re-canonicalizes the cycle. To win you must kill the retrace itself (incremental move handlers or O(sqrt n) rep), not the rebuild bookkeeping. |
 
 ## Verification
 
