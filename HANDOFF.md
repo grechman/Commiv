@@ -25,23 +25,38 @@ optimal at pinned seed (pr1002 SOLVED 259045), suite ~50 s, no original row
 loses to LKH RUNS=1 on both axes; fl1577 22256 < LKH's 22262 at 7x its speed;
 rl11849 probe 0.800%/160 s vs LKH optimum in 1287.6 s. Tree uncommitted.
 
-**First step for a new agent:** items 0 + 1 are DONE (round 16, 2026-06-13;
-tree uncommitted). USER DECISION 2026-06-13: speed is accepted — item 2
-(incremental bookkeeping) is DEFERRED, not next. NEXT = **item 3, the
-Boyer-Moore / Misra-Gries voting-freeze** (accuracy; the rat575 unlock
-candidate). Build it against the item-3 constraints in the roadmap table
-verbatim: k=2 counter slots/node, vote the 2 tour-neighbors per node on GATED
-trials only, freeze an edge when BOTH endpoints' counters >= threshold,
-constructions follow frozen edges + LK must not break them, but FREEZE THE
-GENERATOR NEVER THE COMBINER (EAX/IPT must still cut through frozen regions),
-counters auto-thaw on disagreement, threshold needs measurement (kick-correlated
-stream inflates counters). Gate every change on: rat575 bit-identical canary +
-the 3-row quick regression + full multi-seed bench at seeds {12345,7,99}.
-Item-1 counters remain the speed yardstick if item 2 is ever revived (the full
-O(n) applyEdges rebuild per accepted move is the measured dominant lever).
+**First step for a new agent:** items 0-3 are DONE and COMMITTED (round 17,
+2026-06-13). Commits: e89460b (items 0+1 checkpoint), 334f860 (item 2),
+6e3c654 (item 3). NEXT is open — likely item 4 (diversity-aware pool) or
+item 6 (on-the-fly distances, also unblocks the d18512 row + reveals the real
+item-2/item-6 win). The dominant speed lever (per-move O(n) applyEdges rebuild)
+is item-8-shaped and stays FUTURE.
 
-d18512 400-trial headline (round 16, seed 12345, EXT 0, width auto=5):
-652023 / 1.051% / 167.6 s — rl11849-scale, fixed_trials=400 is fine.
+ROUND-17 RESULTS:
+- **Item 2 (delta-maintained tour length): SHIPPED.** Bit-identical (rat575
+  6779/459, pr1002 259045, fl1577 22256; all sub-1000 fixtures unchanged; 44
+  tests both modes). Wall-clock NEUTRAL in the cached regime (pinned pr1002
+  A/B ~12.64 s vs ~12.71 s — lookups are L2/L3 hits, not DRAM misses, so
+  cutting per-trial scans doesn't move time). It removes the per-trial O(n)
+  scans, which is real budget in the future UNCACHED n>=10k path (item 6). The
+  big cached-regime lever (per-move rebuild) is item 8, out of item-2 scope.
+- **Item 3 (voting-freeze): BUILT, MEASURED, SHIPPED DEFAULT-OFF.** It is real
+  but instance-specific, NOT a general accuracy win — see the do-not-retry
+  table. The literal-spec LK-respecting variant is strictly worse everywhere.
+  The kick-only variant unlocks rat575 across all 3 seeds (6779/6779/6788 ->
+  6776/6777/6777) but regresses d657 (+100) and pr1002 (+363) by the same
+  freezing, with no separating threshold. Defaults are the validated kick-only
+  m384/f95 config; enable via SolveOptions.enable_edge_freeze for rat575-class
+  plateau instances only. Voting infra is reusable for a future DIVERSE vote
+  source (items 5/9) — the kick-correlated stream is the root limitation.
+
+The d18512 fixture is GATED OUT of the always-run bench (1.37 GB matrix =>
+~hours at fixed_trials=400); re-enable once item 6 lands. Probe manually:
+PROF_PATH=vendor/tsplib/d18512.tsp via commiv-profile. Round-16 probe (seed
+12345, EXT 0, width 5): 652023 / 1.051% / 167.6 s.
+
+Gate every change on: rat575 bit-identical canary + the 3-row quick regression
++ full multi-seed bench at seeds {12345,7,99}.
 
 ## Quick regression protocol (after EVERY major change)
 
@@ -64,8 +79,8 @@ run the full bench: `taskset -c 0 nice -n 10 zig build bench -Doptimize=ReleaseF
 |---|---|---|---|---|
 | 0 | ✓DONE r16. SETUP: 20k bench row — `curl -sL -o vendor/tsplib/d18512.tsp https://raw.githubusercontent.com/mastqe/tsplib/master/d18512.tsp` (n=18512, EUC_2D, optimum 645238); probe-budget fixture like rl11849 (headline_only, fixed_trials); raise bench/profile max_dimension to 20_000 | none | none | distance matrix would be 1.37 GB on a 7 GB box — run with candidate-based distances or accept the squeeze until item 6 lands. NOTE r16: fixed_trials mirrored rl11849=400, but the matrix squeeze makes that ~hours; the full bench was NOT run with this row. Lower it (or gate on item 6) before enabling in the always-run suite. |
 | 1 | ✓DONE r16. Per-trial cost counters (distance lookups, O(n) passes, flip ops, LK node ops; pr1002/fl1577/rl11849) | none (gate for 2, 6, 8) | none | everything below is accepted/rejected against these numbers. See "Item-1 measured counters" below. |
-| 2 | Incremental bookkeeping: undo-log kicks instead of O(n) memcpy, delta-maintained tour length, no per-trial full-array passes | 2-4x at n>=1k, grows with n | none | pure waste removal, zero acc risk; main lever for the 15 s / 5 s targets |
-| 3 | Voting-freeze (Boyer-Moore/Misra-Gries, k=2 counter slots per node): each merge-gated trial votes its 2 neighbors per node; freeze edge when BOTH endpoints' counters >= threshold; constructions follow frozen edges, LK must not break them | 1.5-3x on degenerate rows | medium (pr1002/rat575/rl11849 class — the rat575 unlock candidate) | FREEZE THE GENERATOR, NEVER THE COMBINER (EAX/IPT must cut through frozen regions — joint section moves are the measured pr1002 mechanism); counters auto-thaw on disagreement = built-in confidence dial; vote only on gated trials; threshold needs measurement (stream is kick-correlated, counters inflate) |
+| 2 | ✓DONE r17 (334f860). Delta-maintained tour length. Bit-identical; wall-clock NEUTRAL in the cached regime (the part that ships). Undo-log kicks / killing the per-move rebuild are item-8-shaped (array rep forces O(n)/move via between()/pos[]) and were correctly NOT attempted — out of item-2's zero-acc-risk scope. | NEUTRAL cached / real in uncached n>=10k (item 6) | none | the roadmap's "2-4x" assumed the per-move rebuild dies too; it doesn't here (item 8). |
+| 3 | ✓DONE r17 (6e3c654), SHIPPED DEFAULT-OFF. Voting-freeze (Misra-Gries k=2/node) built per spec + a kick-only variant. Literal spec (LK-respect) strictly worse. Kick-only unlocks rat575 (all 3 seeds) but regresses d657+pr1002, no separating threshold => fails the suite gate. | n/a | rat575-only (instance-specific, NOT general) | see do-not-retry. Combiner cut-through works; root limit is the kick-correlated vote stream — needs a DIVERSE source (items 5/9) to generalize. |
 | 4 | Diversity-aware pool replacement (HGS biased fitness: rank by cost + diversity contribution via symdiff; never evict best) | small | medium on long runs / big n | v1 replace-worst WILL clone-collapse at scale; symdiff machinery already computes the metric |
 | 5 | Pool-pair crossover restarts (seed occasional trials from the EAX product of two pool members) | none | small-medium | true EAX-GA generational step; machinery exists |
 | 6 | On-the-fly distances at n>=10k (drop the big matrix) | 1.5-3x at n>=10k | none | every matrix lookup is a DRAM miss; candidate-distance option half-exists; unblocks the 20k row properly |
@@ -122,6 +137,9 @@ Gate readings (direct from the plan's own thresholds):
 | 5-opt enumeration, hash revisited-tour cutoff, ML candidates | rounds 6-10 decisions; see git history + memory |
 | Identical-trial-streak convergence signal | guided restarts interleave divergent tours every ~4 trials; max streak ~14 |
 | Single-seed gating of any change | four pinned-seed mirages in rounds 11-15; always check seeds {12345, 7, 99} |
+| Voting-freeze enabled GLOBALLY / by default (item 3) | r17: helps rat575 (all 3 seeds, 6782->6777 mean) but regresses d657 (+100) and pr1002 (+363); no threshold separates the gain from the regression (when rat575 gains, d657 loses, and vice versa). Shipped default-off as opt-in. |
+| Voting-freeze with LK respecting frozen edges (the literal spec) | r17: strictly worse everywhere — over-constrains the descent. min64/frac85 freezes 90% of rat575's edges (515/575), 254k move rejections -> 6836. Only the KICK-ONLY variant (LK full power, perturbation avoids frozen edges) ever beats baseline. |
+| Voting-freeze over a kick-correlated / distinct-incumbent stream | r17: both over-freeze because the vote stream lacks cross-basin diversity (incumbents are incremental => correlated; 9 incumbents still froze 380/575). Consensus = current attractor, not true backbone. Would need a genuinely diverse vote source (elite-pool members / combiner products — items 5/9) to be meaningful. |
 
 ## Verification
 

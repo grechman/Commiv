@@ -68,7 +68,11 @@ const fixtures = [_]TsplibFixture{
     .{ .name = "pr1002", .path = "vendor/tsplib/pr1002.tsp", .tour_path = ".zig-cache/lkh-tours/pr1002.tour", .optimum = 259045 },
     .{ .name = "fl1577", .path = "vendor/tsplib/fl1577.tsp", .tour_path = ".zig-cache/lkh-tours/fl1577.tour", .optimum = 22249 },
     .{ .name = "rl11849", .path = "vendor/tsplib/rl11849.tsp", .tour_path = ".zig-cache/lkh-tours/rl11849.tour", .optimum = 923288, .headline_only = true, .fixed_trials = 400 },
-    .{ .name = "d18512", .path = "vendor/tsplib/d18512.tsp", .tour_path = ".zig-cache/lkh-tours/d18512.tour", .optimum = 645238, .headline_only = true, .fixed_trials = 400 },
+    // d18512 (n=18512) is gated OUT of the always-run suite: the 1.37 GB cached
+    // matrix makes fixed_trials=400 take ~hours (item-0 TODO). Re-enable once
+    // item 6 (on-the-fly distances) drops the big matrix. Probe it manually via
+    // commiv-profile when needed.
+    // .{ .name = "d18512", .path = "vendor/tsplib/d18512.tsp", .tour_path = ".zig-cache/lkh-tours/d18512.tour", .optimum = 645238, .headline_only = true, .fixed_trials = 400 },
 };
 
 pub fn main(init: std.process.Init) !void {
