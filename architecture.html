@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>commiv — Architecture Audit</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1d2129; --ink:#e7e9ee; --mut:#9aa3b2;
+    --acc:#7aa2f7; --good:#7ee787; --warn:#f0b86e; --bad:#f07178; --line:#2a2f3a; --code:#0b0d12;
+    --A:#7ee787; --B:#9ece6a; --C:#f0b86e; --D:#f07178;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+  .wrap{max-width:1060px;margin:0 auto;padding:32px 22px 120px}
+  h1{font-size:30px;margin:0 0 4px;letter-spacing:-.4px}
+  h2{font-size:23px;margin:46px 0 10px;padding-top:14px;border-top:1px solid var(--line);letter-spacing:-.3px}
+  h3{font-size:18px;margin:24px 0 6px;color:#cdd3df}
+  h4{font-size:14.5px;margin:16px 0 4px;color:var(--acc);text-transform:uppercase;letter-spacing:.06em}
+  p{margin:8px 0}
+  a{color:var(--acc);text-decoration:none} a:hover{text-decoration:underline}
+  .sub{color:var(--mut);font-size:15px;margin:0 0 18px}
+  .lead{font-size:17px;color:#d7dbe4}
+  code{font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace;font-size:.88em;
+    background:var(--code);border:1px solid var(--line);border-radius:5px;padding:1px 5px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin:14px 0}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:14.5px}
+  th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:#cdd3df;font-weight:600}
+  td.n{font-variant-numeric:tabular-nums;white-space:nowrap;text-align:center}
+  .good{color:var(--good)} .warn{color:var(--warn)} .bad{color:var(--bad)} .mut{color:var(--mut)}
+  ul{margin:8px 0 8px 4px;padding-left:20px} li{margin:5px 0}
+  .toc{columns:2;column-gap:26px;font-size:14.5px}
+  @media(max-width:760px){.toc{columns:1}}
+  .toc a{display:block;padding:2px 0;color:#c2c9d6}
+  .grade{display:inline-block;width:30px;text-align:center;font-weight:800;border-radius:6px;padding:2px 0;color:#0b0d12}
+  .gA{background:var(--A)} .gB{background:var(--B)} .gC{background:var(--C)} .gD{background:var(--D)}
+  .sev{display:inline-block;font-size:11px;font-weight:800;letter-spacing:.05em;padding:2px 8px;border-radius:6px;color:#0b0d12}
+  .s-hi{background:var(--bad)} .s-md{background:var(--warn)} .s-lo{background:#5c6370;color:#e7e9ee}
+  .tag{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;
+    padding:2px 8px;border-radius:999px;border:1px solid var(--line);vertical-align:middle}
+  .t-blk{color:var(--bad);border-color:#a44} .t-cln{color:var(--mut)} .t-ext{color:var(--acc);border-color:#46c}
+  blockquote{margin:10px 0;padding:6px 14px;border-left:3px solid var(--acc);color:#cfd5e0;background:var(--panel2);border-radius:0 8px 8px 0}
+  .find{border:1px solid var(--line);border-radius:11px;padding:14px 16px;margin:14px 0;background:var(--panel)}
+  .find h3{margin-top:0}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:2px 0 8px}
+  .kv{font-size:13px;color:var(--mut)}
+  .kv b{color:#cdd3df}
+  .foot{color:var(--mut);font-size:13px;margin-top:50px;border-top:1px solid var(--line);padding-top:14px}
+  .pos{color:var(--good)} .neg{color:var(--bad)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>commiv — Architecture Audit</h1>
+<p class="sub">An honest structural review. You asked me to audit because you think it's good — so: <b>the design <i>decisions</i> are genuinely strong; the physical <i>structure</i> has accreted into a monolith with a few leaky seams and a cleanup backlog.</b> None of it is fatal. The single highest-value item is also the one blocking your biggest perf lever. Companion to <code>math.html</code>.</p>
+
+<div class="panel">
+<b>Tags.</b> &nbsp;<span class="sev s-hi">HIGH</span> <span class="sev s-md">MED</span> <span class="sev s-lo">LOW</span> severity &nbsp;·&nbsp;
+<span class="tag t-blk">perf-blocker</span> blocks a math.html lever &nbsp;
+<span class="tag t-cln">cleanup</span> &nbsp;
+<span class="tag t-ext">extensibility</span>
+</div>
+
+<h2 id="toc">Contents</h2>
+<div class="toc">
+  <a href="#verdict">0 · Verdict &amp; scorecard</a>
+  <a href="#good">1 · What's genuinely good (keep it)</a>
+  <a href="#h1">H1 · The 6,361-line monolith</a>
+  <a href="#h2">H2 · The leaky tour-ADT seam (perf-blocker)</a>
+  <a href="#h3">H3 · The 47-field LocalSearch god-struct</a>
+  <a href="#m1">M1 · Dual IPT/EAX recombination</a>
+  <a href="#m2">M2 · SolveOptions: 31% dead feature</a>
+  <a href="#m3">M3 · The cleanup backlog</a>
+  <a href="#m4">M4 · No differential-test harness</a>
+  <a href="#low">L1–L4 · Lower-severity</a>
+  <a href="#vrp">2 · Extensibility — the VRP/HGS seams</a>
+  <a href="#road">3 · Prioritised roadmap</a>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="verdict">0 · Verdict &amp; scorecard</h2>
+<p class="lead">This is a <b>strong research prototype that has earned a refactor pass.</b> The parts that are hard to get right — the bit-identical methodology, the merge-as-pure-upside design, zero hot-loop allocation — you got right. The parts that rot under accretion — file cohesion, the tour abstraction boundary, struct size, dead-feature carrying cost — are where the debt is.</p>
+
+<table>
+<thead><tr><th>Dimension</th><th class="n">Grade</th><th>One-line</th></tr></thead>
+<tbody>
+<tr><td>Core algorithm design</td><td class="n"><span class="grade gA">A</span></td><td>shadow-incumbent merge, size-gated paths, ILS+LK+EAX — measured, principled</td></tr>
+<tr><td>Validation discipline</td><td class="n"><span class="grade gA">A</span></td><td>debug-gated invariants + bit-identical canary + multi-seed gate — rare and excellent</td></tr>
+<tr><td>Perf hygiene (allocation)</td><td class="n"><span class="grade gA">A−</span></td><td>pre-allocated workspace, no hot-loop allocs, delta-maintained length</td></tr>
+<tr><td>Public API / layering</td><td class="n"><span class="grade gB">B+</span></td><td>clean <code>root.zig</code>; problem ⟂ solver ⟂ tsplib split; ATSP stays at the problem layer</td></tr>
+<tr><td>Extensibility (VRP)</td><td class="n"><span class="grade gB">B−</span></td><td>the split supports it; penalty/pinned-edge hooks don't exist yet</td></tr>
+<tr><td>Abstraction boundaries</td><td class="n"><span class="grade gC">C</span></td><td>tour ADT is <i>half</i>-applied — call sites read <code>pos[]</code> raw (H2)</td></tr>
+<tr><td>Coupling</td><td class="n"><span class="grade gC">C−</span></td><td>47-field <code>LocalSearch</code>, hand-built, shares workspace buffers (H3)</td></tr>
+<tr><td>Dead-weight / hygiene</td><td class="n"><span class="grade gC">C</span></td><td>31% of options is a delete-candidate feature; dual merge; vestigial paths (M1–M3)</td></tr>
+<tr><td>Module cohesion</td><td class="n"><span class="grade gD">D</span></td><td>6,361 lines, 76 defs, 28 tests, ~9 subsystems — all in one file (H1)</td></tr>
+</tbody>
+</table>
+
+<!-- ============================================================ -->
+<h2 id="good">1 · What's genuinely good (do not "refactor" these away)</h2>
+<ul>
+<li><b class="pos">The bit-identical methodology.</b> Debug-gated invariants (<code>debugTourIsValid</code>, the <code>current_length == scan</code> assert) + the sub-1000 canary + multi-seed {12345,7,99} gating. This is <i>the</i> reason rounds 11–19 could make aggressive changes safely; most research code has nothing like it. It is your biggest architectural asset.</li>
+<li><b class="pos">Shadow-incumbent merge.</b> EAX/IPT products accumulate in a shadow incumbent and fold in after the loop, so the kick/restart trajectory stays bit-for-bit identical and merge gains are <i>pure upside</i>. That's an elegant separation of "deterministic search" from "opportunistic recombination."</li>
+<li><b class="pos">Zero hot-loop allocation.</b> <code>SolverWorkspace</code> (30 fields) pre-allocates every scratch buffer once, with <code>errdefer</code> teardown. The trial loop never touches the allocator. Correct.</li>
+<li><b class="pos">Measurement-driven size gates.</b> <code>eax_min_dimension</code>, <code>guided_max_dimension</code>, the segment threshold — each is a documented, benchmarked boundary, not a guess. The do-not-retry table is institutional memory most projects lack.</li>
+<li><b class="pos">Clean problem/solver layering.</b> <code>root.zig</code> exposes a minimal surface (<code>solve</code>, <code>Problem</code>, <code>SolveResult</code>); <code>problem.zig</code>/<code>tsplib.zig</code>/<code>exact.zig</code> are properly isolated. Keeping ATSP as a problem-layer transform so the core stays symmetric is the right call.</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2>The findings</h2>
+
+<!-- H1 -->
+<div class="find" id="h1">
+<h3>H1 · <code>solver.zig</code> is a 6,361-line monolith <span class="sev s-hi">HIGH</span> <span class="tag t-cln">cleanup</span></h3>
+<div class="row">
+<span class="kv"><b>Now:</b> 6,361 LOC · 76 top-level defs · 28 inline tests · ≈9 subsystems</span>
+<span class="kv"><b>Effort:</b> Medium (mechanical)</span>
+</div>
+<p>One file holds the distance oracle, the α/1-tree candidate build, three constructions (NN, farthest, guided backbone), the tour representation (<code>FlatTourView</code>/<code>SegmentTourView</code>/<code>TourView</code>), the LK engine + 2-opt/Or-opt + move application, IPT merge, EAX merge, the elite pool, the freeze subsystem, the solve loop, <i>and</i> 28 tests. Cohesion is low: unrelated concerns share a namespace, every change diffs the same file, and a newcomer (or you in three months) must hold all of it at once.</p>
+<h4>Fix</h4>
+<p>Split along the seams that already exist (the handoff lists this as deferred cleanup):</p>
+<table>
+<thead><tr><th>Module</th><th>Contents</th></tr></thead>
+<tbody>
+<tr><td><code>distance.zig</code></td><td>DistanceOracle (+ the candidate-distance cache, the penalty hook seam)</td></tr>
+<tr><td><code>candidates.zig</code></td><td>1-tree subgradient ascent, α-nearness, the Delaunay/POPMUSIC variants</td></tr>
+<tr><td><code>tour.zig</code></td><td>the Tour ADT + array impl (+ future two-level impl) — see H2</td></tr>
+<tr><td><code>search.zig</code></td><td>LocalSearch: LK recursion, 2-opt/Or-opt, move application</td></tr>
+<tr><td><code>recombine.zig</code></td><td>IPT, EAX, elite pool (see M1)</td></tr>
+<tr><td><code>construct.zig</code></td><td>NN, farthest, guided backbone, kicks</td></tr>
+<tr><td><code>solve.zig</code></td><td>the trial loop + SolveOptions/SolveStats orchestration</td></tr>
+</tbody>
+</table>
+<p>Tests move next to their module. This is the enabling refactor: H2/H3/M1 are all easier once the boundaries are physical, not conceptual. <b>Do it as pure code-motion first (zero behaviour change, bit-identical), commit, then start touching internals.</b></p>
+</div>
+
+<!-- H2 -->
+<div class="find" id="h2">
+<h3>H2 · The tour ADT is only <i>half</i> applied <span class="sev s-hi">HIGH</span> <span class="tag t-blk">perf-blocker</span></h3>
+<div class="row">
+<span class="kv"><b>Now:</b> <code>TourView</code> union exists, but <code>LocalSearch</code> also reads <code>pos[]</code>/<code>next[]</code>/<code>prev[]</code> directly</span>
+<span class="kv"><b>Blocks:</b> math.html R1 (two-level list, the ~2–3× lever)</span>
+</div>
+<p>You <i>have</i> a tour abstraction (<code>TourView</code> with <code>next/prev/between/applyEdges</code>) — but it leaks. <code>LocalSearch</code> carries the raw <code>next</code>/<code>prev</code>/<code>pos</code> slices as fields and indexes them directly; <code>improve2Opt</code> does <code>j = self.pos[c]; if (j &lt;= i+1)</code>; <code>applyDepth2ClosingMove</code> reads <code>pos[b]</code>/<code>pos[d]</code> as raw integers. These encode the <b>array layout</b> into the search logic.</p>
+<p>This is the architectural reason the dominant perf lever is hard: you cannot swap array → two-level list while call sites assume "position is a dense integer I can compare with <code>&lt;=</code>." It is both a boundary smell <i>and</i> the concrete blocker for the single biggest speedup.</p>
+<h4>Fix</h4>
+<ul>
+<li>Define one interface: <code>next(c) · prev(c) · order(a,b,c) [=between] · reverse(a,b) · sequenceId(c) · materialize(out)</code>. <code>sequenceId</code> replaces raw <code>pos[]</code> reads with an opaque comparable token (the array impl returns the position; the two-level impl returns (segment-rank, in-segment-rank)).</li>
+<li>Route <i>every</i> tour access in <code>LocalSearch</code>/2-opt/Or-opt/move-apply through it. The 47-field struct loses the raw <code>next/prev/pos</code> slices (it holds a <code>*Tour</code> instead).</li>
+<li>Then the array impl and a two-level impl are interchangeable behind the seam, gated by <code>n</code> — exactly math.html R1, now unblocked.</li>
+</ul>
+<blockquote>Doing the seam <i>first</i> as a no-op refactor (array impl only, bit-identical) de-risks R1 entirely: you prove the abstraction is faithful before adding the fast structure underneath it.</blockquote>
+<div class="panel" style="border-color:#2c5">
+<h4 style="color:var(--good)">✓ Done — LK-core seam landed (commit 5d2608b), bit-identical</h4>
+<p style="margin-bottom:6px">The LK core now reaches the tour only through <code>tourNext / tourPrev / tourSeq</code> (opaque order token) + a node-based <code>reverseBetween</code>; the segment queries (<code>between / circularSegmentSize / nodeInCircularSegment / segmentIsNoMoreThanHalf</code>) were already ADT-shaped. Every bench row matches round-19 at 3 seeds, 44 tests both modes.</p>
+<p style="margin-bottom:0"><b>Coupling it surfaced (the point of doing it first):</b> <code>next[]/prev[]</code> is a <i>cache</i> refreshed only by <code>rebuildState</code>. The warm-up sweeps mutate via <code>reverseSegment</code> (tour+pos only), so the cache is <b>stale</b> there — they still read successors from <code>tour[]</code>; only the pos-based seam (<code>tourSeq/reverseBetween</code>) is valid in the sweeps. <b>R1's remaining work is exactly this:</b> the two-level list must keep next/prev always-current, or the sweeps must iterate via the ADT. The no-op refactor found the hidden coupling before the risky structural swap — which is what it was for.</p>
+</div>
+</div>
+
+<!-- H3 -->
+<div class="find" id="h3">
+<h3>H3 · <code>LocalSearch</code> is a 47-field god-struct, hand-assembled <span class="sev s-hi">HIGH</span></h3>
+<div class="row">
+<span class="kv"><b>Now:</b> 47 fields · built at 2 sites · copied for merge (<code>var merge_search = search</code>) twice</span>
+<span class="kv"><b>Risk:</b> the round-5 scratch-aliasing fragility</span>
+</div>
+<p>The solve loop constructs <code>LocalSearch{ ... }</code> with ~40 explicit field assignments, then later does <code>var merge_search = search</code> (a shallow copy that <b>shares the workspace buffers</b>). Three problems: (1) adding a field means editing every construction site and remembering the merge copy; (2) the shallow copy aliases scratch arrays — the round-5 note flagged that <code>pos/next</code> are stale between a merge win and the next trial's rebuild (currently harmless "because nothing reads them in that window," which is a latent-bug invariant held by comment, not by type); (3) config, scratch, and mutable state are intermixed in one flat struct, so it's impossible to tell at a glance what's input vs working memory.</p>
+<h4>Fix</h4>
+<ul>
+<li>Borrow the workspace by pointer: <code>LocalSearch</code> holds <code>ws: *SolverWorkspace</code> instead of 30 copied slices. Construction shrinks to a handful of fields; the merge copy stops aliasing because both reference the same owned workspace explicitly.</li>
+<li>Split the remaining fields into three groups: <code>Config</code> (depths, passes, flags — immutable per trial), <code>Tour</code> (the ADT from H2), <code>State</code> (<code>current_length</code>, <code>lk_active_*</code>). A 47-field flat bag becomes three small, intention-revealing structs.</li>
+</ul>
+</div>
+
+<!-- M1 -->
+<div class="find" id="m1">
+<h3>M1 · Two recombination engines (IPT + EAX) <span class="sev s-md">MED</span></h3>
+<div class="row"><span class="kv"><b>Now:</b> IPT below n=1000, EAX at/above — two code paths, two scratch structs (IptScratch + EaxScratch)</span></div>
+<p>The handoff calls this "explicitly transitional until elite-pool replaces both," and mathematically EAX subsumes IPT (a section swap is one non-splitting AB-cycle). <b>But</b> — and this is the honest part — EAX <i>below</i> 1000 was measured strictly worse (it reshuffles knife-edge optima; +10% time, lost lin318/rd400/pcb442-class optima). So this is the one place where "specialised beats general" currently <i>wins on the benchmark</i>. The duplication is justified by data, not laziness.</p>
+<h4>Fix — but be honest about it</h4>
+<p>Don't keep calling it "transitional" if no one can make EAX reproduce the sub-1000 trajectories. Two real options: (a) invest in making EAX's non-splitting, smallest-section-first path bit-reproduce IPT below 1000, then delete IPT (true consolidation); or (b) accept it as a <i>permanent, documented</i> size-gated dual strategy and stop treating it as debt. Either is fine; the limbo ("temporary" for 9 rounds) is the smell. Under H1 both engines live in <code>recombine.zig</code> behind one <code>recombine(trial, ref) → product</code> entry point, which contains the size-gate in one place instead of scattering it through the solve loop.</p>
+</div>
+
+<!-- M2 -->
+<div class="find" id="m2">
+<h3>M2 · ~31% of <code>SolveOptions</code> is a delete-candidate feature <span class="sev s-md">MED</span> <span class="tag t-cln">cleanup</span></h3>
+<div class="row"><span class="kv"><b>Now:</b> 29 option fields — ~9 are the freeze subsystem + diagnostic out-params</span></div>
+<p><code>enable_edge_freeze</code>, <code>edge_freeze_{min_votes,fraction_x100,vote_mode,lk_respect,stale_window,soft}</code>, <code>inject_frozen</code>, and <code>frozen_edges_out</code> are all item-3 (voting-freeze), which you already marked a <b>DELETE CANDIDATE</b>. That's roughly a third of the production options struct devoted to a proven-dead feature — plus <code>frozen_edges_out</code> is a <code>*std.ArrayList</code> <i>diagnostic out-param living in the production options type</i>, which is a layering smell (the public API surface carries measurement scaffolding).</p>
+<h4>Fix</h4>
+<ul>
+<li>Delete the freeze subsystem (the round-18 post-mortem authorises it): the ~9 option fields, the <code>vote_node/vote_count</code> workspace arrays, the vote primitives, the kick variant, the move guards, and the <code>SolveStats</code> freeze counters. This is the highest-ratio cleanup — it shrinks the options struct, the workspace, the stats, and the solve loop at once.</li>
+<li>Move genuine diagnostics (a frozen/edge dump, injection probes) out of <code>SolveOptions</code> into a separate <code>Diagnostics</code> hook or keep them only in the profile driver. Production options should be production-only.</li>
+</ul>
+</div>
+
+<!-- M3 -->
+<div class="find" id="m3">
+<h3>M3 · The cleanup backlog <span class="sev s-md">MED</span> <span class="tag t-cln">cleanup</span></h3>
+<p>Beyond freeze (M2), the deferred list the handoff already tracks:</p>
+<ul>
+<li><b>Dead two-level segment index</b> — gated off in release (Stage 1) but still allocated and maintained in debug; will be <i>replaced</i> by the real two-level list (H2/R1), so delete the placeholder when R1 lands.</li>
+<li><b>Move-patching machinery</b> — <code>enable_move_patching</code> defaults off; <code>tryPatchTwoComponents</code> + the patch counters carry weight for a path that isn't on.</li>
+<li><b><code>farthestInsertionTour</code></b> — still wired (cold-restart branch, <code>trial%4==1 &amp;&amp; n≥300</code>) but a minor third construction; candidate for folding into the guided/NN path.</li>
+<li><b>CGAL Delaunay</b> — optional dependency with no measured benefit; you plan to deprecate. The build coupling (gmp/mpfr/c++) is real maintenance cost. <i>However</i> — note that math.html R3a wants a Delaunay graph for the O(n log n) MST, so before ripping CGAL out, decide whether a small pure-Zig Delaunay (or k-NN graph) replaces it for that purpose.</li>
+<li><b>SolveStats: 68 counters</b> — several (<code>lk_chain_nonseq_depth_*</code> arrays, parts of <code>move_plan_*</code>) are instrumentation from closed investigations. Prune in the same pass.</li>
+</ul>
+<p class="mut">Rough estimate: M2+M3 together remove well over a thousand lines from the monolith and cut three struct field-counts — a large readability win for low risk (all default-off / dead paths).</p>
+</div>
+
+<!-- M4 -->
+<div class="find" id="m4">
+<h3>M4 · No differential-test harness for representation swaps <span class="sev s-md">MED</span> <span class="tag t-blk">perf-blocker</span></h3>
+<p>Your invariant checks validate <i>one</i> representation against the tour array. But the way to land R1 (two-level list) safely is a <b>differential</b> harness: generate random tours + random valid move sequences, and assert the new structure and the array agree on <code>next/prev/order/reverse</code> at every step. You don't have that, and it's the cheapest insurance for the biggest change.</p>
+<h4>Fix</h4>
+<p>Add a property test in <code>tour.zig</code>'s tests: for k random tours × m random moves, <code>assert impl_new.query == impl_array.query</code> for all query types. Build it <i>before</i> R1 — it turns "hope it's bit-identical" into "proven on 10⁶ random ops." This generalises: any future rep (k-level, splay) reuses the same harness.</p>
+</div>
+
+<!-- LOW -->
+<h2 id="low">L1–L4 · Lower-severity</h2>
+<div class="find">
+<h3>L1 · Build &amp; binary friction <span class="sev s-lo">LOW</span> <span class="tag t-cln">cleanup</span></h3>
+<p><code>profile.zig</code> is built ad-hoc via a <code>zig build-exe</code> line that needs a hand-written <code>build_options</code> <i>stub</i> (the <code>with_cgal=false</code> file in /tmp). And <code>commiv-profile</code> is a <b>git-tracked binary</b> that every build overwrites → permanent spurious <code>M commiv-profile</code> in status. Fix: add a <code>profile</code> step to <code>build.zig</code> (so it gets the real <code>build_options</code> module, no stub), and <code>.gitignore</code> the binary. Removes a recurring papercut.</p>
+</div>
+<div class="find">
+<h3>L2 · Distance cap is weight-count, not cache-aware <span class="sev s-lo">LOW</span></h3>
+<p><code>max_distance_cache_weights</code> is a raw element count (default 4M). The decision it encodes is really "does the matrix fit a cache budget?" — a <i>byte</i> question (4M weights = 16 MB ≈ L3). Make the cap byte/L3-aware and self-documenting; pairs with the math.html R2 candidate-distance cache so the matrix can be dropped above the budget while hot lookups stay L2-resident. (Round-19 measured the matrix-vs-on-the-fly is time-neutral, so this is a memory/scaling cleanup, not a speed claim.)</p>
+</div>
+<div class="find">
+<h3>L3 · <code>SolveOptions</code> mixes config tiers <span class="sev s-lo">LOW</span></h3>
+<p>Even after freeze is deleted, the struct flatly mixes "algorithm shape" (candidate_count, lk_max_depth, candidate_mode) with "budget" (trials, extension factor) with "internal tuning" (backtrack limits, ascent iterations, patch min-gain). Grouping into nested sub-structs (<code>Budget</code>, <code>Search</code>, <code>Candidates</code>) makes the public surface legible and signals which knobs a caller should ever touch.</p>
+</div>
+<div class="find" id="vrp-low">
+<h3>L4 · The VRP/HGS extension seams don't exist yet <span class="sev s-lo">LOW</span> <span class="tag t-ext">extensibility</span></h3>
+<p>See §2 — the future layer needs a distance <b>penalty hook</b> and <b>pinned-edge</b> support; neither has a seam today. Low severity now (future scope), but cheap to define the interface early so the core doesn't have to be reopened later.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="vrp">2 · Extensibility — the VRP/HGS seams</h2>
+<p>Your stated north star is an HGS-style VRP layer on top of this symmetric-TSP core (constraints via distance-matrix manipulation + penalty hooks; ATSP via the 2n transform at the problem layer). The architecture <i>mostly</i> supports this, which is to its credit. The gaps:</p>
+<table>
+<thead><tr><th>Connector</th><th>Status</th><th>Seam needed</th></tr></thead>
+<tbody>
+<tr><td>ATSP (2n Jonker–Volgenant transform)</td><td class="good">supported</td><td>problem-layer only; core stays symmetric ✓</td></tr>
+<tr><td>Elite pool / population</td><td class="good">exists</td><td>already built for EAX; the HGS population reuses it</td></tr>
+<tr><td>Distance penalty hooks (constraints)</td><td class="bad">missing</td><td>DistanceOracle needs <code>distance(a,b) = base(a,b) + penalty(a,b)</code> with a mutable penalty source</td></tr>
+<tr><td>Pinned / fixed edges</td><td class="bad">missing</td><td>a "this edge must stay" predicate the move-apply + kick respect (the freeze machinery was the wrong version of this — but a <i>caller-supplied</i> hard constraint is legitimate)</td></tr>
+<tr><td>Split / route-extraction DP</td><td class="bad">future</td><td>a layer <i>above</i> <code>solve()</code>, not inside it — keep the core unaware</td></tr>
+<tr><td>Diversity metric (edge entropy)</td><td class="warn">partial</td><td>item-4 symdiff exists; the entropy version (math.html R6) is the HGS-correct one</td></tr>
+</tbody>
+</table>
+<blockquote><b>Note on pinned edges vs. freeze.</b> The freeze subsystem you're deleting was an <i>internal heuristic</i> trying to guess which edges to fix — proven a dead end. A VRP <i>caller-supplied</i> pinned-edge constraint is a different, legitimate thing (the user knows the constraint). When you build it, build it as a clean predicate on the move-apply path, not by resurrecting the vote machinery.</blockquote>
+<p>Defining the <code>DistanceOracle</code> penalty hook now (an optional <code>penalty: ?*const PenaltySource</code>, default null, added in <code>distance()</code>) costs almost nothing and means the VRP layer never has to reopen the core's hot path. That's the one forward-looking seam worth adding early.</p>
+
+<!-- ============================================================ -->
+<h2 id="road">3 · Prioritised roadmap</h2>
+<table>
+<thead><tr><th>#</th><th>Move</th><th class="n">Sev</th><th>Why now</th><th class="n">Risk</th></tr></thead>
+<tbody>
+<tr><td>1</td><td><b>Delete the freeze subsystem</b> (M2) + the dead-path backlog (M3)</td><td class="n"><span class="sev s-md">MED</span></td><td>highest ratio: shrinks 4 structs + the loop; all dead/off paths; bit-identical</td><td class="n good">low</td></tr>
+<tr><td>2</td><td><b>Split the monolith</b> (H1) as pure code-motion</td><td class="n"><span class="sev s-hi">HIGH</span></td><td>makes every later change local; zero behaviour change; do after #1 so you move less code</td><td class="n good">low</td></tr>
+<tr><td>3</td><td><b>Build hygiene</b> (L1): <code>profile</code> step + gitignore the binary</td><td class="n"><span class="sev s-lo">LOW</span></td><td>removes a daily papercut; trivial</td><td class="n good">low</td></tr>
+<tr><td>4</td><td><b>Tour ADT seam</b> (H2) as a no-op refactor (array impl only)</td><td class="n"><span class="sev s-hi">HIGH</span></td><td>unblocks the ~2–3× perf lever; abstract the <code>pos[]</code> sites; prove bit-identical</td><td class="n warn">med</td></tr>
+<tr><td>5</td><td><b>Differential harness</b> (M4) for tour reps</td><td class="n"><span class="sev s-md">MED</span></td><td>the safety net for the structure swap; build before the two-level impl</td><td class="n good">low</td></tr>
+<tr><td>6</td><td><b>Shrink LocalSearch</b> (H3): borrow workspace, split config/tour/state</td><td class="n"><span class="sev s-hi">HIGH</span></td><td>kills the aliasing fragility; natural once #2/#4 are done</td><td class="n warn">med</td></tr>
+<tr><td>7</td><td><b>Resolve the IPT/EAX limbo</b> (M1): consolidate or document-as-permanent</td><td class="n"><span class="sev s-md">MED</span></td><td>stop the 9-round "transitional"; one <code>recombine()</code> entry</td><td class="n warn">med</td></tr>
+<tr><td>8</td><td><b>Penalty hook seam</b> (L4) on the oracle — define, leave unused</td><td class="n"><span class="sev s-lo">LOW</span></td><td>future VRP never reopens the core; near-free now</td><td class="n good">low</td></tr>
+</tbody>
+</table>
+
+<div class="panel">
+<h4>The through-line</h4>
+<p>Steps 1–2 are <b>pure hygiene</b> (delete dead weight, then physically separate the live concerns) — both bit-identical, both make everything after them easier, and together they fix the cohesion grade (D→B) and the dead-weight grade (C→A) with near-zero risk. Steps 4–6 are the <b>structural payoff</b>: the tour-ADT seam is simultaneously the right boundary <i>and</i> the unlock for math.html's biggest speedup, and shrinking <code>LocalSearch</code> falls out of it. Do the cheap hygiene first; it clears the field for the high-value seam.</p>
+<p class="mut" style="margin-bottom:0"><b>Bottom line:</b> your instinct that the architecture is good is half-right — the <i>decisions</i> are good, and the validation discipline is genuinely excellent and worth protecting. What's missing is a hygiene pass and one real abstraction boundary (the tour). Neither requires changing the LK core or the algorithm; both are mechanical-to-medium effort; and the boundary you most need to draw is the same one that unblocks your biggest performance win.</p>
+</div>
+
+<p class="foot">Audit grounded in the round-19 tree: <code>solver.zig</code> 6,361 LOC / 76 defs / 28 tests; <code>LocalSearch</code> 47 fields; <code>SolveOptions</code> 29 fields (~9 freeze/diagnostic); <code>SolveStats</code> 68 counters; <code>SolverWorkspace</code> 30 fields; two recombination scratch structs. No behaviour change is proposed — every item is hygiene, boundary, or seam. Companion to <code>math.html</code> (algorithmic levers).</p>
+
+</div>
+</body>
+</html>

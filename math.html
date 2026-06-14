@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>commiv — Mathematical &amp; Algorithmic Improvement Research</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1d2129; --ink:#e7e9ee; --mut:#9aa3b2;
+    --acc:#7aa2f7; --good:#7ee787; --warn:#f0b86e; --bad:#f07178; --line:#2a2f3a;
+    --code:#0b0d12;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+  .wrap{max-width:1060px;margin:0 auto;padding:32px 22px 120px}
+  h1{font-size:30px;margin:0 0 4px;letter-spacing:-.4px}
+  h2{font-size:23px;margin:46px 0 10px;padding-top:14px;border-top:1px solid var(--line);letter-spacing:-.3px}
+  h3{font-size:18px;margin:26px 0 6px;color:#cdd3df}
+  h4{font-size:15px;margin:18px 0 4px;color:var(--acc);text-transform:uppercase;letter-spacing:.06em}
+  p{margin:8px 0}
+  a{color:var(--acc);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .sub{color:var(--mut);font-size:15px;margin:0 0 18px}
+  .lead{font-size:17px;color:#d7dbe4}
+  code,kbd{font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace;font-size:.9em;
+    background:var(--code);border:1px solid var(--line);border-radius:5px;padding:1px 5px}
+  pre{background:var(--code);border:1px solid var(--line);border-radius:9px;padding:12px 14px;overflow:auto;font-size:13.5px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin:14px 0}
+  .eq{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:11px 14px;margin:13px 0;
+    text-align:center;font-family:Cambria,Georgia,"Times New Roman",serif;font-size:17px;overflow-x:auto}
+  .m{font-family:Cambria,Georgia,"Times New Roman",serif;font-style:italic}
+  .m sub,.m sup,.eq sub,.eq sup{font-style:normal}
+  .op{font-style:normal}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:760px){.grid{grid-template-columns:1fr}}
+  .tag{display:inline-block;font-size:11.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;
+    padding:2px 8px;border-radius:999px;border:1px solid var(--line);vertical-align:middle}
+  .t-bit{color:var(--good);border-color:#2c5}
+  .t-app{color:var(--warn);border-color:#a72}
+  .t-big{color:var(--bad);border-color:#a44}
+  .t-arch{color:var(--acc);border-color:#46c}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:14.5px}
+  th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:#cdd3df;font-weight:600}
+  td.n{font-variant-numeric:tabular-nums;white-space:nowrap}
+  .good{color:var(--good)} .warn{color:var(--warn)} .bad{color:var(--bad)} .mut{color:var(--mut)}
+  ul{margin:8px 0 8px 4px;padding-left:20px} li{margin:4px 0}
+  .toc{columns:2;column-gap:26px;font-size:14.5px}
+  @media(max-width:760px){.toc{columns:1}}
+  .toc a{display:block;padding:2px 0;color:#c2c9d6}
+  .bignum{font-size:13px;color:var(--mut);font-variant-numeric:tabular-nums}
+  .hl{background:linear-gradient(transparent 60%, rgba(122,162,247,.22) 0)}
+  blockquote{margin:10px 0;padding:6px 14px;border-left:3px solid var(--acc);color:#cfd5e0;background:var(--panel2);border-radius:0 8px 8px 0}
+  .foot{color:var(--mut);font-size:13px;margin-top:50px;border-top:1px solid var(--line);padding-top:14px}
+  .legend span{margin-right:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>commiv — Mathematical &amp; Algorithmic Improvement Research</h1>
+<p class="sub">Where the time actually goes, and how to attack each step from the pure-math, algorithmic, and architectural angles. <b>Constraint:</b> the Lin–Kernighan core stays the engine — no algorithm swap. Round 19 baseline (post Stage-1 dead-rebuild fix). Anchored on rl11849 (n=11849, ≈140&nbsp;s / 400 trials ≈ <b>350&nbsp;ms/trial</b>).</p>
+
+<div class="panel">
+<b>Reading the tags.</b> <span class="legend">
+<span class="tag t-bit">bit-identical</span> same tours, pure speed.
+<span class="tag t-app">approx</span> changes the trajectory; needs the multi-seed gate.
+<span class="tag t-big">big build</span> high effort/risk.
+<span class="tag t-arch">arch</span> data layout / structure.</span>
+</div>
+
+<h2 id="toc">Contents</h2>
+<div class="toc">
+  <a href="#summary">0 · Executive summary &amp; the cost hierarchy</a>
+  <a href="#obj">1 · The objective &amp; cost model</a>
+  <a href="#b4">2 · B4 — Tour representation (the dominant lever)</a>
+  <a href="#b3">3 · B3 — Lin–Kernighan search cost</a>
+  <a href="#cand">4 · A2/A3 — Candidate generation &amp; the 1-tree</a>
+  <a href="#eax">5 · B7 — EAX recombination</a>
+  <a href="#constr">6 · B1/B2 — Construction, warm-up, kicks</a>
+  <a href="#arch">7 · Architecture, memory &amp; distance</a>
+  <a href="#road">8 · Prioritised roadmap</a>
+  <a href="#refs">References</a>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="summary">0 · Executive summary &amp; the cost hierarchy</h2>
+
+<p class="lead">One structural fact drives everything: <b>the array+<code>pos[]</code> tour representation forces an O(n) operation on the hot path that nothing else needs.</b> Every other cost is O(n·width) or O(n) <i>once</i> per trial; the move-application rebuild is O(n) <i>per accepted move</i>, ~1,700 times per trial at rl11849. That single asymptotic mismatch is ~50–65 % of wall-clock and is the whole reason the &lt;15 s target is out of reach today.</p>
+
+<table>
+<thead><tr><th>Step</th><th>Math / operation</th><th>Complexity</th><th class="n">rl11849 work / trial</th><th class="n">≈ share</th><th>Best lever</th></tr></thead>
+<tbody>
+<tr><td><b>B4</b> move apply</td><td>re-linearise cycle + rebuild pos/next/prev</td><td class="bad">O(n) / move</td><td class="n">2.07×10⁷ random touches</td><td class="n bad">50–65 %</td><td>two-level list → O(√n)</td></tr>
+<tr><td><b>B3</b> LK search</td><td>positive-gain edge recursion</td><td>O(nodes·width)</td><td class="n">17.8k nodes, 1.85M lookups</td><td class="n warn">20–30 %</td><td>cand-dist cache, α-prune</td></tr>
+<tr><td><b>B7</b> EAX</td><td>symdiff → AB-cycles</td><td>O(n)·pool</td><td class="n">≤6·O(n) + local LK</td><td class="n">5–10 %</td><td>block2 + entropy (quality)</td></tr>
+<tr><td><b>B1/B2</b> build+kick</td><td>NN / 2-opt / double-bridge</td><td>O(n·width)</td><td class="n">—</td><td class="n">2–5 %</td><td>minor</td></tr>
+<tr><td><b>A2/A3</b> candidates</td><td>1-tree ascent + α-nearness</td><td class="bad">O(n²) once</td><td class="n">33·n² ≈ 4.6×10⁹</td><td class="n">3–5 % of <i>run</i></td><td>Delaunay O(n log n) / POPMUSIC</td></tr>
+</tbody>
+</table>
+
+<div class="panel">
+<h4>The three highest-value moves (all keep LK intact)</h4>
+<ol>
+<li><span class="tag t-bit">bit-identical</span> <span class="tag t-big">big build</span> <b>R1 — Two-level doubly-linked tour list.</b> Reversal O(n)→O(√n) (≈109× fewer touches at rl11849), <span class="m">between</span> stays O(1). Faithful ADT ⇒ identical LK decisions ⇒ identical tours. <b>~2–3× alone.</b></li>
+<li><span class="tag t-bit">bit-identical</span> <span class="tag t-arch">arch</span> <b>R2 — Store candidate-edge distances next to the candidate ids.</b> Kills most of the 1.85M/trial distance recomputes in the LK inner loop. Cheap, safe. <b>~1.2–1.5×.</b></li>
+<li><span class="tag t-bit">bit-identical</span> <b>R5 — Admissible α-gain pruning in the recursion.</b> Use the 1-tree bound to drop branches that <i>provably</i> can't close positively → fewer LK nodes, same moves. <b>~1.2–1.5×.</b></li>
+</ol>
+<p class="mut" style="margin-bottom:0">Stacked, R1·R2·R5 ≈ <b>3–5×</b> at n≈12k (rl11849 ≈140 s → ≈30–45 s). The remaining gap to 15 s is convergence/trial-count and parallelism (item 9), which are outside "pure math." Below, every step gets the three-lens treatment.</p>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="obj">1 · The objective &amp; cost model</h2>
+
+<p>We minimise, over permutations <span class="m">σ&#8201;∈&#8201;S<sub>n</sub></span>,</p>
+<div class="eq"><span class="m">L(σ) = <span class="op">Σ</span><sub>i=0</sub><sup>&#8201;n−1</sup> d(σ<sub>i</sub>,&#8201;σ<sub>i+1</sub>)</span>, &nbsp;&nbsp; <span class="m">d(p,q) = &#8970;&#8730;( (x<sub>p</sub>−x<sub>q</sub>)² + (y<sub>p</sub>−y<sub>q</sub>)² )&#8969;</span></div>
+
+<h4>Pure-math view</h4>
+<p>The rounding makes <span class="m">d</span> a genuine (integer) metric, so the triangle inequality holds and 2-opt/3-opt gains are well-defined. One tempting micro-optimisation — comparing <i>squared</i> distances to skip the <code>sqrt</code> — is <b>not valid here</b>: the objective is the sum of <i>rounded</i> roots, and <span class="m">&#8970;&#8730;a&#8969; + &#8970;&#8730;b&#8969;</span> is not monotone in <span class="m">a+b</span>. Gains must use the rounded values. So the lever is not "avoid the sqrt in comparisons" but "<b>compute each <span class="m">d</span> once and never again</b>" (→ §7, distance cache).</p>
+
+<h4>What a "trial" costs</h4>
+<p>A trial = construct/perturb → LK descent → (n≥1000) EAX merge → accept. The loop runs <span class="m">T = n·(1+ext)</span> times. The per-trial cost is dominated by how many <b>moves</b> LK accepts (each pays B4) and how many <b>nodes</b> it explores (each pays B3). The item-1 counters (measured, cached, seed 12345) pin the ratio:</p>
+<table>
+<thead><tr><th>n</th><th class="n">dist lookups / trial</th><th class="n">tour rebuilds (run)</th><th class="n">rebuild element-work = rebuilds·n</th><th class="n">LK nodes / trial</th></tr></thead>
+<tbody>
+<tr><td class="n">575</td><td class="n">42,315</td><td class="n">86,108</td><td class="n">4.95×10⁷</td><td class="n">1,174</td></tr>
+<tr><td class="n">1002</td><td class="n">92,216</td><td class="n">906,700</td><td class="n">9.09×10⁸</td><td class="n">4,207</td></tr>
+<tr><td class="n">1577</td><td class="n">75,256</td><td class="n">1,036,650</td><td class="n">1.63×10⁹</td><td class="n">1,961</td></tr>
+<tr><td class="n">11849</td><td class="n">1,846,407</td><td class="n">698,474</td><td class="n bad">8.28×10⁹</td><td class="n">17,848</td></tr>
+</tbody>
+</table>
+<p class="mut">Rebuild element-work is <b>~11×</b> the total distance-lookup count at rl11849 — and each rebuild touch is a random-access pointer-chase, while each lookup is an L2/L3 hit. That is the empirical statement of "B4 dominates."</p>
+
+<!-- ================================================================ -->
+<h2 id="b4">2 · B4 — Tour representation <span class="tag t-app">the dominant lever</span></h2>
+
+<h3>Current state</h3>
+<p>The tour is the permutation array <code>tour[]</code> plus its inverse <code>pos[]</code> plus flat <code>next[]</code>/<code>prev[]</code>. Queries are O(1): <code>between(a,b,c)</code> compares positions, <code>next/prev</code> are array loads. The price is the <b>update</b>: a general accepted move re-traces the whole Hamiltonian cycle from <code>tour[0]</code> to re-linearise, then recomputes <code>pos/next/prev</code> — O(n) per move. A depth-2 2-opt has an O(segment) fast path (<code>reverseSegment</code>), but it only fires for one orientation and catches ~4,141 of ~698k moves; the rest pay full O(n).</p>
+
+<h4>Pure-math view</h4>
+<p>This is exactly the classic <b>"dynamic ordered list supporting reversal"</b> problem. A 2-opt move is a <i>segment reversal</i> of the cyclic sequence; the data-structure question is how to support <code>{next, prev, between, reverse}</code> with sublinear reversal. Fredman, Johnson, McGeoch &amp; Ostheimer (1995) proved a cell-probe lower bound of <span class="hl m">Ω(log n / log log n)</span> per operation for this class — so O(log n) structures are essentially optimal, and the array's <span class="m">Θ(n)</span> reversal is provably wasteful. The reason the array can't do better: <code>between</code> needs a total order (the positions), and a reversal renumbers <span class="m">Θ(segment)</span> positions.</p>
+
+<h4>Algorithmic view — the menu (FMG&amp;O 1995, Johnson–McGeoch survey)</h4>
+<table>
+<thead><tr><th>Structure</th><th>reverse</th><th>between / next</th><th>Practical note</th></tr></thead>
+<tbody>
+<tr><td>Array + pos <span class="mut">(current)</span></td><td class="bad">Θ(n)</td><td class="good">O(1)</td><td>fine to ~few k; the wall we are at</td></tr>
+<tr><td><b>Two-level doubly-linked list</b></td><td class="good">O(√n)</td><td class="good">O(1)</td><td class="good">the practical winner to ~10⁶; used by LKH, Concorde</td></tr>
+<tr><td>Splay tree</td><td>O(log n) amort.</td><td>O(log n) amort.</td><td>elegant but high constant; loses to two-level under ~10⁶</td></tr>
+<tr><td>k-level / satellite tree</td><td>O(n<sup>1/k</sup>)</td><td>O(1)</td><td>only pays off well beyond 10⁶</td></tr>
+</tbody>
+</table>
+
+<p><b>The two-level list (recommendation R1).</b> Partition the tour into ≈√n <i>segments</i>, each a doubly-linked list of cities, each carrying a <b>reversed bit</b> and a <b>segment id + sequence number</b>; segments themselves form a doubly-linked list with their own order ids. Then:</p>
+<ul>
+<li><code>next(c)/prev(c)</code>: O(1) — follow the city link, honouring the segment's reversed bit.</li>
+<li><code>between(a,b,c)</code>: O(1) — compare (segment order id, within-segment sequence id), reversed-bit-aware.</li>
+<li><code>reverse(a,b)</code>: <b>O(√n)</b> — split the ≤2 boundary segments, then <i>flip the reversed bits and reverse the order of the whole segments in between</i> (no per-city work for interior segments), and renumber ≈√n segment ids. Periodic rebalance keeps segment sizes in [½√n, 2√n].</li>
+</ul>
+
+<p class="good"><b>Why it is bit-identical.</b> The LK core only ever asks the tour for <code>next/prev/between/reverse</code>. If the two-level list answers those <i>identically</i> to the array (same successor, same orientation convention), the search makes the identical sequence of decisions → identical accepted moves → identical tours and lengths. The internal layout is invisible to the search. <b>This is a pure speed optimisation, gated on bit-identical lengths.</b></p>
+
+<blockquote><b>Hidden snag to design around.</b> A handful of call sites read <code>pos[]</code> as a raw integer (e.g. <code>improve2Opt</code>: <code>j = pos[c]; if (j &lt;= i+1)</code>). Those encode an array-specific layout. They must be rewritten in terms of the ADT's order query (<code>between</code> / a segment-rank comparator) before R1 is bit-identical. This is the bulk of the care.</blockquote>
+
+<h4>Architecture view</h4>
+<p>Encapsulate the tour behind a single ADT (the existing <code>TourView</code> union is the right seam — collapse the dead segment branch first, per Stage-1 follow-up, then add the two-level implementation as a third variant gated by n). The LK core takes the ADT by interface; nothing in <code>searchAdded/searchRemoved</code> changes. The <code>flip_*</code> item-1 counters already exist to verify the √n behaviour.</p>
+
+<h4>Medium alternative if R1 is too much at once <span class="tag t-bit">bit-identical</span></h4>
+<p><b>R4 — extend the in-place fast path.</b> Today only one 2-opt orientation is applied incrementally. Add (a) the complementary 2-opt orientation (reverse the other segment, choosing the <i>shorter</i> side) and (b) Or-opt relocations, each in O(segment). The catch is the <b>layout-match</b>: the general retrace re-canonicalises from <code>tour[0]</code>, so an in-place edit only matches it when the touched segment excludes <code>tour[0]</code> and preserves the start direction — detect that condition and fall back to the general path otherwise. This converts most general moves to O(segment) without a new structure, but it is fiddly and strictly weaker than R1 (still <span class="m">Θ(n)</span> worst case). Use it as a stepping-stone or if R1's risk is unacceptable.</p>
+
+<p class="bignum"><b>Estimated payoff (R1).</b> √11849 ≈ 109 ⇒ the dominant bucket's element-work drops ~100×. By Amdahl with move-apply ≈ 60 %: new ≈ 0.6/100 + 0.40 ≈ 0.43 → <b>~2.3×</b>; the freed cache pressure and cheaper <code>between</code> push it toward <b>2–3×</b>, and the win <i>grows with n</i> (√n vs n).</p>
+
+<!-- ================================================================ -->
+<h2 id="b3">3 · B3 — Lin–Kernighan search cost</h2>
+
+<p>LK from <span class="m">t<sub>1</sub></span>: alternately remove a tour edge <span class="m">(t<sub>2i−1</sub>,&#8201;t<sub>2i</sub>)</span> and add a candidate edge <span class="m">(t<sub>2i</sub>,&#8201;t<sub>2i+1</sub>)</span>, maintaining the running gain</p>
+<div class="eq"><span class="m">g<sub>i</sub> = <span class="op">Σ</span><sub>k≤i</sub> d(removed<sub>k</sub>) − <span class="op">Σ</span><sub>k&lt;i</sub> d(added<sub>k</sub>)</span>, &nbsp; recurse while <span class="m">g<sub>i</sub> &gt; 0</span>, &nbsp; close when <span class="m">g<sub>i</sub> − d(t<sub>2i</sub>,&#8201;t<sub>1</sub>) &gt; 0</span></div>
+<p>This is the engine the user wants kept — so the levers are <b>fewer nodes</b> and <b>cheaper nodes</b>, not a different search.</p>
+
+<h3>3a · Cheaper nodes — candidate-distance cache (R2) <span class="tag t-bit">bit-identical</span> <span class="tag t-arch">arch</span></h3>
+<h4>Problem</h4>
+<p>The inner loop calls <code>dist.distance(even, candidate)</code> for every candidate at every node — ~1.85M lookups/trial at rl11849, the bulk of the lookup column. The candidate rows are <b>fixed for the whole run</b> and their distances were already computed during the candidate build, yet they are recomputed (or matrix-loaded) every visit.</p>
+<h4>Fix</h4>
+<p>Store a parallel <code>cand_dist[node·width + k]</code> = <span class="m">d(node,&#8201;candidate<sub>k</sub>)</span>, filled once at build time. The LK loop then reads a contiguous, L1/L2-resident <code>u32</code> instead of a 562 MB-matrix DRAM load or a sqrt. The <code>alpha[]</code> array is already laid out exactly this way — add a third parallel array. Non-candidate lookups (tour edges <span class="m">d(t<sub>1</sub>,t<sub>2</sub>)</span>, closing edges <span class="m">d(even,&#8201;t<sub>1</sub>)</span>) remain, but the candidate-edge majority becomes nearly free. <b>Bit-identical</b> (same numbers, faster source).</p>
+<p class="mut">This is also the "candidate-distance option half-exists" from item 6: with it, the full n² matrix can be dropped entirely (hot distances cached, cold ones on-the-fly) — memory scales <i>and</i> the hot path speeds up. Best of both.</p>
+
+<h3>3b · Fewer nodes — admissible α-gain pruning (R5) <span class="tag t-bit">bit-identical</span></h3>
+<h4>Pure-math view</h4>
+<p>The minimum-1-tree machinery already gives, for free, a <b>lower bound on the cost of any edge incident to a node</b>. Define the reduced cost <span class="m">c<sub>π</sub>(i,j) = d(i,j) + π<sub>i</sub> + π<sub>j</sub></span>. The α-value <span class="m">α(i,j) = c<sub>π</sub>(i,j) − β(i,j) ≥ 0</span> (<span class="m">β</span> = the 1-tree path bottleneck) means <span class="m">c<sub>π</sub>(i,j) ≥ β(i,j)</span>, and the <b>smallest reduced cost incident to a node is bounded below</b> by its cheapest candidate. So for a partial LK sequence with running gain <span class="m">g<sub>i</sub></span>, the best <i>possible</i> remaining close is bounded: if even the most optimistic admissible continuation cannot reach <span class="m">g<sub>i</sub> − (min feasible add + close) &gt; 0</span>, the subtree is dead.</p>
+<h4>Algorithmic view</h4>
+<p>Concretely: candidates are already α-sorted, so once a candidate's <code>g_i − d(even,odd_next) ≤ 0</code> in a sorted scan, <i>all later candidates at that node are also non-improving</i> (their added edges are ≥). The code already has the positive-gain check but iterates the whole row; turning it into an <b>early-break on the sorted row</b> is the cleanest admissible prune. A second, deeper prune: maintain a running upper bound on achievable gain using the cheapest available reduced cost at the frontier node and cut when it falls below the current best — this is α used as a branch-and-bound heuristic, still exact (no accepted move is lost), so <b>bit-identical</b>.</p>
+<blockquote><b>Care:</b> "bit-identical" only holds if the prune is <i>provably</i> admissible (never skips a move that the un-pruned search would have applied). The sorted-row early-break is safe because the gain is monotone in the sorted added-edge cost; the deeper B&amp;B prune needs a correctness proof per move type before it can claim bit-identity. Otherwise it is <span class="tag t-app">approx</span> and goes through the multi-seed gate.</blockquote>
+
+<h3>3c · Search completeness — the mirror direction (Bentley)</h3>
+<p>Standard neighbour-list 2-opt is incomplete unless you search from <i>both</i> endpoints of a removed edge: an improving move with <span class="m">Y<sub>2</sub></span> near <span class="m">X<sub>2</sub></span> (but <span class="m">Y<sub>1</sub></span> far from <span class="m">X<sub>1</sub></span>) is only found from the mirror direction. The current <code>orderTourEdgeChoices</code> tries both tour edges at <span class="m">t<sub>1</sub></span>, which covers part of this, but it is worth auditing that the descent is not missing the <span class="m">X<sub>2</sub></span>-anchored half — that is <i>quality</i> (fewer trials to converge), which at fixed trial budget is effectively speed. <span class="tag t-app">approx</span></p>
+
+<h4>Architecture view (B3)</h4>
+<p>Don't-look bits already exist as the active-node queue (<code>lkActive</code>). Two cheap wins: (i) the candidate rows + <code>cand_dist</code> + <code>alpha</code> should be <b>interleaved</b> in one cache line per node (AoS within a row) so a node's whole candidate set is one or two cache lines; (ii) the gain arithmetic is all <code>i64</code> on small ints — fine, no change. The dominant B3 cost is memory traffic (candidate + distance reads), which R2 + interleaving directly attack.</p>
+
+<p class="bignum"><b>Estimated payoff.</b> R2: cuts a large fraction of the 20–30 % lookup bucket → ~1.2–1.5×. R5 early-break: reduces <code>lk_nodes</code> and the per-node candidate scan → ~1.2–1.5×, free and bit-identical.</p>
+
+<!-- ================================================================ -->
+<h2 id="cand">4 · A2/A3 — Candidate generation &amp; the 1-tree</h2>
+
+<h3>Current state</h3>
+<p>α-nearness candidates (Helsgaun): subgradient ascent maximises the Held–Karp 1-tree lower bound <span class="m">w(π) = L(T<sub>π</sub>) − 2&#8201;<span class="op">Σ</span><sub>i</sub>π<sub>i</sub></span> over node penalties <span class="m">π</span>, 32 iterations, each a <b>dense O(n²) Prim</b>; then α-values via per-row MST-path-bottleneck BFS, O(n²) total. ~33·n² ≈ 4.6×10⁹ work at rl11849 — the big one-time block (~3–5 % of the run, but pure O(n²): a wall at 10⁵⁺).</p>
+
+<h4>Pure-math view — why this is the <i>right</i> measure</h4>
+<p>The reduced cost <span class="m">c<sub>π</sub></span> leaves the optimal tour invariant while reshaping the 1-tree; <span class="m">w(π)</span> is a valid lower bound for every <span class="m">π</span>, and maximising it (a concave non-smooth program) tightens the bound. Helsgaun's empirical payoff: <b>70–80 % of optimal-tour edges already sit in the minimum 1-tree</b>, so α-nearness is a far better candidate filter than raw nearest-distance. <span class="good">Keep it.</span> The improvements below make it <i>cheaper</i>, not different in spirit.</p>
+
+<h4>Algorithmic view — kill the O(n²)</h4>
+<ul>
+<li><b>R3a — MST on the Delaunay graph, O(n log n).</b> For planar points the <b>Euclidean MST is a subgraph of the Delaunay triangulation</b> (in fact EMST ⊆ RNG ⊆ Gabriel ⊆ Delaunay), and the Delaunay graph has only O(n) edges with average vertex degree &lt; 6. So: build Delaunay once (O(n log n)), run heap-Prim/Kruskal on its O(n) edges (≈O(n log n)). This replaces the dense <span class="m">Θ(n²)</span> Prim. <span class="warn">Subtlety:</span> the EMST⊆Delaunay theorem is for the <i>un-penalised</i> metric. The π-reweighted 1-tree can want non-Delaunay edges, so restricting the ascent's MST to the Delaunay (or k-nearest) subgraph is an <b>approximation</b> — exactly the standard LKH practice for large n (build candidates on a subgraph). On the geometric fixtures the penalty perturbation is small and candidate quality is preserved in practice, but it is <span class="tag t-app">approx</span> (different candidates ⇒ different trajectory ⇒ multi-seed gate). The repo already has a (deprecated) CGAL Delaunay path to reuse.</li>
+<li><b>R3b — POPMUSIC candidate generation, near-linear.</b> Taillard &amp; Helsgaun (2019): build several POPMUSIC sub-tours (divide the tour into fixed-size sub-paths, optimise each independently, merge), then take the <b>union of their edges</b> as each city's candidate set (sorted by α <i>without</i> recomputing π). This produces high-quality candidates in almost-linear time, even for non-geometric instances, and scales to millions of cities — it is how LKH does 10⁵⁺. It sidesteps the subgradient cost entirely. <span class="tag t-app">approx</span>, <span class="tag t-big">big build</span>; the right answer for the 100k+ tier (roadmap item 7), overkill below 2×10⁴.</li>
+</ul>
+
+<h4>Pure-math view — a tighter bound in fewer iterations</h4>
+<p>The subgradient step is the classic <span class="m">π<sub>i</sub> += step·(7&#8201;g<sub>i</sub> + 3&#8201;g<sub>i</sub><sup>prev</sup>)/10</span> with period-halving (first period n/2, step<sub>0</sub>≈1) — Helsgaun's tuned heuristic, where <span class="m">g<sub>i</sub> = deg<sub>i</sub> − 2</span> is the degree deficit. Faster/tighter convergence is available from the optimisation literature: <b>deflected subgradient</b> (Camerini–Fratta–Maffioli), the <b>volume algorithm</b>, or a small <b>bundle method</b> reach a tighter <span class="m">w(π)</span> in fewer 1-tree builds. Since each iteration is one MST, halving the iteration count (32→~16) at equal bound quality is a direct ~2× on the candidate build. <span class="tag t-app">approx</span> (a different <span class="m">π</span> ⇒ different α-order ⇒ different candidates). Modest absolute win (build is ~4 %), so low priority below 10⁵.</p>
+
+<h4>Architecture view</h4>
+<p>The build is one-time and already heavily optimised (the O(n⁴)→O(n²) BFS fix was the big one). For the current targets (n≤18512) it is not the bottleneck; for 100k+ it is the <i>first</i> wall (memory: the dense build also implies the n² matrix). R3a/R3b are the same lever as item 6's "drop the matrix" + item 7's "sparse candidates" — they unlock scale, not current-fixture speed.</p>
+
+<!-- ================================================================ -->
+<h2 id="eax">5 · B7 — EAX recombination</h2>
+
+<h3>Current state</h3>
+<p>At n≥1000 the combiner forms the <b>symmetric-difference multigraph</b> <span class="m">G = E(trial) △ E(ref)</span>, decomposes it into <b>AB-cycles</b> (edges alternating trial/ref), applies improving cycles, repairs sub-tours with cheapest-candidate 2-opt bridges, and re-optimises only around the changed boundaries. References come from the elite pool. This is a faithful but simplified EAX.</p>
+
+<h4>Pure-math view</h4>
+<p><span class="m">G</span> is an even multigraph (every vertex has equal A-degree and B-degree), so it decomposes into edge-disjoint <b>AB-cycles</b> — a cycle-space fact. The choice of <i>which</i> cycles to apply (the <b>E-set</b>) is the whole game. Applying one AB-cycle = a generalised <span class="m">k</span>-opt move that the sequential LK cannot reach (it can move interleaved bundles atomically). So EAX is not a competitor to LK — it is a <b>different neighbourhood</b> the LK polish then cleans up. Keeping LK intact, the lever is the E-set strategy.</p>
+
+<h4>Algorithmic view — Nagata's E-set strategies (GA-EAX)</h4>
+<ul>
+<li><b>single</b> (current ≈ this): one AB-cycle per offspring — fast, converges the population quickly.</li>
+<li><b>R6 — block2</b>: select AB-cycles so the intermediate solution has <i>few sub-tours</i> and the offspring inherits more of parent B's edges. This is the strategy that makes GA-EAX strong on large instances — it exchanges edges <i>globally</i> and escapes local optima the single strategy gets stuck in. This is a quality lever for pr1002/fl1577/rl11849, exactly the n≥1000 regime. <span class="tag t-app">approx</span></li>
+</ul>
+
+<h4>Diversity — the principled metric (ties to item 4)</h4>
+<p>GA-EAX replaces a parent by the best offspring under an <b>edge-entropy</b> measure, not tour length — this is what actually preserves population diversity at scale. Our round-19 item-4 experiment used pairwise symmetric-difference (a coarser proxy) and found no regime on the current fixtures; the <i>entropy</i> formulation is the textbook-correct version and is the thing to try <b>once item 6 unblocks d18512 / long runs</b> (the regime where diversity matters). Keep it filed with item 4. <span class="tag t-app">approx</span></p>
+
+<p class="bignum"><b>Estimated payoff.</b> Accuracy, not raw speed: block2 + entropy is how GA-EAX beats LK-based solvers on 10⁴–2×10⁵ instances <i>without</i> an LK core — so as a <i>combiner feeding our LK</i> it is pure upside on the big rows. At fixed trial budget, better recombination = fewer trials to the same quality = effective speed.</p>
+
+<!-- ================================================================ -->
+<h2 id="constr">6 · B1/B2 — Construction, warm-up, kicks</h2>
+<p>Small share (2–5 %), but two notes:</p>
+<ul>
+<li><b>Kick (double-bridge):</b> a 4-opt perturbation; the <code>std.mem.rotate</code> is O(segment) and, under R1, becomes a few O(√n) splices. The kick itself is mathematically fine — it is the canonical ILS perturbation and the do-not-retry table confirms alternatives lose. No change.</li>
+<li><b>Warm-up 2-opt/Or-opt:</b> O(passes·n·width) with O(1) delta evaluation already. Under R1 the <code>reverseSegment</code> in <code>improve2Opt</code> also drops to O(√n). The <code>pos[c]</code> comparisons here are the <i>same</i> array-layout call sites R1 must abstract (§2 snag).</li>
+<li><b>NN / guided construction:</b> already O(n·width) via candidate rows. Fine.</li>
+</ul>
+
+<!-- ================================================================ -->
+<h2 id="arch">7 · Architecture, memory &amp; distance</h2>
+
+<h4>Distance representation</h4>
+<p>Measured (round 19): at rl11849 the 562 MB matrix and pure on-the-fly are <b>time-neutral</b> — lookups are not the bottleneck. So the distance decision is about <b>memory + the hot fraction</b>, not headline speed:</p>
+<ul>
+<li><b>R2 candidate-distance cache</b> (§3a) makes the <i>hot</i> lookups L2-resident; combined with on-the-fly for cold pairs, the n² matrix can be dropped → d18512 (1.37 GB) and 100k+ become feasible with no speed loss. This is item 6 done right: a memory enabler that also speeds the hot path.</li>
+<li>Storing distances as <code>u32</code> in candidate rows is 4·n·width bytes ≈ 240 KB at rl11849 — trivially L2-friendly.</li>
+</ul>
+
+<h4>Memory layout</h4>
+<ul>
+<li>Candidate data is already row-major SoA (<code>data[]</code>, <code>alpha[]</code>). Add <code>cand_dist[]</code> as a third parallel array, or interleave (id, α, dist) per candidate so a node's row is one cache line. The LK inner loop becomes a single sequential sweep per node.</li>
+<li><code>next/prev/pos</code> are three n-arrays touched together every move — under R1 they are replaced by the two-level segment records; keep a segment's cities contiguous so a reversal touches contiguous memory (cache-friendly, unlike today's pointer-chase retrace).</li>
+<li>Stage-1 follow-up: <b>fully delete</b> the dead two-level <i>debug</i> segment index (gated off in release but still allocated); the real two-level list (R1) replaces it with a structure that is actually read.</li>
+</ul>
+
+<h4>Structural seam</h4>
+<p>The single most valuable architectural change is making the <b>tour an ADT interface</b> (<code>next/prev/between/reverse/materialize</code>) that the LK core consumes by reference. That decouples "the search" (kept intact, per the user) from "the representation" (swap array → two-level → k-level by n). Every speed lever in §2 then lands behind that seam without touching <code>searchAdded/searchRemoved</code>.</p>
+
+<!-- ================================================================ -->
+<h2 id="road">8 · Prioritised roadmap</h2>
+
+<table>
+<thead><tr><th>#</th><th>Lever</th><th>Attacks</th><th>Kind</th><th class="n">Est. speed</th><th>Effort / risk</th></tr></thead>
+<tbody>
+<tr><td><b>R2</b></td><td>Candidate-distance cache (parallel <code>cand_dist[]</code>)</td><td>B3 lookups + memory</td><td><span class="tag t-bit">bit-identical</span> <span class="tag t-arch">arch</span></td><td class="n good">1.2–1.5×</td><td>Low — do first</td></tr>
+<tr><td><b>R5</b></td><td>Sorted-row early-break / admissible α-prune</td><td>B3 node count</td><td><span class="tag t-bit">bit-identical</span></td><td class="n good">1.2–1.5×</td><td>Low — must prove admissible</td></tr>
+<tr><td><b>R1</b></td><td>Two-level doubly-linked tour list (O(√n) reverse)</td><td>B4 (the dominant bucket)</td><td><span class="tag t-bit">bit-identical</span> <span class="tag t-big">big build</span></td><td class="n good">2–3× (grows with n)</td><td>High — ADT seam + abstract <code>pos[]</code> sites + differential test</td></tr>
+<tr><td><b>R4</b></td><td>Incremental 2-opt(both)/Or-opt in-place</td><td>B4 (stepping-stone to R1)</td><td><span class="tag t-bit">bit-identical</span></td><td class="n warn">1.5–2×</td><td>Med — layout-match vs retrace is fiddly</td></tr>
+<tr><td><b>R6</b></td><td>EAX block2 E-set + edge-entropy diversity</td><td>B7 quality (n≥1000)</td><td><span class="tag t-app">approx</span></td><td class="n">accuracy → effective speed</td><td>Med — file with item 4/5</td></tr>
+<tr><td><b>R3a</b></td><td>Delaunay-graph MST for the 1-tree ascent</td><td>A2/A3 O(n²)→O(n log n)</td><td><span class="tag t-app">approx</span></td><td class="n">~2× build; unlocks scale</td><td>Med — reuse CGAL path; 100k+ tier</td></tr>
+<tr><td><b>R3b</b></td><td>POPMUSIC candidates (near-linear)</td><td>A2/A3 at 10⁵⁺</td><td><span class="tag t-app">approx</span> <span class="tag t-big">big build</span></td><td class="n">enables 10⁵–10⁶</td><td>High — item 7 / VRP scale</td></tr>
+</tbody>
+</table>
+
+<div class="panel">
+<h4>Suggested order &amp; the honest ceiling</h4>
+<p><b>1) R2 then R5</b> — both bit-identical, low-risk, immediately stackable (~1.5–2× combined) and they also <i>prepare</i> the ground (a clean candidate-row layout, a clean recursion) for R1. <b>2) R1</b> — the structural prize, behind the ADT seam, with R4 as a fallback if the layout-matching for full R1 proves too risky in one step. <b>3) R3a / R6</b> — scale and quality, when d18512 / 100k+ / the big rows come into focus.</p>
+<p class="mut" style="margin-bottom:0"><b>Reality check on rl11849 &lt; 15 s.</b> R1·R2·R5 ≈ 3–5× ⇒ ≈140 s → ≈30–45 s. The last 2–3× to 15 s is <i>not</i> in these per-move levers — it is fewer trials (better candidates/recombination converging sooner, i.e. R5/R6 quality) and, ultimately, multi-stream parallelism into one elite pool (roadmap item 9, ~cores×). The math levers here are necessary and get most of the way; the final factor is convergence + cores, which is deliberately outside "leave the LK core intact, no new algo."</p>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="refs">References</h2>
+<ol style="font-size:14px;line-height:1.5">
+<li>M. L. Fredman, D. S. Johnson, L. A. McGeoch, G. Ostheimer. <i>Data Structures for Traveling Salesmen.</i> Journal of Algorithms 18 (1995) 432–479. <a href="https://dl.acm.org/doi/pdf/10.5555/313559.313668">acm</a> — two-level list O(√n), splay O(log n), Ω(log n/log log n) lower bound.</li>
+<li>D. S. Johnson, L. A. McGeoch. <i>The Traveling Salesman Problem: A Case Study in Local Optimization.</i> <a href="https://www.cs.ubc.ca/~hutter/previous-earg/EmpAlgReadingGroup/TSP-JohMcg97.pdf">pdf</a> — survey of structures + 2-opt/Or-opt/3-opt speedups.</li>
+<li>K. Helsgaun. <i>An Effective Implementation of the Lin–Kernighan TSP Heuristic.</i> EJOR 126 (2000). <a href="http://akira.ruc.dk/~keld/research/LKH/LKH-1.3/DOC/LKH_REPORT.pdf">report</a> — α-nearness, minimum 1-tree, subgradient ascent, candidate sets.</li>
+<li>É. D. Taillard, K. Helsgaun. <i>POPMUSIC for the Travelling Salesman Problem.</i> EJOR 272 (2019) 420–429. <a href="https://www.academia.edu/81496564/">candidate-set report</a> — near-linear candidate generation for very large instances.</li>
+<li>J. L. Bentley. <i>Fast Algorithms for Geometric TSP.</i> ORSA J. Computing (1992) — don't-look bits, neighbour lists, the mirror-direction completeness. <a href="https://tsp-basics.blogspot.com/2017/03/2-opt-with-neighbor-lists-and-dont-look.html">notes</a></li>
+<li>Y. Nagata, S. Kobayashi. <i>A Powerful Genetic Algorithm Using Edge Assembly Crossover for the TSP.</i> INFORMS J. Computing 25(2) (2013) 346–363. <a href="https://pubsonline.informs.org/doi/10.1287/ijoc.1120.0506">informs</a> — AB-cycles, E-set single/block2, edge-entropy diversity.</li>
+<li>Euclidean MST ⊆ Delaunay triangulation; O(n log n) planar MST. <a href="https://en.wikipedia.org/wiki/Euclidean_minimum_spanning_tree">emst</a> — EMST ⊆ RNG ⊆ Gabriel ⊆ Delaunay, degree &lt; 6.</li>
+<li>Internal: <code>~/.claude/plans/commiv/per-move-rebuild.md</code>, <code>item6-onthefly-distances.md</code>, <code>HANDOFF.md</code> (item-1 cost counters).</li>
+</ol>
+
+<p class="foot">Generated for pen-and-paper work. All time figures are estimates from the item-1 operation counters (measured round 16) + complexity analysis, not fresh profiling. Every recommendation keeps the Lin–Kernighan core as the search engine; the levers sit in the tour ADT, the candidate/distance layout, the recursion's pruning, and the recombination operator.</p>
+
+</div>
+</body>
+</html>
