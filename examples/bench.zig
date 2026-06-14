@@ -35,8 +35,6 @@ const modes = [_]Mode{
     .{ .name = "alpha-patch-lk", .enable_lk = true, .enable_move_patching = true, .candidate_mode = .alpha_nearness },
 };
 
-const cgal_mode: Mode = .{ .name = "cgal-lk", .enable_lk = true, .candidate_mode = .alpha_nearness_cgal };
-
 const tsplib_matrix_modes = [_]Mode{
     .{ .name = "alpha-w12-t4", .enable_lk = true, .candidate_mode = .alpha_nearness, .candidate_count = 12, .trials = 4, .max_passes = 64, .lk_backtrack_limit = 80_000 },
     .{ .name = "alpha-w24-t4", .enable_lk = true, .candidate_mode = .alpha_nearness, .candidate_count = 24, .trials = 4, .max_passes = 64, .lk_backtrack_limit = 80_000 },
@@ -215,7 +213,6 @@ fn runProblem(allocator: std.mem.Allocator, p: *const commiv.Problem, optimum: ?
             }
         }
     }
-    if (!probe and commiv.solver.cgal_available) try runMode(allocator, p, optimum, cgal_mode, 12345, null);
 }
 
 fn runMode(allocator: std.mem.Allocator, p: *const commiv.Problem, optimum: ?u64, mode: Mode, seed: u64, fixed_trials: ?usize) !void {

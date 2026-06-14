@@ -1,5 +1,4 @@
 const std = @import("std");
-const build_options = @import("build_options");
 const problem = @import("problem.zig");
 const exact = @import("exact.zig");
 const tsplib = @import("tsplib.zig");
@@ -131,10 +130,7 @@ pub const EdgeFreezeVoteMode = enum { gated_trials, distinct_incumbents };
 pub const CandidateMode = enum {
     nearest_distance,
     alpha_nearness,
-    alpha_nearness_cgal,
 };
-
-pub const cgal_available = build_options.with_cgal;
 
 pub const SolveStats = struct {
     trials: usize = 0,
@@ -232,13 +228,6 @@ pub const SolveResult = struct {
 const SolverError = error{
     DistanceCacheTooLarge,
 };
-
-extern fn commiv_cgal_delaunay_edges(
-    xy: [*]const f64,
-    point_count: usize,
-    out_edges: [*]u32,
-    max_edges: usize,
-) usize;
 
 const TourEdge = struct {
     a: usize,
@@ -1646,7 +1635,6 @@ pub fn buildCandidates(
     return switch (mode) {
         .nearest_distance => buildNearestCandidates(allocator, dist_oracle, width, candidate_stats),
         .alpha_nearness => buildAlphaCandidates(allocator, dist_oracle, width, alpha_ascent_iterations, alpha_nearest_patch_count, candidate_stats),
-        .alpha_nearness_cgal => buildAlphaCgalCandidates(allocator, dist_oracle, width, alpha_ascent_iterations, alpha_nearest_patch_count, candidate_stats),
     };
 }
 
@@ -1861,27 +1849,6 @@ fn buildAlphaCandidates(
     return .{ .allocator = allocator, .width = width, .data = data, .alpha = alpha };
 }
 
-fn buildAlphaCgalCandidates(
-    allocator: std.mem.Allocator,
-    dist_oracle: *DistanceOracle,
-    width: usize,
-    ascent_iterations: usize,
-    nearest_patch_count: usize,
-    candidate_stats: *CandidateBuildStats,
-) !Candidates {
-    if (!build_options.with_cgal) return error.CgalUnavailable;
-
-    var candidates = try buildAlphaCandidates(allocator, dist_oracle, width, ascent_iterations, nearest_patch_count, candidate_stats);
-    errdefer candidates.deinit();
-
-    if (dist_oracle.p.coords.len == 0) return candidates;
-
-    const inserted = try applyCgalDelaunayPatch(allocator, dist_oracle, &candidates);
-    candidate_stats.geometric_edges += inserted;
-    candidate_stats.alpha_edges -|= inserted;
-    return candidates;
-}
-
 fn symmetrizeCandidateRows(
     dist_oracle: *DistanceOracle,
     data: []usize,
@@ -1917,66 +1884,6 @@ fn symmetrizeCandidateRows(
     }
 
     return inserted;
-}
-
-fn applyCgalDelaunayPatch(
-    allocator: std.mem.Allocator,
-    dist_oracle: *DistanceOracle,
-    candidates: *Candidates,
-) !u64 {
-    const n = dist_oracle.p.dimension;
-    const max_edges = @max(3 * n, 1);
-
-    const xy = try allocator.alloc(f64, 2 * n);
-    defer allocator.free(xy);
-    for (dist_oracle.p.coords, 0..) |coord, i| {
-        xy[2 * i] = coord.x;
-        xy[2 * i + 1] = coord.y;
-    }
-
-    const edge_pairs = try allocator.alloc(u32, 2 * max_edges);
-    defer allocator.free(edge_pairs);
-    const edge_count = commiv_cgal_delaunay_edges(xy.ptr, n, edge_pairs.ptr, max_edges);
-    if (edge_count == std.math.maxInt(usize)) return error.CgalDelaunayFailed;
-    if (edge_count > max_edges) return error.CgalDelaunayEdgeBufferTooSmall;
-
-    const row_dist = try allocator.alloc(u64, candidates.width);
-    defer allocator.free(row_dist);
-
-    var inserted: u64 = 0;
-    for (0..edge_count) |edge_idx| {
-        const a: usize = edge_pairs[2 * edge_idx];
-        const b: usize = edge_pairs[2 * edge_idx + 1];
-        if (a >= n or b >= n or a == b) return error.InvalidCgalDelaunayEdge;
-        if (insertGeometricCandidate(dist_oracle, candidates, row_dist, a, b)) inserted += 1;
-        if (insertGeometricCandidate(dist_oracle, candidates, row_dist, b, a)) inserted += 1;
-    }
-    return inserted;
-}
-
-fn insertGeometricCandidate(
-    dist_oracle: *DistanceOracle,
-    candidates: *Candidates,
-    row_dist: []u64,
-    node: usize,
-    candidate: usize,
-) bool {
-    const row = candidates.data[node * candidates.width .. node * candidates.width + candidates.width];
-    const alpha_row = candidates.alpha[node * candidates.width .. node * candidates.width + candidates.width];
-    if (rowContains(row, candidate)) return false;
-    for (row, 0..) |entry, i| row_dist[i] = dist_oracle.distance(node, entry);
-
-    const weakest = candidates.width - 1;
-    if (alpha_row[weakest] == 0) return false;
-    const dist = @as(u64, dist_oracle.distance(node, candidate));
-    if (dist >= row_dist[weakest]) return false;
-
-    row[weakest] = candidate;
-    alpha_row[weakest] = alpha_row[weakest] +| 1;
-    row_dist[weakest] = dist;
-    sortCandidateRow(row, alpha_row, row_dist);
-    validateCandidateRow(node, row);
-    return true;
 }
 
 fn runAlphaAscent(
@@ -5954,58 +5861,6 @@ test "alpha-nearness mode is not worse than nearest mode on deterministic regres
     // alpha generation (which shows up as several percent), not basin luck.
     try std.testing.expect(alpha.length * 100 <= nearest.length * 102);
     try std.testing.expect(alpha.stats.bounded_three_opt_cleanup_attempts > 0);
-}
-
-test "CGAL candidate mode records geometric edges when enabled" {
-    if (!cgal_available) return;
-
-    const allocator = std.testing.allocator;
-    const n = 32;
-    const coords = try allocator.alloc(problem.Coord, n);
-    defer allocator.free(coords);
-    makeClusteredRegressionCoords(coords);
-    var p = try problem.Problem.initCoords(allocator, "cgal-candidates", .euc_2d, coords);
-    defer p.deinit();
-
-    var result = try solve(allocator, &p, .{
-        .seed = 12345,
-        .trials = 2,
-        .candidate_count = 6,
-        .candidate_mode = .alpha_nearness_cgal,
-        .max_passes = 8,
-        .lk_max_depth = 4,
-        .lk_backtrack_limit = 10_000,
-        .max_distance_cache_weights = n * n,
-    });
-    defer result.deinit();
-
-    try p.validateTour(result.tour);
-    try std.testing.expect(result.stats.candidate_alpha_edges > 0);
-    try std.testing.expect(result.stats.candidate_geometric_edges > 0);
-}
-
-test "CGAL geometric augmentation stays behind strong alpha candidates" {
-    if (!cgal_available) return;
-
-    const allocator = std.testing.allocator;
-    const n = 32;
-    const coords = try allocator.alloc(problem.Coord, n);
-    defer allocator.free(coords);
-    makeClusteredRegressionCoords(coords);
-    var p = try problem.Problem.initCoords(allocator, "cgal-tail-rescue", .euc_2d, coords);
-    defer p.deinit();
-
-    var oracle = try DistanceOracle.init(allocator, &p, n * n);
-    defer oracle.deinit();
-    var stats: CandidateBuildStats = .{};
-    var candidates = try buildCandidates(allocator, &oracle, 6, .alpha_nearness_cgal, 32, 2, &stats);
-    defer candidates.deinit();
-
-    try std.testing.expect(stats.geometric_edges > 0);
-    for (0..n) |node| {
-        const alpha_row = candidates.alphaRow(node);
-        try std.testing.expectEqual(@as(u64, 0), alpha_row[0]);
-    }
 }
 
 fn makeClusteredRegressionCoords(coords: []problem.Coord) void {
