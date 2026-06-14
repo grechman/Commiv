@@ -40,92 +40,7 @@ pub const SolveOptions = struct {
     alpha_ascent_iterations: usize = 32,
     alpha_nearest_patch_count: usize = 2,
     max_distance_cache_weights: usize = 4_000_000,
-    // ============================================================================
-    // ITEM 3 (edge voting-freeze) IS CLOSED — DELETE CANDIDATE (round 18, 2026-06-13).
-    // Proven a structural dead end: freezing ANY edge (even a 100%-pure subset of
-    // the known-optimal edges) loses accuracy because LK reaches better tours by
-    // temporarily breaking-and-rebuilding edges the final tour keeps. Purity is
-    // NOT the blocker; soft freeze, staleness-gating, and diverse vote sources all
-    // fail too. Only gain is a 0.037% rat575 niche behind a single-fixture overfit.
-    // This whole subsystem (the fields below + vote_node/vote_count workspace, the
-    // vote primitives, segmentExchangeKickAvoidingFrozen, the moveRemovesFrozenEdge
-    // /soft_freeze guards, and the round-18 measurement scaffolding) should be
-    // removed in the next cleanup pass. Kept default-off until then. Full
-    // post-mortem: item3.md. Do NOT pursue items 5/9 to "fix" this.
-    // ============================================================================
-    // Roadmap item 3: edge voting-freeze (Misra-Gries, k=2 counter slots per
-    // node). Off by default so every existing trajectory stays bit-identical.
-    // When on, each merge-gated (near-incumbent) trial votes its two tour
-    // neighbours per node; an edge whose BOTH endpoints' counters clear the
-    // confidence threshold is frozen. The GENERATOR (kick + LK descent)
-    // preserves frozen edges; the COMBINER (EAX/IPT) never does, so joint
-    // section moves still cut through frozen regions (the measured pr1002
-    // mechanism). Counters auto-thaw on disagreement (Misra-Gries decrement),
-    // which doubles as a confidence dial. The threshold is relative because the
-    // kick-correlated vote stream inflates counters: an edge freezes only once
-    // it has survived `edge_freeze_fraction_x100`% of all votes cast, and never
-    // before `edge_freeze_min_votes` votes (avoids locking onto an early,
-    // still-suboptimal incumbent).
-    // DEFAULT OFF. Measured outcome (round 17, seeds {12345,7,99}): the
-    // literal-spec variant (edge_freeze_lk_respect = true) over-constrains the
-    // descent and is strictly worse everywhere. The kick-only variant
-    // (lk_respect = false, defaults below) is the only useful one: it unlocks
-    // rat575 across all three seeds (6779/6779/6788 -> 6776/6777/6777, the
-    // long-stuck plateau target) by steering perturbation off the consensus
-    // backbone while LK keeps full power. But the same freezing aggressiveness
-    // regresses d657 (+100) and pr1002 (+363) with no threshold separating the
-    // effects, so it fails the suite gate and stays opt-in. The defaults below
-    // are the validated rat575-class config for when it is enabled.
-    enable_edge_freeze: bool = false,
-    edge_freeze_min_votes: u32 = 384,
-    edge_freeze_fraction_x100: u32 = 95,
-    // Vote source: .gated_trials votes every near-incumbent trial tour (high
-    // count, but kick-correlated so it over-freezes); .distinct_incumbents
-    // votes only each newly-adopted incumbent + restart optima (a sparse but
-    // genuinely cross-basin stream, so the frozen set converges on the true
-    // backbone instead of the current attractor).
-    edge_freeze_vote_mode: EdgeFreezeVoteMode = .gated_trials,
-    // When false the generator's LK keeps full power (only the kick avoids
-    // frozen edges); isolates "intensify perturbation on contested regions"
-    // from "forbid LK from restructuring across the backbone". Measured: false
-    // (kick-only) is the only variant that ever beats baseline; true is the
-    // literal spec and is strictly worse, so the default is false.
-    edge_freeze_lk_respect: bool = false,
-    // Item-3 revival (round 18, MEASURED — does NOT yield a win): staleness
-    // gate. Freeze is only ACTED ON once the incumbent has been stale this many
-    // trials; voting always accumulates. 0 = act whenever the vote threshold is
-    // ready (original behaviour). Intent: protect still-productive instances
-    // (d657/pr1002) while still escaping saturated ones (rat575). Outcome: it
-    // NEUTRALIZES the feature — d657 is protected at window>=256, but the same
-    // gate reverts rat575 to 6779 (gain gone). The rat575 escape needs
-    // CONTINUOUS freeze from early (it reshapes the whole trajectory), not
-    // intensify-on-stall, so no single window wins both. See item3.md.
-    edge_freeze_stale_window: usize = 0,
-    // Item-3 revival (round 18, MEASURED — does NOT escape the accuracy loss):
-    // soft freeze (the LKH-style mechanism). Instead of forbidding a move that
-    // breaks a frozen edge (edge_freeze_lk_respect, which loses accuracy
-    // structurally even with a perfectly pure backbone — LK must break-and-
-    // rebuild even optimal edges en route to a better tour), only skip
-    // INITIATING a sequential search from an interior-backbone node (both tour
-    // edges frozen). Frozen edges stay breakable by deeper search. Outcome:
-    // marginal speed (lk_search_nodes is not the dominant cost — tour_rebuilds
-    // is) and STILL loses accuracy (pr1002 259410 at recall 0.5). See item3.md.
-    edge_freeze_soft: bool = false,
-    // Diagnostic (item-3 revival): if set, the final frozen undirected edge set
-    // is appended here as flattened (u, v) pairs after the trial loop. Off-path
-    // and default-null so it never affects a normal solve.
-    frozen_edges_out: ?*std.ArrayList(u32) = null,
-    // Diagnostic (item-3 revival): a statically injected frozen backbone (packed
-    // lo<<32|hi, sorted ascending), frozen from trial 0, bypassing the voted
-    // set. Requires enable_edge_freeze. The upper-bound prober: feeding it a
-    // subset of the KNOWN-OPTIMAL edges proved that even a 100%-pure backbone
-    // loses ~0.4% on pr1002 under LK-respect — freezing fails for a structural
-    // reason (LK must break-and-rebuild even optimal edges), not because the
-    // vote stream is impure. Empty = inert. See item3.md.
-    inject_frozen: []const u64 = &.{},
 };
-
-pub const EdgeFreezeVoteMode = enum { gated_trials, distinct_incumbents };
 
 pub const CandidateMode = enum {
     nearest_distance,
@@ -203,14 +118,6 @@ pub const SolveStats = struct {
     tour_rebuilds: u64 = 0,
     flip_ops: u64 = 0,
     flip_elements: u64 = 0,
-    // Roadmap item 3 diagnostics: votes cast, Misra-Gries decrement (thaw)
-    // events, generator moves rejected for touching a frozen edge, and the
-    // number of edges frozen at the final threshold. These answer "is the thaw
-    // actually firing / is freezing over-constraining the search".
-    freeze_votes: u64 = 0,
-    freeze_decrements: u64 = 0,
-    freeze_move_rejections: u64 = 0,
-    frozen_edges_final: usize = 0,
 };
 
 pub const SolveResult = struct {
@@ -877,12 +784,6 @@ const SolverWorkspace = struct {
     lk_active_queue: []usize,
     guide_next: [2][]usize,
     guide_prev: [2][]usize,
-    // Roadmap item 3: per-node Misra-Gries edge vote counters, k=2 slots each.
-    // vote_node[2*u + s] is the neighbour node id occupying slot s of node u
-    // (maxInt = empty); vote_count is its tally. Sized 2n; zero-cost unless
-    // edge freezing is enabled.
-    vote_node: []usize,
-    vote_count: []u32,
 
     fn init(allocator: std.mem.Allocator, n: usize, max_lk_depth: usize) !SolverWorkspace {
         const best_tour = try allocator.alloc(usize, n);
@@ -953,12 +854,6 @@ const SolverWorkspace = struct {
         errdefer allocator.free(guide_next_1);
         const guide_prev_1 = try allocator.alloc(usize, n);
         errdefer allocator.free(guide_prev_1);
-        const vote_node = try allocator.alloc(usize, 2 * n);
-        errdefer allocator.free(vote_node);
-        @memset(vote_node, std.math.maxInt(usize));
-        const vote_count = try allocator.alloc(u32, 2 * n);
-        errdefer allocator.free(vote_count);
-        @memset(vote_count, 0);
 
         return .{
             .allocator = allocator,
@@ -991,8 +886,6 @@ const SolverWorkspace = struct {
             .lk_active_queue = lk_active_queue,
             .guide_next = .{ guide_next_0, guide_next_1 },
             .guide_prev = .{ guide_prev_0, guide_prev_1 },
-            .vote_node = vote_node,
-            .vote_count = vote_count,
         };
     }
 
@@ -1026,8 +919,6 @@ const SolverWorkspace = struct {
         self.allocator.free(self.lk_active_queue);
         for (self.guide_next) |slice| self.allocator.free(slice);
         for (self.guide_prev) |slice| self.allocator.free(slice);
-        self.allocator.free(self.vote_node);
-        self.allocator.free(self.vote_count);
         self.* = undefined;
     }
 };
@@ -1159,10 +1050,6 @@ pub fn solve(
     // prior max); the n-trial window is the insurance premium for expected
     // accuracy until the generator/combiner finds optima earlier.
     var last_improvement_trial: usize = 0;
-    // Roadmap item 3: how many gated trials have voted so far. The freeze
-    // threshold is relative to this, so freezing ramps up as evidence
-    // accumulates rather than locking onto an early incumbent.
-    var votes_cast: u32 = 0;
     var trial: usize = 0;
     while (trial < max_trials and trial - last_improvement_trial < trials) : (trial += 1) {
         // After the first descent, trials are iterated local search: perturb the
@@ -1180,31 +1067,11 @@ pub fn solve(
         const kick_trial = options.enable_lk and trial > 0 and n >= 8 and
             best_len != std.math.maxInt(u64) and stale_kicks < restart_limit;
         var guided_trial = false;
-        // Roadmap item 3: this trial's freeze threshold (maxInt = nothing frozen
-        // yet). Relative to votes cast, gated below a minimum so early trials
-        // never freeze.
-        // Item-3 revival: an injected static backbone freezes from trial 0,
-        // independent of the voted threshold (which it sets to maxInt so only
-        // the injected set fires).
-        const inject_active = options.enable_edge_freeze and options.inject_frozen.len > 0;
-        // Staleness gate: only act on the frozen set once the incumbent has been
-        // stuck long enough (voting keeps accumulating regardless, below).
-        const stale_ok = options.edge_freeze_stale_window == 0 or
-            (trial - last_improvement_trial >= options.edge_freeze_stale_window);
-        const freeze_threshold: u32 = if (options.enable_edge_freeze and !inject_active and stale_ok and votes_cast >= options.edge_freeze_min_votes)
-            @max(1, votes_cast * options.edge_freeze_fraction_x100 / 100)
-        else
-            std.math.maxInt(u32);
-        const freeze_active = (inject_active and stale_ok) or freeze_threshold != std.math.maxInt(u32);
         if (kick_trial) {
             @memcpy(workspace.tour, workspace.best_tour);
             kick_count = @min(1 + stale_kicks / 4, kick_touched.len);
             for (0..kick_count) |ki| {
-                if (freeze_active) {
-                    segmentExchangeKickAvoidingFrozen(workspace.tour, &random, &kick_touched[ki], workspace.vote_node, workspace.vote_count, freeze_threshold, options.inject_frozen);
-                } else {
-                    segmentExchangeKick(workspace.tour, &random, &kick_touched[ki]);
-                }
+                segmentExchangeKick(workspace.tour, &random, &kick_touched[ki]);
             }
             // Extension-phase kicks add plateau drift: the base budget has
             // stalled, so the remaining gap is most likely hiding behind
@@ -1294,14 +1161,6 @@ pub fn solve(
             .lk_backtrack_limit = options.lk_backtrack_limit,
             .lk_backtrack_depth = if (trial >= trials) @min(base_backtrack_depth, 2) else base_backtrack_depth,
             .lk_nonseq_branch_limit = options.lk_nonseq_branch_limit,
-            // Roadmap item 3: the generator honours frozen edges. The combiner's
-            // polish search (merge_search) clears respect_frozen below.
-            .vote_node = workspace.vote_node,
-            .vote_count = workspace.vote_count,
-            .freeze_threshold = freeze_threshold,
-            .inject_frozen = options.inject_frozen,
-            .respect_frozen = options.enable_edge_freeze and options.edge_freeze_lk_respect,
-            .soft_freeze = options.enable_edge_freeze and options.edge_freeze_soft and freeze_active,
         };
         search.rebuildState();
         if (kick_trial) {
@@ -1395,10 +1254,6 @@ pub fn solve(
                         // tour cannot perturb the main trajectory.
                         var merge_search = search;
                         merge_search.tour = ipt.tour_a;
-                        // Roadmap item 3: the combiner cuts through frozen edges
-                        // (joint section moves are the measured merge mechanism).
-                        merge_search.respect_frozen = false;
-                        merge_search.soft_freeze = false;
                         merge_search.rebuildState();
                         merge_search.lkResetActive();
                         for (ipt.boundary[0..outcome.boundary_count]) |node| merge_search.lkActivate(node);
@@ -1478,10 +1333,6 @@ pub fn solve(
                         // tour cannot perturb the main trajectory.
                         var merge_search = search;
                         merge_search.tour = eax.tour_a;
-                        // Roadmap item 3: the combiner cuts through frozen edges
-                        // (joint section moves are the measured merge mechanism).
-                        merge_search.respect_frozen = false;
-                        merge_search.soft_freeze = false;
                         merge_search.rebuildState();
                         merge_search.lkResetActive();
                         for (eax.boundary[0..outcome.boundary_count]) |node| merge_search.lkActivate(node);
@@ -1529,17 +1380,6 @@ pub fn solve(
             elitePoolOffer(&elite, &eax, workspace.tour, trial_len);
         }
 
-        // Roadmap item 3: a near-incumbent (merge-gated) trial votes its edges
-        // into the Misra-Gries counters. Same ~3% gate the mergers use, so only
-        // genuinely good tours shape the frozen set. Voting happens before the
-        // incumbent update so the gate compares against this trial's reference.
-        if (options.enable_edge_freeze and options.edge_freeze_vote_mode == .gated_trials and
-            best_len != std.math.maxInt(u64) and search.current_length <= best_len + best_len / 32)
-        {
-            voteTourEdges(workspace.vote_node, workspace.vote_count, workspace.tour, &stats.freeze_decrements);
-            votes_cast +|= 1;
-        }
-
         // Roadmap item 2: read the delta-maintained length instead of rescanning.
         // Debug builds verify it against a fresh scan so any missed/incorrect
         // move delta surfaces as a test failure rather than a silent drift.
@@ -1558,13 +1398,6 @@ pub fn solve(
             last_improvement_trial = trial;
             @memcpy(workspace.best_tour, workspace.tour);
             stale_kicks = 0;
-            // Roadmap item 3 (distinct-incumbent vote mode): vote only genuinely
-            // adopted incumbents — a sparse, low-correlation stream whose
-            // consensus is the true backbone rather than the current attractor.
-            if (options.enable_edge_freeze and options.edge_freeze_vote_mode == .distinct_incumbents) {
-                voteTourEdges(workspace.vote_node, workspace.vote_count, workspace.tour, &stats.freeze_decrements);
-                votes_cast +|= 1;
-            }
             if (n >= eax_min_dimension and options.enable_lk) elitePoolOffer(&elite, &eax, workspace.tour, len);
             const gap = trial - last_progress_trial;
             stats.eax_worst_gap_ratio_x100 = @max(stats.eax_worst_gap_ratio_x100, gap * 100 / @max(max_progress_gap, 32));
@@ -1577,28 +1410,6 @@ pub fn solve(
     stats.trials = trial;
     stats.eax_max_progress_gap = max_progress_gap;
     stats.eax_final_progress_gap = trial - last_progress_trial;
-    // Roadmap item 3 diagnostics: snapshot how many edges ended up frozen at
-    // the final threshold (each undirected edge counted once, from the lower
-    // endpoint), plus the total votes cast.
-    stats.freeze_votes = votes_cast;
-    if (options.enable_edge_freeze and votes_cast >= options.edge_freeze_min_votes) {
-        const final_threshold = @max(@as(u32, 1), votes_cast * options.edge_freeze_fraction_x100 / 100);
-        var frozen: usize = 0;
-        for (0..n) |u| {
-            for ([2]usize{ workspace.vote_node[2 * u], workspace.vote_node[2 * u + 1] }) |v| {
-                if (v != std.math.maxInt(usize) and u < v and
-                    edgeIsFrozen(workspace.vote_node, workspace.vote_count, final_threshold, u, v))
-                {
-                    frozen += 1;
-                    if (options.frozen_edges_out) |out| {
-                        try out.append(allocator, @intCast(u));
-                        try out.append(allocator, @intCast(v));
-                    }
-                }
-            }
-        }
-        stats.frozen_edges_final = frozen;
-    }
 
     if (merged_len < best_len) {
         best_len = merged_len;
@@ -2342,90 +2153,6 @@ fn insertCandidate(
 // A C B D (segment exchange, no reversals). Exactly three tour edges change;
 // their six endpoints are reported so the LK queue can be seeded with only the
 // perturbed neighborhood (cf. LKH's kick + InBestTour activation gating).
-// Roadmap item 3 vote primitives (file scope so both the kick and the
-// LocalSearch generator share one implementation).
-
-// Misra-Gries update: fold neighbour v into one of node u's two slots. Returns
-// true if it took the decrement (auto-thaw) branch.
-fn voteEdgeSlot(vote_node: []usize, vote_count: []u32, u: usize, v: usize) bool {
-    const base = 2 * u;
-    if (vote_node[base] == v) {
-        vote_count[base] +|= 1;
-        return false;
-    }
-    if (vote_node[base + 1] == v) {
-        vote_count[base + 1] +|= 1;
-        return false;
-    }
-    if (vote_count[base] == 0) {
-        vote_node[base] = v;
-        vote_count[base] = 1;
-        return false;
-    }
-    if (vote_count[base + 1] == 0) {
-        vote_node[base + 1] = v;
-        vote_count[base + 1] = 1;
-        return false;
-    }
-    // Both slots taken by other neighbours: decrement (the auto-thaw step).
-    vote_count[base] -= 1;
-    vote_count[base + 1] -= 1;
-    return true;
-}
-
-// Vote every edge of `tour` from both endpoints (each node votes its two tour
-// neighbours into its own slots). Accumulates the number of auto-thaw
-// decrements into `decrements` for diagnostics.
-fn voteTourEdges(vote_node: []usize, vote_count: []u32, tour: []const usize, decrements: *u64) void {
-    const n = tour.len;
-    for (0..n) |idx| {
-        const u = tour[idx];
-        if (voteEdgeSlot(vote_node, vote_count, u, tour[(idx + 1) % n])) decrements.* += 1;
-        if (voteEdgeSlot(vote_node, vote_count, u, tour[(idx + n - 1) % n])) decrements.* += 1;
-    }
-}
-
-// Item-3 revival: a statically injected frozen edge set (packed lo<<32|hi,
-// sorted ascending). Lets an externally-computed backbone (e.g. a diverse
-// elite/restart consensus) be frozen from trial 0, bypassing the voted set, so
-// the upper bound of freezing a PURE backbone can be measured directly.
-fn packEdge(u: usize, v: usize) u64 {
-    const lo = @min(u, v);
-    const hi = @max(u, v);
-    return (@as(u64, @intCast(lo)) << 32) | @as(u64, @intCast(hi));
-}
-
-fn injectedFrozen(inject: []const u64, u: usize, v: usize) bool {
-    if (inject.len == 0) return false;
-    const key = packEdge(u, v);
-    var lo: usize = 0;
-    var hi: usize = inject.len;
-    while (lo < hi) {
-        const mid = lo + (hi - lo) / 2;
-        if (inject[mid] < key) lo = mid + 1 else hi = mid;
-    }
-    return lo < inject.len and inject[lo] == key;
-}
-
-// Frozen check that ORs the static injected set over the voted Misra-Gries set.
-fn edgeIsFrozenWith(vote_node: []const usize, vote_count: []const u32, threshold: u32, inject: []const u64, u: usize, v: usize) bool {
-    if (injectedFrozen(inject, u, v)) return true;
-    return edgeIsFrozen(vote_node, vote_count, threshold, u, v);
-}
-
-fn voteSlotCount(vote_node: []const usize, vote_count: []const u32, u: usize, v: usize) u32 {
-    const base = 2 * u;
-    if (vote_node[base] == v) return vote_count[base];
-    if (vote_node[base + 1] == v) return vote_count[base + 1];
-    return 0;
-}
-
-fn edgeIsFrozen(vote_node: []const usize, vote_count: []const u32, threshold: u32, u: usize, v: usize) bool {
-    if (threshold == std.math.maxInt(u32)) return false;
-    return voteSlotCount(vote_node, vote_count, u, v) >= threshold and
-        voteSlotCount(vote_node, vote_count, v, u) >= threshold;
-}
-
 fn segmentExchangeKick(tour: []usize, random: *std.Random, touched: *[6]usize) void {
     const n = tour.len;
     std.debug.assert(n >= 8);
@@ -2434,37 +2161,6 @@ fn segmentExchangeKick(tour: []usize, random: *std.Random, touched: *[6]usize) v
     const k = random.intRangeLessThan(usize, j + 1, n);
     touched.* = .{ tour[i - 1], tour[i], tour[j - 1], tour[j], tour[k - 1], tour[k] };
     std.mem.rotate(usize, tour[i..k], j - i);
-}
-
-// Roadmap item 3: like segmentExchangeKick, but redraw the three cut points
-// (bounded) until none of the broken edges is frozen, so the generator's
-// perturbation preserves consensus structure. Falls back to an unconstrained
-// kick if every attempt hits a frozen edge. Only invoked when freezing is
-// active, so the off-path RNG stream above stays bit-identical.
-fn segmentExchangeKickAvoidingFrozen(
-    tour: []usize,
-    random: *std.Random,
-    touched: *[6]usize,
-    vote_node: []const usize,
-    vote_count: []const u32,
-    threshold: u32,
-    inject: []const u64,
-) void {
-    const n = tour.len;
-    std.debug.assert(n >= 8);
-    var attempt: usize = 0;
-    while (attempt < 16) : (attempt += 1) {
-        const i = random.intRangeLessThan(usize, 1, n - 2);
-        const j = random.intRangeLessThan(usize, i + 1, n - 1);
-        const k = random.intRangeLessThan(usize, j + 1, n);
-        if (edgeIsFrozenWith(vote_node, vote_count, threshold, inject, tour[i - 1], tour[i]) or
-            edgeIsFrozenWith(vote_node, vote_count, threshold, inject, tour[j - 1], tour[j]) or
-            edgeIsFrozenWith(vote_node, vote_count, threshold, inject, tour[k - 1], tour[k])) continue;
-        touched.* = .{ tour[i - 1], tour[i], tour[j - 1], tour[j], tour[k - 1], tour[k] };
-        std.mem.rotate(usize, tour[i..k], j - i);
-        return;
-    }
-    segmentExchangeKick(tour, random, touched);
 }
 
 // Plateau kick: apply up to `moves` zero-delta reconnections anchored at
@@ -3620,22 +3316,6 @@ const LocalSearch = struct {
     // move applier folds in its exact edge delta. Debug builds assert it against
     // a fresh scan at the end of each trial, so any drift fails the test suite.
     current_length: u64 = 0,
-    // Roadmap item 3: edge voting-freeze. vote_node/vote_count are the shared
-    // per-node Misra-Gries slots (see SolverWorkspace). respect_frozen is set
-    // on the GENERATOR search and cleared on the COMBINER's polish search, so
-    // the combiner can still cut through frozen regions. freeze_threshold is
-    // the per-trial absolute vote count an edge endpoint must reach to count as
-    // frozen (maxInt = nothing frozen this trial). Defaults leave the feature
-    // inert, so direct LocalSearch constructions (tests) are unaffected.
-    vote_node: []const usize = &.{},
-    vote_count: []const u32 = &.{},
-    freeze_threshold: u32 = std.math.maxInt(u32),
-    // Item-3 revival: statically injected frozen backbone (see SolveOptions).
-    inject_frozen: []const u64 = &.{},
-    respect_frozen: bool = false,
-    // Item-3 revival: soft freeze — prune LK search initiation in interior
-    // backbone, never forbid a move (see findLKMove).
-    soft_freeze: bool = false,
 
     // Active-node queue ("don't-look bits", Helsgaun Sec. 3/LKH StoreTour):
     // only nodes whose neighborhood changed since their last failed search are
@@ -3989,18 +3669,6 @@ const LocalSearch = struct {
     fn findLKMove(self: *LocalSearch, stats: *SolveStats) u64 {
         var moves: u64 = 0;
         while (self.lkPopActive()) |t1| {
-            // Item-3 revival (soft freeze, the LKH mechanism): don't INITIATE a
-            // sequential search from an interior-backbone node (both its tour
-            // edges frozen). The frozen edges can still be broken when a search
-            // started elsewhere reaches them deeper, so escape paths are kept —
-            // unlike the hard LK-respect reject. Pure search-initiation pruning.
-            if (self.soft_freeze and
-                self.softFrozenEdge(t1, self.tourNext(t1)) and
-                self.softFrozenEdge(t1, self.tourPrev(t1)))
-            {
-                stats.freeze_move_rejections += 1;
-                continue;
-            }
             var choices = [2]usize{ self.tourNext(t1), self.tourPrev(t1) };
             self.orderTourEdgeChoices(t1, &choices);
 
@@ -4365,7 +4033,6 @@ const LocalSearch = struct {
     }
 
     fn testAndApplyMove(self: *LocalSearch, removed_count: usize, added_count: usize, stats: *SolveStats) bool {
-        if (self.moveRemovesFrozenEdge(removed_count)) return false;
         if (removed_count == 2 and added_count == 2 and self.applyDepth2ClosingMove()) {
             self.applyLengthDeltaArrays(removed_count, added_count);
             self.lkActivateMoveEndpoints(removed_count, added_count);
@@ -4384,7 +4051,6 @@ const LocalSearch = struct {
     }
 
     fn testAndApplyCompletionMove(self: *LocalSearch, removed_count: usize, added_count: usize, stats: *SolveStats) bool {
-        if (self.moveRemovesFrozenEdge(removed_count)) return false;
         const patch_hits_before = stats.move_plan_patch_hits;
         if (!self.planAndApplyMoveInternal(removed_count, added_count, stats, true, true, false)) return false;
         stats.lk_applied_depth_total += removed_count;
@@ -4396,7 +4062,6 @@ const LocalSearch = struct {
     }
 
     fn testAndApplyGain23BridgeMove(self: *LocalSearch, edge_count: usize, stats: *SolveStats) bool {
-        if (self.moveRemovesFrozenEdge(edge_count)) return false;
         const patch_hits_before = stats.move_plan_patch_hits;
         if (!self.planAndApplyMoveInternal(edge_count, edge_count, stats, true, true, true)) return false;
         if (stats.move_plan_patch_hits > patch_hits_before) stats.lk_completion_patch_hits += 1;
@@ -5111,34 +4776,6 @@ const LocalSearch = struct {
     // before the first LK descent; everything after maintains it by delta.
     fn syncLength(self: *LocalSearch) !void {
         self.current_length = try self.dist.tourLengthUnchecked(self.tour);
-    }
-
-    // An edge is frozen when BOTH endpoints' counters clear this trial's
-    // threshold — mutual high confidence, not one-sided. Only the generator
-    // honours it (respect_frozen); the combiner's polish search leaves it off.
-    fn edgeFrozen(self: *const LocalSearch, u: usize, v: usize) bool {
-        if (!self.respect_frozen) return false;
-        return edgeIsFrozenWith(self.vote_node, self.vote_count, self.freeze_threshold, self.inject_frozen, u, v);
-    }
-
-    // Soft-freeze frozenness check (no respect_frozen gate — soft freeze prunes
-    // search initiation, it does not forbid moves).
-    fn softFrozenEdge(self: *const LocalSearch, u: usize, v: usize) bool {
-        return edgeIsFrozenWith(self.vote_node, self.vote_count, self.freeze_threshold, self.inject_frozen, u, v);
-    }
-
-    // Generator guard: reject any move that would delete a frozen edge. Reuses
-    // the existing "move failed" path in the LK search, so a rejected move just
-    // makes the search try a different continuation.
-    fn moveRemovesFrozenEdge(self: *const LocalSearch, removed_count: usize) bool {
-        if (!self.respect_frozen or (self.freeze_threshold == std.math.maxInt(u32) and self.inject_frozen.len == 0)) return false;
-        for (0..removed_count) |i| {
-            if (self.edgeFrozen(self.removed_a[i], self.removed_b[i])) {
-                self.stats.freeze_move_rejections += 1;
-                return true;
-            }
-        }
-        return false;
     }
 
     // Fold an applied move's exact length delta into current_length. The move
