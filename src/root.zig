@@ -4,6 +4,7 @@ pub const problem = @import("problem.zig");
 pub const tsplib = @import("tsplib.zig");
 pub const exact = @import("exact.zig");
 pub const solver = @import("solver.zig");
+pub const parallel = @import("parallel.zig");
 
 pub const Coord = problem.Coord;
 pub const DistanceKind = problem.DistanceKind;
@@ -22,6 +23,10 @@ pub const SolveOptions = solver.SolveOptions;
 pub const SolveResult = solver.SolveResult;
 pub const SolveStats = solver.SolveStats;
 pub const CandidateMode = solver.CandidateMode;
+
+pub const solveParallel = parallel.solveParallel;
+pub const ParallelMode = parallel.ParallelMode;
+pub const ParallelOptions = parallel.ParallelOptions;
 
 test {
     std.testing.refAllDecls(@This());
