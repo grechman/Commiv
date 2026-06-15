@@ -17,7 +17,7 @@ pub const DistanceOracle = struct {
     pub fn init(
         allocator: std.mem.Allocator,
         p: *const problem.Problem,
-        max_cached_weights: usize,
+        max_cached_bytes: usize,
     ) !DistanceOracle {
         if (p.distance_kind == .explicit_full_matrix) {
             return .{
@@ -28,6 +28,10 @@ pub const DistanceOracle = struct {
             };
         }
 
+        // Budget is a byte/L3 figure; the matrix stores u32 weights. Convert to
+        // a weight count by integer division (a weight fits only if the whole
+        // u32 fits), which avoids overflowing total*elem_size for large n.
+        const max_cached_weights = max_cached_bytes / @sizeOf(u32);
         const total = std.math.mul(usize, p.dimension, p.dimension) catch return SolverError.DistanceCacheTooLarge;
         if (max_cached_weights == 0 or total > max_cached_weights) {
             return .{

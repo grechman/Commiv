@@ -236,7 +236,7 @@ fn runMode(allocator: std.mem.Allocator, p: *const commiv.Problem, optimum: ?u64
         .enable_lk = mode.enable_lk,
         .lk_max_depth = mode.lk_max_depth,
         .lk_backtrack_limit = lk_backtrack_limit,
-        .max_distance_cache_weights = n * n,
+        .max_distance_cache_bytes = n * n * @sizeOf(u32),
     });
     defer result.deinit();
     const elapsed_ns = monotonicNanos() - start_ns;

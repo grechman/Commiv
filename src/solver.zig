@@ -75,7 +75,10 @@ pub const SolveOptions = struct {
     lk_nonseq_branch_limit: usize = 2,
     alpha_ascent_iterations: usize = 32,
     alpha_nearest_patch_count: usize = 2,
-    max_distance_cache_weights: usize = 4_000_000,
+    // Distance-cache budget in BYTES (an L3-sized figure), not a raw weight
+    // count. The matrix holds u32 weights, so this default of 16 MB == 4M
+    // weights — the historical threshold, exactly. The oracle converts.
+    max_distance_cache_bytes: usize = 16_000_000,
 };
 
 
@@ -355,7 +358,7 @@ pub fn solve(
     }
 
     const trials = @max(options.trials, 1);
-    var oracle = try DistanceOracle.init(allocator, p, options.max_distance_cache_weights);
+    var oracle = try DistanceOracle.init(allocator, p, options.max_distance_cache_bytes);
     defer oracle.deinit();
 
     const width = candidateWidth(n, options.candidate_count);
@@ -1362,7 +1365,7 @@ test "cached coordinate heuristic path records no uncached coordinate distances"
         .trials = 4,
         .candidate_count = 4,
         .max_passes = 20,
-        .max_distance_cache_weights = coords.len * coords.len,
+        .max_distance_cache_bytes = coords.len * coords.len * @sizeOf(u32),
     });
     defer result.deinit();
     try std.testing.expectEqual(@as(usize, coords.len), result.stats.distance_cache_nodes);
@@ -1462,7 +1465,7 @@ test "alpha-nearness mode is not worse than nearest mode on deterministic regres
         .max_passes = 80,
         .lk_max_depth = 5,
         .lk_backtrack_limit = 80_000,
-        .max_distance_cache_weights = n * n,
+        .max_distance_cache_bytes = n * n * @sizeOf(u32),
     });
     defer nearest.deinit();
     var alpha = try solve(allocator, &p, .{
@@ -1473,7 +1476,7 @@ test "alpha-nearness mode is not worse than nearest mode on deterministic regres
         .max_passes = 80,
         .lk_max_depth = 5,
         .lk_backtrack_limit = 80_000,
-        .max_distance_cache_weights = n * n,
+        .max_distance_cache_bytes = n * n * @sizeOf(u32),
     });
     defer alpha.deinit();
 

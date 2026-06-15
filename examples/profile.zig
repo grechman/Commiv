@@ -28,10 +28,10 @@ pub fn main(init: std.process.Init) !void {
     const ext_arg = init.environ_map.get("PROF_EXT") orelse "0";
     const seed_arg = init.environ_map.get("PROF_SEED") orelse "12345";
     const width_arg = init.environ_map.get("PROF_WIDTH") orelse "0";
-    // Roadmap item 6 knob: max distance-cache weights. Default n*n (force the
-    // full matrix, as the bench does). Set PROF_MAXCACHE=0 to force the
-    // on-the-fly coordinate path (no matrix) and measure the cached-vs-uncached
-    // wall-clock at n>=10k — the item-6 gating measurement.
+    // Roadmap item 6 knob: max distance-cache budget in BYTES. Default n*n*4
+    // (force the full u32 matrix, as the bench does). Set PROF_MAXCACHE=0 to
+    // force the on-the-fly coordinate path (no matrix) and measure the
+    // cached-vs-uncached wall-clock at n>=10k — the item-6 gating measurement.
     const maxcache_arg = init.environ_map.get("PROF_MAXCACHE") orelse "";
 
     const start_ns = monotonicNanos();
@@ -49,7 +49,7 @@ pub fn main(init: std.process.Init) !void {
         .lk_max_depth = try std.fmt.parseInt(usize, depth_arg, 10),
         .lk_backtrack_depth = if (btdepth_arg.len > 0) try std.fmt.parseInt(usize, btdepth_arg, 10) else null,
         .lk_backtrack_limit = 80_000,
-        .max_distance_cache_weights = if (maxcache_arg.len > 0) try std.fmt.parseInt(usize, maxcache_arg, 10) else n * n,
+        .max_distance_cache_bytes = if (maxcache_arg.len > 0) try std.fmt.parseInt(usize, maxcache_arg, 10) else n * n * @sizeOf(u32),
     });
     defer result.deinit();
     const elapsed = monotonicNanos() - start_ns;
