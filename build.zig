@@ -52,6 +52,23 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("bench", "Run deterministic solver benchmarks");
     bench_step.dependOn(&run_bench.step);
 
+    // Focused parallel-vs-serial benchmark (headline config only, small fixtures).
+    const parbench_module = b.createModule(.{
+        .root_source_file = b.path("examples/parbench.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "commiv", .module = commiv },
+        },
+    });
+    const parbench = b.addExecutable(.{
+        .name = "commiv-parbench",
+        .root_module = parbench_module,
+    });
+    const run_parbench = b.addRunArtifact(parbench);
+    const parbench_step = b.step("parbench", "Run the parallel vs serial benchmark (BENCH_THREADS, BENCH_PMODE)");
+    parbench_step.dependOn(&run_parbench.step);
+
     // Profiling driver: a real build step replaces the hand-written `zig
     // build-exe` line from HANDOFF. Build-only (the binary reads PROF_* env
     // vars), so it installs to zig-out/bin/commiv-profile for use under perf:

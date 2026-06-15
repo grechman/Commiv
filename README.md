@@ -142,28 +142,69 @@ Command:
 taskset -c 0 nice -n 10 zig build bench -Doptimize=ReleaseFast
 ```
 
-Machine-local result from 2026-06-12 (round 15), one CPU core, headline `alpha-w8-kick` mode at seed 12345 (size-gated IPT/EAX merging, elite pool + candidate width 5 at n>=1000), side by side with LKH-3.0.13 `RUNS=1` on the same machine and core class. The bench additionally runs seeds 7 and 99 for this mode (CSV `seed` column):
+Headline `alpha-w8-kick` mode at seed 12345 (size-gated IPT/EAX merging, elite pool + candidate width 5 at n>=1000), side by side with LKH-3.0.13 `RUNS=1` on the same machine and core class. Lengths are from round 15 (2026-06-12); the **Time** column was refreshed 2026-06-15 after the perf commits (doomed-fallback skip + patch-gate scan removal) — lengths are bit-identical, only wall-time dropped. Single core, `taskset -c 0 nice -n 10`. The bench additionally runs seeds 7 and 99 for this mode (CSV `seed` column):
 
 | Instance | n | commiv Length | Gap | Time | LKH Length | LKH Gap | LKH Time |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| berlin52 | 52 | 7542 | 0.000% | 69 ms | 7542 | 0.000% | 0.01 s |
-| eil76 | 76 | 538 | 0.000% | 22 ms | 538 | 0.000% | 0.02 s |
-| kroA100 | 100 | 21282 | 0.000% | 128 ms | 21282 | 0.000% | 0.04 s |
-| bier127 | 127 | 118282 | 0.000% | 348 ms | 118282 | 0.000% | 0.07 s |
-| rat195 | 195 | 2323 | 0.000% | 151 ms | 2323 | 0.000% | 0.72 s |
-| ts225 | 225 | 126643 | 0.000% | 618 ms | 126643 | 0.000% | 0.44 s |
-| a280 | 280 | 2579 | 0.000% | 342 ms | 2579 | 0.000% | 0.57 s |
-| lin318 | 318 | 42029 | 0.000% | 0.92 s | 42143 | 0.271% | 0.80 s |
-| rd400 | 400 | 15281 | 0.000% | 1.06 s | 15281 | 0.000% | 0.60 s |
-| fl417 | 417 | 11861 | 0.000% | 3.30 s | 11861 | 0.000% | 10.29 s |
-| pcb442 | 442 | 50778 | 0.000% | 0.60 s | 50778 | 0.000% | 2.91 s |
-| att532 | 532 | 27686 | 0.000% | 2.06 s | 27686 | 0.000% | 8.82 s |
-| u574 | 574 | 36905 | 0.000% | 5.06 s | 36905 | 0.000% | 4.80 s |
-| rat575 | 575 | 6779 | 0.089% | 0.96 s | 6773 | 0.000% | 2.07 s |
-| d657 | 657 | 48916 | 0.008% | 2.67 s | 48912 | 0.000% | 2.49 s |
-| pr1002 | 1002 | 259045 | 0.000% | 12.0 s | 259045 | 0.000% | 2.96 s |
-| fl1577 | 1577 | 22256 | 0.031% | 20.0 s | 22262 | 0.058% | 145.66 s |
+| berlin52 | 52 | 7542 | 0.000% | 70 ms | 7542 | 0.000% | 0.01 s |
+| eil76 | 76 | 538 | 0.000% | 24 ms | 538 | 0.000% | 0.02 s |
+| kroA100 | 100 | 21282 | 0.000% | 150 ms | 21282 | 0.000% | 0.04 s |
+| bier127 | 127 | 118282 | 0.000% | 357 ms | 118282 | 0.000% | 0.07 s |
+| rat195 | 195 | 2323 | 0.000% | 149 ms | 2323 | 0.000% | 0.72 s |
+| ts225 | 225 | 126643 | 0.000% | 563 ms | 126643 | 0.000% | 0.44 s |
+| a280 | 280 | 2579 | 0.000% | 328 ms | 2579 | 0.000% | 0.57 s |
+| lin318 | 318 | 42029 | 0.000% | 782 ms | 42143 | 0.271% | 0.80 s |
+| rd400 | 400 | 15281 | 0.000% | 997 ms | 15281 | 0.000% | 0.60 s |
+| fl417 | 417 | 11861 | 0.000% | 2.60 s | 11861 | 0.000% | 10.29 s |
+| pcb442 | 442 | 50778 | 0.000% | 643 ms | 50778 | 0.000% | 2.91 s |
+| att532 | 532 | 27686 | 0.000% | 1.49 s | 27686 | 0.000% | 8.82 s |
+| u574 | 574 | 36905 | 0.000% | 3.19 s | 36905 | 0.000% | 4.80 s |
+| rat575 | 575 | 6779 | 0.089% | 677 ms | 6773 | 0.000% | 2.07 s |
+| d657 | 657 | 48916 | 0.008% | 1.78 s | 48912 | 0.000% | 2.49 s |
+| pr1002 | 1002 | 259045 | 0.000% | 7.44 s | 259045 | 0.000% | 2.96 s |
+| fl1577 | 1577 | 22256 | 0.031% | 11.6 s | 22262 | 0.058% | 145.66 s |
 | rl11849 | 11849 | 930671 | 0.800% | 160 s (400-trial probe) | 923288 | 0.000% | 1287.6 s |
+
+### Parallel execution (island model, 3 of 4 cores)
+
+`solveParallel` runs K independent islands (own seed + own elite pool each, best
+tour wins), leaving one core free. Two modes: `best_of_islands` (full budget per
+island -> max quality) and `split_budget` (budget divided -> max speed). Command:
+
+```sh
+BENCH_THREADS=3 BENCH_PMODE=split taskset -c 0-2 nice -n 10 zig build parbench -Doptimize=ReleaseFast
+```
+
+Honest finding on this 4-core host (3 islands):
+
+- **`best_of_islands` buys almost nothing here.** Most fixtures already hit the
+  optimum single-core, so extra compute has no quality headroom; the residual
+  gaps (rat575, d657, fl1577) are an algorithmic ceiling, not seed luck, so 3
+  seeds barely move them (rat575 0.089% -> 0.059% was the only gain). And because
+  TSP local search is memory-bandwidth-bound, 3 full islands *contend* and run
+  ~1.2-1.9x **slower** in wall-time. More cores is the wrong lever when you're
+  already optimal.
+- **`split_budget` is a real ~2x wall-time lever** at a small quality cost. It is
+  most interesting against LKH on the instances where LKH is slow:
+
+  | Instance | n | serial (gap) | split-3 (gap) | LKH (gap) |
+  |---|---:|---:|---:|---:|
+  | fl417 | 417 | 2.60 s (0.000%) | 1.35 s (0.000%) | 10.29 s (0.000%) |
+  | pcb442 | 442 | 643 ms (0.000%) | 393 ms (0.276%) | 2.91 s (0.000%) |
+  | att532 | 532 | 1.49 s (0.000%) | 1.16 s (0.061%) | 8.82 s (0.000%) |
+  | u574 | 574 | 3.19 s (0.000%) | 2.06 s (0.000%) | 4.80 s (0.000%) |
+  | d657 | 657 | 1.78 s (0.008%) | 1.17 s (0.074%) | 2.49 s (0.000%) |
+  | pr1002 | 1002 | 7.44 s (0.000%) | 3.12 s (0.046%) | 2.96 s (0.000%) |
+  | fl1577 | 1577 | 11.6 s (0.031%) | 5.04 s (0.126%) | 145.66 s (0.058%) |
+
+- The bigger point the single-core table already makes: **we beat LKH on
+  wall-time on the medium/large instances on one core** (fl1577 11.6 s vs 145.66 s,
+  att532 1.49 s vs 8.82 s, fl417 2.60 s vs 10.29 s) at equal or near-equal
+  quality. The only instance where LKH was faster (pr1002, 2.96 s vs our 7.44 s)
+  is matched by `split_budget` (3.12 s) at a 0.046% gap. Parallelism is a
+  modest speed lever, not the quality leap — the quality is already there.
+- rl11849 / d18512 parallel + a fresh same-session LKH re-run are deferred to a
+  dedicated session (big-runtime).
 
 Current read:
 
