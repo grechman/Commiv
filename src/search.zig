@@ -874,7 +874,19 @@ pub const LocalSearch = struct {
         if (plan.component_count != 1) {
             stats.move_plan_multi_component_fallbacks += 1;
             if (allow_completion_patch and self.tryPatchTwoComponents(&plan, removed_count, added_count, stats, self.lk_completion_patch_min_gain)) return true;
-            if (self.applyMoveWithHamiltonianFallback(removed_count, added_count, stats)) return true;
+            // A multi-component plan splits the tour into >=2 disjoint cycles, so
+            // it cannot be realized as one Hamiltonian cycle: the retrace-based
+            // applyMoveWithHamiltonianFallback (buildMoveTour traces a single
+            // cycle from tour[0]) is provably doomed and was measured to succeed
+            // ZERO times over millions of calls on every fixture (rat575/pr1002/
+            // fl1577 + full bench + tests). It was, however, the dominant per-move
+            // cost: ~386k doomed calls at pr1002, each ~2 O(n) rebuildState +
+            // an O(n) retrace + O(n) memcpys (~85% of tour_rebuilds). Reject the
+            // move directly. Debug builds keep the fallback as a tripwire to
+            // assert it never rescues a multi-component plan.
+            if (std.debug.runtime_safety) {
+                std.debug.assert(!self.applyMoveWithHamiltonianFallback(removed_count, added_count, stats));
+            }
             return false;
         }
         if (!view.applyEdges(removed_edges, added_edges)) {

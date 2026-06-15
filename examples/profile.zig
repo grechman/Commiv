@@ -81,6 +81,20 @@ pub fn main(init: std.process.Init) !void {
             @as(f64, @floatFromInt(st.lk_search_nodes)) / trials_f,
         },
     );
+    std.debug.print(
+        "  moves: direct={} invalid_fb={} multicomp_fb={} apply_fb={} fb_ok={} patch={} applied_depth_total={} deepest={} nonseq={}\n",
+        .{
+            st.move_plan_direct_applies,
+            st.move_plan_invalid_fallbacks,
+            st.move_plan_multi_component_fallbacks,
+            st.move_plan_apply_fallbacks,
+            st.move_plan_fallback_successes,
+            st.move_plan_patch_hits,
+            st.lk_applied_depth_total,
+            st.lk_deepest_applied_depth,
+            st.lk_nonseq_accepted,
+        },
+    );
 
     if (init.environ_map.get("PROF_TOUR_OUT")) |out_path| {
         var buf: [64]u8 = undefined;
