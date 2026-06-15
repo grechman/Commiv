@@ -1033,12 +1033,13 @@ pub const LocalSearch = struct {
             stats.move_plan_patch_rejected += 1;
             return false;
         }
-        const before_len = self.dist.tourLengthUnchecked(self.ws.candidate_tour) catch {
-            @memcpy(self.tour, self.ws.candidate_tour);
-            self.rebuildState();
-            stats.move_plan_patch_rejected += 1;
-            return false;
-        };
+        // before_len is the pre-move tour length. current_length is maintained as
+        // an exact invariant (== length(self.tour)) at every move-plan entry, and
+        // nothing between entry and here mutates it: applyEdges above rewrites
+        // tour/pos/next/prev but not current_length, which is only reseated on
+        // accept below. So the authoritative full O(n) scan of candidate_tour is
+        // redundant with the value we already hold.
+        const before_len = self.current_length;
         const after_len = self.dist.tourLengthUnchecked(self.tour) catch {
             @memcpy(self.tour, self.ws.candidate_tour);
             self.rebuildState();
