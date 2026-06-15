@@ -2,6 +2,7 @@
 .zig-cache-global/
 .zig-cache-verify/
 zig-out/
+commiv-profile
 tasks/
 .grechman/
 depwire-output.json

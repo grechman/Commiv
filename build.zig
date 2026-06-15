@@ -51,4 +51,25 @@ pub fn build(b: *std.Build) void {
 
     const bench_step = b.step("bench", "Run deterministic solver benchmarks");
     bench_step.dependOn(&run_bench.step);
+
+    // Profiling driver: a real build step replaces the hand-written `zig
+    // build-exe` line from HANDOFF. Build-only (the binary reads PROF_* env
+    // vars), so it installs to zig-out/bin/commiv-profile for use under perf:
+    //   PROF_PATH=vendor/tsplib/rat575.tsp perf record zig-out/bin/commiv-profile
+    const profile_module = b.createModule(.{
+        .root_source_file = b.path("examples/profile.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "commiv", .module = commiv },
+        },
+    });
+    const profile = b.addExecutable(.{
+        .name = "commiv-profile",
+        .root_module = profile_module,
+    });
+    const install_profile = b.addInstallArtifact(profile, .{});
+
+    const profile_step = b.step("profile", "Build the perf profiling driver (commiv-profile)");
+    profile_step.dependOn(&install_profile.step);
 }
