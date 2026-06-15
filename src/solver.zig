@@ -11,6 +11,11 @@ const search_mod = @import("search.zig");
 
 const SolverError = distance.SolverError;
 const LocalSearch = search_mod.LocalSearch;
+// Dormant VRP seams (L4): caller-owned additive penalty + caller-owned pinned
+// edges. Both default off and are unused by solve(); re-exported so the future
+// VRP layer can install them without reaching into the submodules.
+pub const PenaltySource = distance.PenaltySource;
+pub const PinnedEdges = search_mod.PinnedEdges;
 const IptScratch = recombine.IptScratch;
 const IptOutcome = recombine.IptOutcome;
 const iptMergeTours = recombine.iptMergeTours;
@@ -1872,4 +1877,59 @@ test "IPT merge returns null for tours sharing every edge" {
         @as(?IptOutcome, null),
         iptMergeTours(&oracle, &tour_a, len, &tour_b, len, &scratch),
     );
+}
+
+test "distance oracle applies caller-owned penalty and saturates" {
+    const allocator = std.testing.allocator;
+    var matrix = [_]u32{
+        0,  10, 20,
+        10, 0,  30,
+        20, 30, 0,
+    };
+    var p = try problem.Problem.initFullMatrix(allocator, "penalty3", 3, &matrix);
+    defer p.deinit();
+    var oracle = try DistanceOracle.init(allocator, &p, 0);
+    defer oracle.deinit();
+
+    // Null source (the default the whole solve path uses): base distances.
+    try std.testing.expectEqual(@as(u32, 10), oracle.distance(0, 1));
+    try std.testing.expectEqual(@as(u32, 30), oracle.distance(1, 2));
+
+    // Type-erased context carries the additive penalty added on top of base.
+    const Ctx = struct { amount: u32 };
+    const Pen = struct {
+        fn pen(ctx: *const anyopaque, _: usize, _: usize) u32 {
+            const c: *const Ctx = @ptrCast(@alignCast(ctx));
+            return c.amount;
+        }
+    };
+    var ctx = Ctx{ .amount = 7 };
+    var source = PenaltySource{ .ctx = &ctx, .penaltyFn = Pen.pen };
+    oracle.penalty_source = &source;
+    try std.testing.expectEqual(@as(u32, 17), oracle.distance(0, 1));
+    try std.testing.expectEqual(@as(u32, 37), oracle.distance(1, 2));
+
+    // Penalties saturate into u32 rather than wrapping past the max.
+    ctx.amount = std.math.maxInt(u32);
+    try std.testing.expectEqual(@as(u32, std.math.maxInt(u32)), oracle.distance(0, 1));
+
+    // Clearing the source restores the bit-identical base path.
+    oracle.penalty_source = null;
+    try std.testing.expectEqual(@as(u32, 10), oracle.distance(0, 1));
+}
+
+test "pinned-edge seam evaluates caller predicate undirected" {
+    const Ctx = struct { a: usize, b: usize };
+    const Pred = struct {
+        fn isPinned(ctx: *const anyopaque, a: usize, b: usize) bool {
+            const c: *const Ctx = @ptrCast(@alignCast(ctx));
+            return (a == c.a and b == c.b) or (a == c.b and b == c.a);
+        }
+    };
+    var ctx = Ctx{ .a = 2, .b = 5 };
+    const pinned = PinnedEdges{ .ctx = &ctx, .isPinnedFn = Pred.isPinned };
+    try std.testing.expect(pinned.isPinned(2, 5));
+    try std.testing.expect(pinned.isPinned(5, 2));
+    try std.testing.expect(!pinned.isPinned(2, 3));
+    try std.testing.expect(!pinned.isPinned(0, 1));
 }
