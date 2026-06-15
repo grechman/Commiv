@@ -498,3 +498,116 @@ pub fn segmentTargetSize(n: usize) usize {
 pub fn sameUndirectedEdge(a: usize, b: usize, c: usize, d: usize) bool {
     return (a == c and b == d) or (a == d and b == c);
 }
+
+// --- Differential tour harness (architecture M4) — HARD GATE for R1 ----------
+// Validates a TourView against an independent ground-truth array over random
+// tours x random reversals, asserting next/prev/between/materialize agree after
+// every move. Against the flat array impl this is a near-tautology ("green at a
+// no-op"), but it is the reusable oracle that turns R1's two-level list from
+// "hope it's bit-identical" into "proven on ~10^6 random ops": drop the new rep
+// in as a second TourView case and it must match this same reference.
+const DiffOracle = struct {
+    ref: []usize, // ground-truth tour order
+    pos: []usize, // ref[pos[node]] == node, kept in sync
+
+    fn syncPos(self: *DiffOracle) void {
+        for (self.ref, 0..) |node, i| self.pos[node] = i;
+    }
+    fn next(self: *const DiffOracle, node: usize) usize {
+        const n = self.ref.len;
+        return self.ref[(self.pos[node] + 1) % n];
+    }
+    fn prev(self: *const DiffOracle, node: usize) usize {
+        const n = self.ref.len;
+        return self.ref[(self.pos[node] + n - 1) % n];
+    }
+    // Forward walk from a: reach b before c => true. Independent of any position
+    // formula (the point of the cross-check), so kept to small n for cost.
+    fn betweenWalk(self: *const DiffOracle, a: usize, b: usize, c: usize) bool {
+        if (a == b or b == c or a == c) return false;
+        var cur = self.next(a);
+        while (cur != a) : (cur = self.next(cur)) {
+            if (cur == b) return true;
+            if (cur == c) return false;
+        }
+        return false;
+    }
+    fn reverse(self: *DiffOracle, i: usize, j: usize) void {
+        std.mem.reverse(usize, self.ref[i .. j + 1]);
+        self.syncPos();
+    }
+};
+
+fn diffExpectAgreement(view: *const TourView, oracle: *const DiffOracle, mat: []usize, rng: std.Random) !void {
+    const n = oracle.ref.len;
+    for (0..n) |node| {
+        try std.testing.expectEqual(oracle.next(node), view.next(node));
+        try std.testing.expectEqual(oracle.prev(node), view.prev(node));
+    }
+    // Order is fully pinned by next/prev; materialize must reproduce ref exactly.
+    view.materialize(mat);
+    try std.testing.expectEqualSlices(usize, oracle.ref, mat);
+    // Independent betweenness cross-check (forward walk), small n only.
+    if (n >= 3 and n <= 64) {
+        for (0..8) |_| {
+            const a = rng.uintLessThan(usize, n);
+            const b = rng.uintLessThan(usize, n);
+            const c = rng.uintLessThan(usize, n);
+            try std.testing.expectEqual(oracle.betweenWalk(a, b, c), view.between(a, b, c));
+        }
+    }
+}
+
+test "differential tour harness: flat view matches array oracle over random reversals" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x7f4a7c15d3e91b02);
+    const rng = prng.random();
+    const sizes = [_]usize{ 4, 7, 16, 63, 256, 511 };
+    const tours_per_size = 12;
+    const moves_per_tour = 80;
+
+    for (sizes) |n| {
+        const tour = try allocator.alloc(usize, n);
+        defer allocator.free(tour);
+        const pos = try allocator.alloc(usize, n);
+        defer allocator.free(pos);
+        const next_nodes = try allocator.alloc(usize, n);
+        defer allocator.free(next_nodes);
+        const prev_nodes = try allocator.alloc(usize, n);
+        defer allocator.free(prev_nodes);
+        const sn0 = try allocator.alloc(usize, n);
+        defer allocator.free(sn0);
+        const sn1 = try allocator.alloc(usize, n);
+        defer allocator.free(sn1);
+        const seen = try allocator.alloc(bool, n);
+        defer allocator.free(seen);
+        const ref = try allocator.alloc(usize, n);
+        defer allocator.free(ref);
+        const ref_pos = try allocator.alloc(usize, n);
+        defer allocator.free(ref_pos);
+        const mat = try allocator.alloc(usize, n);
+        defer allocator.free(mat);
+
+        for (0..tours_per_size) |_| {
+            for (0..n) |i| tour[i] = i;
+            rng.shuffle(usize, tour);
+            @memcpy(ref, tour);
+            var view = TourView.initFlat(tour, pos, next_nodes, prev_nodes, sn0, sn1, seen);
+            view.rebuild();
+            var oracle = DiffOracle{ .ref = ref, .pos = ref_pos };
+            oracle.syncPos();
+            try diffExpectAgreement(&view, &oracle, mat, rng);
+
+            for (0..moves_per_tour) |_| {
+                var i = rng.uintLessThan(usize, n);
+                var j = rng.uintLessThan(usize, n);
+                if (i > j) std.mem.swap(usize, &i, &j);
+                const first_node = oracle.ref[i];
+                const last_node = oracle.ref[j];
+                oracle.reverse(i, j);
+                view.flipPath(first_node, last_node);
+                try diffExpectAgreement(&view, &oracle, mat, rng);
+            }
+        }
+    }
+}
