@@ -228,15 +228,21 @@ fn runMode(allocator: std.mem.Allocator, p: *const commiv.Problem, optimum: ?u64
     const trial_extension_factor: usize = if (!mode.extend_trials or fixed_trials != null) 0 else if (n >= 1000) 2 else 4;
     var result = try commiv.solve(allocator, p, .{
         .seed = seed,
-        .trials = trials,
-        .trial_extension_factor = trial_extension_factor,
-        .candidate_count = candidate_count,
-        .candidate_mode = mode.candidate_mode,
-        .max_passes = max_passes,
-        .enable_lk = mode.enable_lk,
-        .lk_max_depth = mode.lk_max_depth,
-        .lk_backtrack_limit = lk_backtrack_limit,
-        .max_distance_cache_bytes = n * n * @sizeOf(u32),
+        .budget = .{
+            .trials = trials,
+            .trial_extension_factor = trial_extension_factor,
+            .max_passes = max_passes,
+            .max_distance_cache_bytes = n * n * @sizeOf(u32),
+        },
+        .candidates = .{
+            .candidate_count = candidate_count,
+            .candidate_mode = mode.candidate_mode,
+        },
+        .search = .{
+            .enable_lk = mode.enable_lk,
+            .lk_max_depth = mode.lk_max_depth,
+            .lk_backtrack_limit = lk_backtrack_limit,
+        },
     });
     defer result.deinit();
     const elapsed_ns = monotonicNanos() - start_ns;

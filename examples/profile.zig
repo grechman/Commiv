@@ -37,19 +37,25 @@ pub fn main(init: std.process.Init) !void {
     const start_ns = monotonicNanos();
     var result = try commiv.solve(allocator, &p, .{
         .seed = try std.fmt.parseInt(u64, seed_arg, 10),
-        .trials = trials,
-        .trial_extension_factor = try std.fmt.parseInt(usize, ext_arg, 10),
-        .candidate_count = blk: {
-            const w = try std.fmt.parseInt(usize, width_arg, 10);
-            break :blk if (w != 0) w else if (n >= 1000) @as(usize, 5) else @as(usize, 8);
+        .budget = .{
+            .trials = trials,
+            .trial_extension_factor = try std.fmt.parseInt(usize, ext_arg, 10),
+            .max_passes = 64,
+            .max_distance_cache_bytes = if (maxcache_arg.len > 0) try std.fmt.parseInt(usize, maxcache_arg, 10) else n * n * @sizeOf(u32),
         },
-        .candidate_mode = .alpha_nearness,
-        .max_passes = 64,
-        .enable_lk = true,
-        .lk_max_depth = try std.fmt.parseInt(usize, depth_arg, 10),
-        .lk_backtrack_depth = if (btdepth_arg.len > 0) try std.fmt.parseInt(usize, btdepth_arg, 10) else null,
-        .lk_backtrack_limit = 80_000,
-        .max_distance_cache_bytes = if (maxcache_arg.len > 0) try std.fmt.parseInt(usize, maxcache_arg, 10) else n * n * @sizeOf(u32),
+        .candidates = .{
+            .candidate_count = blk: {
+                const w = try std.fmt.parseInt(usize, width_arg, 10);
+                break :blk if (w != 0) w else if (n >= 1000) @as(usize, 5) else @as(usize, 8);
+            },
+            .candidate_mode = .alpha_nearness,
+        },
+        .search = .{
+            .enable_lk = true,
+            .lk_max_depth = try std.fmt.parseInt(usize, depth_arg, 10),
+            .lk_backtrack_depth = if (btdepth_arg.len > 0) try std.fmt.parseInt(usize, btdepth_arg, 10) else null,
+            .lk_backtrack_limit = 80_000,
+        },
     });
     defer result.deinit();
     const elapsed = monotonicNanos() - start_ns;

@@ -43,42 +43,57 @@ const sameUndirectedEdge = tour_mod.sameUndirectedEdge;
 
 pub const SolveOptions = struct {
     seed: u64 = 1,
-    trials: usize = 16,
-    // Stagnation-based trial extension: when > 0, the trial loop keeps
-    // running past `trials` as long as the incumbent improved within the
-    // last `trials` trials, up to `trial_extension_factor * trials` total.
-    // The backtracking discipline made trials 3-10x cheaper than the LKH
-    // budget the `trials = dimension` convention was calibrated against;
-    // without extension, runs on larger instances stop while still
-    // improving (rd400 found its best tour on its final trial). Converged
-    // runs stop at the stagnation window, so small instances pay nothing.
-    trial_extension_factor: usize = 0,
-    candidate_count: usize = 24,
-    candidate_mode: CandidateMode = .nearest_distance,
-    max_passes: usize = 80,
-    randomized_starts: bool = true,
-    enable_or_opt: bool = true,
-    enable_lk: bool = true,
-    enable_bounded_three_opt_cleanup: bool = true,
-    lk_completion_patch_min_gain: i64 = 1,
-    lk_max_depth: usize = 5,
-    lk_backtrack_limit: usize = 100_000,
-    // LKH backtracking discipline (paper p.13): sibling alternatives are
-    // explored only at chain levels <= this depth; deeper levels commit to
-    // the first viable continuation. Without it the search tree branches
-    // width x 2 at every level, which explodes on clustered instances where
-    // a long removed edge makes the positive-gain bound prune nothing.
-    // null = auto: exhaustive backtracking below 400 nodes (affordable, and
-    // measurably needed for the optimum on the small TSPLIB fixtures),
-    // depth 2 at or above.
-    lk_backtrack_depth: ?usize = null,
-    lk_nonseq_branch_limit: usize = 2,
-    alpha_ascent_iterations: usize = 32,
-    alpha_nearest_patch_count: usize = 2,
-    // Distance-cache budget in BYTES (an L3-sized figure), not a raw weight
-    // count. The matrix holds u32 weights, so this default of 16 MB == 4M
-    // weights — the historical threshold, exactly. The oracle converts.
-    max_distance_cache_bytes: usize = 16_000_000,
+    budget: Budget = .{},
+    candidates: CandidateOptions = .{},
+    search: Search = .{},
+
+    // Resource limits: how much work and how much memory the run may spend.
+    pub const Budget = struct {
+        trials: usize = 16,
+        // Stagnation-based trial extension: when > 0, the trial loop keeps
+        // running past `trials` as long as the incumbent improved within the
+        // last `trials` trials, up to `trial_extension_factor * trials` total.
+        // The backtracking discipline made trials 3-10x cheaper than the LKH
+        // budget the `trials = dimension` convention was calibrated against;
+        // without extension, runs on larger instances stop while still
+        // improving (rd400 found its best tour on its final trial). Converged
+        // runs stop at the stagnation window, so small instances pay nothing.
+        trial_extension_factor: usize = 0,
+        max_passes: usize = 80,
+        // Distance-cache budget in BYTES (an L3-sized figure), not a raw weight
+        // count. The matrix holds u32 weights, so this default of 16 MB == 4M
+        // weights — the historical threshold, exactly. The oracle converts.
+        max_distance_cache_bytes: usize = 16_000_000,
+    };
+
+    // Candidate-graph construction (1-tree ascent, alpha-nearness, width).
+    pub const CandidateOptions = struct {
+        candidate_count: usize = 24,
+        candidate_mode: CandidateMode = .nearest_distance,
+        alpha_ascent_iterations: usize = 32,
+        alpha_nearest_patch_count: usize = 2,
+    };
+
+    // Local-search behaviour: which moves run and how LK explores.
+    pub const Search = struct {
+        randomized_starts: bool = true,
+        enable_or_opt: bool = true,
+        enable_lk: bool = true,
+        enable_bounded_three_opt_cleanup: bool = true,
+        lk_completion_patch_min_gain: i64 = 1,
+        lk_max_depth: usize = 5,
+        lk_backtrack_limit: usize = 100_000,
+        // LKH backtracking discipline (paper p.13): sibling alternatives are
+        // explored only at chain levels <= this depth; deeper levels commit to
+        // the first viable continuation. Without it the search tree branches
+        // width x 2 at every level, which explodes on clustered instances where
+        // a long removed edge makes the positive-gain bound prune nothing.
+        // null = auto: exhaustive backtracking below 400 nodes (affordable, and
+        // measurably needed for the optimum on the small TSPLIB fixtures),
+        // depth 2 at or above.
+        lk_backtrack_depth: ?usize = null,
+        lk_nonseq_branch_limit: usize = 2,
+    };
 };
 
 
@@ -357,18 +372,18 @@ pub fn solve(
         };
     }
 
-    const trials = @max(options.trials, 1);
-    var oracle = try DistanceOracle.init(allocator, p, options.max_distance_cache_bytes);
+    const trials = @max(options.budget.trials, 1);
+    var oracle = try DistanceOracle.init(allocator, p, options.budget.max_distance_cache_bytes);
     defer oracle.deinit();
 
-    const width = candidateWidth(n, options.candidate_count);
+    const width = candidateWidth(n, options.candidates.candidate_count);
     var candidate_stats: CandidateBuildStats = .{};
-    var candidates = try buildCandidates(allocator, &oracle, width, options.candidate_mode, options.alpha_ascent_iterations, options.alpha_nearest_patch_count, &candidate_stats);
+    var candidates = try buildCandidates(allocator, &oracle, width, options.candidates.candidate_mode, options.candidates.alpha_ascent_iterations, options.candidates.alpha_nearest_patch_count, &candidate_stats);
     defer candidates.deinit();
     oracle.resetCounters();
 
-    const min_lk_depth: usize = if (options.enable_bounded_three_opt_cleanup) 3 else 2;
-    const max_lk_depth = if (options.enable_lk) @min(@max(options.lk_max_depth, min_lk_depth), n - 1) else min_lk_depth;
+    const min_lk_depth: usize = if (options.search.enable_bounded_three_opt_cleanup) 3 else 2;
+    const max_lk_depth = if (options.search.enable_lk) @min(@max(options.search.lk_max_depth, min_lk_depth), n - 1) else min_lk_depth;
     var workspace = try SolverWorkspace.init(allocator, n, max_lk_depth);
     defer workspace.deinit();
 
@@ -435,7 +450,7 @@ pub fn solve(
     // Exhaustive backtracking is affordable and measurably needed below 400
     // nodes; extension-phase trials are stale grinding, so they always use
     // the cheap discipline.
-    const base_backtrack_depth: usize = options.lk_backtrack_depth orelse
+    const base_backtrack_depth: usize = options.search.lk_backtrack_depth orelse
         (if (n < 400) std.math.maxInt(usize) else @as(usize, 2));
     // Shadow incumbent for EAX tour merging: best tour ever produced by a
     // merge (+ polish). Kept out of the kick/restart loop so the baseline
@@ -449,8 +464,8 @@ pub fn solve(
     // construction (LKH's InNextBestTour). The contested sections between it
     // and the current best are exactly where constructions should explore.
     var prev_best_len: u64 = std.math.maxInt(u64);
-    const max_trials = if (options.trial_extension_factor > 1)
-        std.math.mul(usize, trials, options.trial_extension_factor) catch trials
+    const max_trials = if (options.budget.trial_extension_factor > 1)
+        std.math.mul(usize, trials, options.budget.trial_extension_factor) catch trials
     else
         trials;
     // No adaptive convergence stop: factor-8 progress-gap patience (stop when
@@ -473,10 +488,10 @@ pub fn solve(
         // (cf. the bridge gate) guided trials don't pay: the light repair is
         // too weak to escape the incumbent basin and the full descent too
         // expensive, so those instances keep the kick/cold-restart schedule.
-        const guided_available = options.enable_lk and trial > 0 and
+        const guided_available = options.search.enable_lk and trial > 0 and
             best_len != std.math.maxInt(u64) and n < guided_max_dimension;
         const restart_limit = if (guided_available) guided_restart_cadence else restart_threshold;
-        const kick_trial = options.enable_lk and trial > 0 and n >= 8 and
+        const kick_trial = options.search.enable_lk and trial > 0 and n >= 8 and
             best_len != std.math.maxInt(u64) and stale_kicks < restart_limit;
         var guided_trial = false;
         if (kick_trial) {
@@ -528,7 +543,7 @@ pub fn solve(
             } else if (trial % 4 == 1 and n >= 300) {
                 farthestInsertionTour(&oracle, workspace.tour, workspace.candidate_tour, workspace.used);
             } else {
-                nearestNeighborTour(&oracle, &candidates, &random, trial, options.randomized_starts, workspace.tour, workspace.used);
+                nearestNeighborTour(&oracle, &candidates, &random, trial, options.search.randomized_starts, workspace.tour, workspace.used);
                 if (trial > 0 and n >= 8) {
                     segmentExchangeKick(workspace.tour, &random, &kick_touched[0]);
                 }
@@ -563,14 +578,14 @@ pub fn solve(
             .added_b = workspace.added_b,
             .lk_active = workspace.lk_active,
             .lk_active_queue = workspace.lk_active_queue,
-            .max_passes = options.max_passes,
-            .enable_or_opt = options.enable_or_opt,
-            .enable_bounded_three_opt_cleanup = options.enable_bounded_three_opt_cleanup,
-            .lk_completion_patch_min_gain = options.lk_completion_patch_min_gain,
+            .max_passes = options.budget.max_passes,
+            .enable_or_opt = options.search.enable_or_opt,
+            .enable_bounded_three_opt_cleanup = options.search.enable_bounded_three_opt_cleanup,
+            .lk_completion_patch_min_gain = options.search.lk_completion_patch_min_gain,
             .max_lk_depth = max_lk_depth,
-            .lk_backtrack_limit = options.lk_backtrack_limit,
+            .lk_backtrack_limit = options.search.lk_backtrack_limit,
             .lk_backtrack_depth = if (trial >= trials) @min(base_backtrack_depth, 2) else base_backtrack_depth,
-            .lk_nonseq_branch_limit = options.lk_nonseq_branch_limit,
+            .lk_nonseq_branch_limit = options.search.lk_nonseq_branch_limit,
         };
         search.rebuildState();
         if (kick_trial) {
@@ -628,7 +643,7 @@ pub fn solve(
             stats.improving_moves += warmup_moves;
             search.rebuildState();
             try search.syncLength();
-            if (options.enable_lk) {
+            if (options.search.enable_lk) {
                 const lk_moves = try search.improveLK(&stats, true, true);
                 stats.improving_moves += lk_moves;
             }
@@ -643,7 +658,7 @@ pub fn solve(
         // identical to the merge-free search, so merge gains are pure upside.
         // Gated to trials within ~3% of the incumbent so hopeless tours don't
         // pay the scan.
-        if (n < eax_min_dimension and options.enable_lk and best_len != std.math.maxInt(u64)) {
+        if (n < eax_min_dimension and options.search.enable_lk and best_len != std.math.maxInt(u64)) {
             const use_merged = merged_len < best_len;
             const ref_tour: []const usize = if (use_merged) ipt.merged else workspace.best_tour;
             const ref_len = if (use_merged) merged_len else best_len;
@@ -711,7 +726,7 @@ pub fn solve(
         // bit-for-bit identical to the merge-free search, so merge gains are
         // pure upside. Gated to trials within ~3% of the incumbent so
         // hopeless tours don't pay the scan.
-        if (n >= eax_min_dimension and options.enable_lk and best_len != std.math.maxInt(u64)) {
+        if (n >= eax_min_dimension and options.search.enable_lk and best_len != std.math.maxInt(u64)) {
             const trial_len = search.current_length;
             // References come from the elite pool: a small population of
             // diverse high-quality tours, each one a structurally different
@@ -808,7 +823,7 @@ pub fn solve(
             last_improvement_trial = trial;
             @memcpy(workspace.best_tour, workspace.tour);
             stale_kicks = 0;
-            if (n >= eax_min_dimension and options.enable_lk) elitePoolOffer(&elite, &eax, workspace.tour, len);
+            if (n >= eax_min_dimension and options.search.enable_lk) elitePoolOffer(&elite, &eax, workspace.tour, len);
             const gap = trial - last_progress_trial;
             stats.eax_worst_gap_ratio_x100 = @max(stats.eax_worst_gap_ratio_x100, gap * 100 / @max(max_progress_gap, 32));
             max_progress_gap = @max(max_progress_gap, gap);
@@ -1106,9 +1121,8 @@ test "heuristic improves a non-trivial ring-like instance" {
 
     var result = try solve(allocator, &p, .{
         .seed = 42,
-        .trials = 8,
-        .candidate_count = 6,
-        .max_passes = 40,
+        .budget = .{ .trials = 8, .max_passes = 40 },
+        .candidates = .{ .candidate_count = 6 },
     });
     defer result.deinit();
     try p.validateTour(result.tour);
@@ -1133,9 +1147,8 @@ test "heuristic handles explicit max u32 edge weights without sentinel collision
 
     var result = try solve(allocator, &p, .{
         .seed = 5,
-        .trials = 2,
-        .candidate_count = 4,
-        .max_passes = 2,
+        .budget = .{ .trials = 2, .max_passes = 2 },
+        .candidates = .{ .candidate_count = 4 },
     });
     defer result.deinit();
 
@@ -1169,9 +1182,8 @@ test "heuristic scratch uses solve allocator instead of problem allocator" {
 
     var result = try solve(solve_allocator, &p, .{
         .seed = 1,
-        .trials = 2,
-        .candidate_count = 4,
-        .max_passes = 8,
+        .budget = .{ .trials = 2, .max_passes = 8 },
+        .candidates = .{ .candidate_count = 4 },
     });
     defer result.deinit();
 
@@ -1200,9 +1212,8 @@ test "heuristic reaches known convex perimeter optimum" {
 
     var result = try solve(allocator, &p, .{
         .seed = 123,
-        .trials = 6,
-        .candidate_count = 6,
-        .max_passes = 30,
+        .budget = .{ .trials = 6, .max_passes = 30 },
+        .candidates = .{ .candidate_count = 6 },
     });
     defer result.deinit();
     try p.validateTour(result.tour);
@@ -1328,9 +1339,8 @@ test "fixed seed heuristic path is deterministic above brute force cutoff" {
 
     const options = SolveOptions{
         .seed = 321,
-        .trials = 10,
-        .candidate_count = 8,
-        .max_passes = 30,
+        .budget = .{ .trials = 10, .max_passes = 30 },
+        .candidates = .{ .candidate_count = 8 },
     };
     var a = try solve(allocator, &p, options);
     defer a.deinit();
@@ -1362,10 +1372,8 @@ test "cached coordinate heuristic path records no uncached coordinate distances"
 
     var result = try solve(allocator, &p, .{
         .seed = 11,
-        .trials = 4,
-        .candidate_count = 4,
-        .max_passes = 20,
-        .max_distance_cache_bytes = coords.len * coords.len * @sizeOf(u32),
+        .budget = .{ .trials = 4, .max_passes = 20, .max_distance_cache_bytes = coords.len * coords.len * @sizeOf(u32) },
+        .candidates = .{ .candidate_count = 4 },
     });
     defer result.deinit();
     try std.testing.expectEqual(@as(usize, coords.len), result.stats.distance_cache_nodes);
@@ -1390,7 +1398,7 @@ test "candidate count is clamped and rows contain no self or duplicates" {
     };
     var p = try problem.Problem.initCoords(allocator, "candidates", .euc_2d, &coords);
     defer p.deinit();
-    var oracle = try DistanceOracle.init(allocator, &p, coords.len * coords.len);
+    var oracle = try DistanceOracle.init(allocator, &p, coords.len * coords.len * @sizeOf(u32));
     defer oracle.deinit();
     var candidate_stats: CandidateBuildStats = .{};
     var candidates = try buildCandidates(allocator, &oracle, candidateWidth(coords.len, 1000), .nearest_distance, 0, 0, &candidate_stats);
@@ -1422,9 +1430,9 @@ test "alpha-nearness candidates are deterministic and valid" {
     };
     var p = try problem.Problem.initCoords(allocator, "alpha-candidates", .euc_2d, &coords);
     defer p.deinit();
-    var oracle_a = try DistanceOracle.init(allocator, &p, coords.len * coords.len);
+    var oracle_a = try DistanceOracle.init(allocator, &p, coords.len * coords.len * @sizeOf(u32));
     defer oracle_a.deinit();
-    var oracle_b = try DistanceOracle.init(allocator, &p, coords.len * coords.len);
+    var oracle_b = try DistanceOracle.init(allocator, &p, coords.len * coords.len * @sizeOf(u32));
     defer oracle_b.deinit();
     var stats_a: CandidateBuildStats = .{};
     var a = try buildCandidates(allocator, &oracle_a, 5, .alpha_nearness, 32, 2, &stats_a);
@@ -1459,24 +1467,16 @@ test "alpha-nearness mode is not worse than nearest mode on deterministic regres
 
     var nearest = try solve(allocator, &p, .{
         .seed = 12345,
-        .trials = 32,
-        .candidate_count = 4,
-        .candidate_mode = .nearest_distance,
-        .max_passes = 80,
-        .lk_max_depth = 5,
-        .lk_backtrack_limit = 80_000,
-        .max_distance_cache_bytes = n * n * @sizeOf(u32),
+        .budget = .{ .trials = 32, .max_passes = 80, .max_distance_cache_bytes = n * n * @sizeOf(u32) },
+        .candidates = .{ .candidate_count = 4, .candidate_mode = .nearest_distance },
+        .search = .{ .lk_max_depth = 5, .lk_backtrack_limit = 80_000 },
     });
     defer nearest.deinit();
     var alpha = try solve(allocator, &p, .{
         .seed = 12345,
-        .trials = 32,
-        .candidate_count = 4,
-        .candidate_mode = .alpha_nearness,
-        .max_passes = 80,
-        .lk_max_depth = 5,
-        .lk_backtrack_limit = 80_000,
-        .max_distance_cache_bytes = n * n * @sizeOf(u32),
+        .budget = .{ .trials = 32, .max_passes = 80, .max_distance_cache_bytes = n * n * @sizeOf(u32) },
+        .candidates = .{ .candidate_count = 4, .candidate_mode = .alpha_nearness },
+        .search = .{ .lk_max_depth = 5, .lk_backtrack_limit = 80_000 },
     });
     defer alpha.deinit();
 
@@ -1539,21 +1539,16 @@ test "LK path improves over warmup-only on regression instance" {
 
     var warmup = try solve(allocator, &p, .{
         .seed = 77,
-        .trials = 1,
-        .candidate_count = 8,
-        .candidate_mode = .nearest_distance,
-        .max_passes = 20,
-        .enable_lk = false,
+        .budget = .{ .trials = 1, .max_passes = 20 },
+        .candidates = .{ .candidate_count = 8, .candidate_mode = .nearest_distance },
+        .search = .{ .enable_lk = false },
     });
     defer warmup.deinit();
     var lk = try solve(allocator, &p, .{
         .seed = 77,
-        .trials = 1,
-        .candidate_count = 8,
-        .candidate_mode = .nearest_distance,
-        .max_passes = 20,
-        .enable_lk = true,
-        .lk_max_depth = 5,
+        .budget = .{ .trials = 1, .max_passes = 20 },
+        .candidates = .{ .candidate_count = 8, .candidate_mode = .nearest_distance },
+        .search = .{ .enable_lk = true, .lk_max_depth = 5 },
     });
     defer lk.deinit();
     try p.validateTour(warmup.tour);
@@ -1596,9 +1591,8 @@ test "heuristic reaches TSPLIB gr17 hardcoded regression target" {
 
     var result = try solve(allocator, &p, .{
         .seed = 99,
-        .trials = 48,
-        .candidate_count = 12,
-        .max_passes = 120,
+        .budget = .{ .trials = 48, .max_passes = 120 },
+        .candidates = .{ .candidate_count = 12 },
     });
     defer result.deinit();
 
@@ -1615,7 +1609,7 @@ test "EAX merge combines complementary sections from two tours" {
     }
     var p = try problem.Problem.initCoords(allocator, "eax-circle", .euc_2d, &coords);
     defer p.deinit();
-    var oracle = try DistanceOracle.init(allocator, &p, p.dimension * p.dimension);
+    var oracle = try DistanceOracle.init(allocator, &p, p.dimension * p.dimension * @sizeOf(u32));
     defer oracle.deinit();
     var candidate_stats: CandidateBuildStats = .{};
     var candidates = try buildCandidates(allocator, &oracle, 8, .nearest_distance, 32, 2, &candidate_stats);
@@ -1658,7 +1652,7 @@ test "EAX merge handles sections traversed in opposite orientation" {
     }
     var p = try problem.Problem.initCoords(allocator, "eax-circle-rev", .euc_2d, &coords);
     defer p.deinit();
-    var oracle = try DistanceOracle.init(allocator, &p, p.dimension * p.dimension);
+    var oracle = try DistanceOracle.init(allocator, &p, p.dimension * p.dimension * @sizeOf(u32));
     defer oracle.deinit();
     var candidate_stats: CandidateBuildStats = .{};
     var candidates = try buildCandidates(allocator, &oracle, 8, .nearest_distance, 32, 2, &candidate_stats);
@@ -1701,7 +1695,7 @@ test "EAX merge returns null for tours sharing every edge" {
     }
     var p = try problem.Problem.initCoords(allocator, "eax-identical", .euc_2d, &coords);
     defer p.deinit();
-    var oracle = try DistanceOracle.init(allocator, &p, p.dimension * p.dimension);
+    var oracle = try DistanceOracle.init(allocator, &p, p.dimension * p.dimension * @sizeOf(u32));
     defer oracle.deinit();
     var candidate_stats: CandidateBuildStats = .{};
     var candidates = try buildCandidates(allocator, &oracle, 8, .nearest_distance, 32, 2, &candidate_stats);
@@ -1745,7 +1739,7 @@ test "EAX merge repairs a splitting AB-cycle with candidate bridges" {
     };
     var p = try problem.Problem.initCoords(allocator, "eax-split", .euc_2d, &coords);
     defer p.deinit();
-    var oracle = try DistanceOracle.init(allocator, &p, p.dimension * p.dimension);
+    var oracle = try DistanceOracle.init(allocator, &p, p.dimension * p.dimension * @sizeOf(u32));
     defer oracle.deinit();
     var candidate_stats: CandidateBuildStats = .{};
     var candidates = try buildCandidates(allocator, &oracle, 7, .nearest_distance, 32, 2, &candidate_stats);
@@ -1780,7 +1774,7 @@ test "IPT merge combines complementary sections from two tours" {
     }
     var p = try problem.Problem.initCoords(allocator, "ipt-circle", .euc_2d, &coords);
     defer p.deinit();
-    var oracle = try DistanceOracle.init(allocator, &p, p.dimension * p.dimension);
+    var oracle = try DistanceOracle.init(allocator, &p, p.dimension * p.dimension * @sizeOf(u32));
     defer oracle.deinit();
 
     var base: [16]usize = undefined;
@@ -1820,7 +1814,7 @@ test "IPT merge handles sections traversed in opposite orientation" {
     }
     var p = try problem.Problem.initCoords(allocator, "ipt-circle-rev", .euc_2d, &coords);
     defer p.deinit();
-    var oracle = try DistanceOracle.init(allocator, &p, p.dimension * p.dimension);
+    var oracle = try DistanceOracle.init(allocator, &p, p.dimension * p.dimension * @sizeOf(u32));
     defer oracle.deinit();
 
     var base: [16]usize = undefined;
@@ -1860,7 +1854,7 @@ test "IPT merge returns null for tours sharing every edge" {
     }
     var p = try problem.Problem.initCoords(allocator, "ipt-identical", .euc_2d, &coords);
     defer p.deinit();
-    var oracle = try DistanceOracle.init(allocator, &p, p.dimension * p.dimension);
+    var oracle = try DistanceOracle.init(allocator, &p, p.dimension * p.dimension * @sizeOf(u32));
     defer oracle.deinit();
 
     // Same cycle, rotated and reflected: no differing edges, nothing to merge.
