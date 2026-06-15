@@ -22,8 +22,6 @@ pub const SolveOptions = struct {
     enable_or_opt: bool = true,
     enable_lk: bool = true,
     enable_bounded_three_opt_cleanup: bool = true,
-    enable_move_patching: bool = false,
-    move_patch_min_gain: i64 = 1,
     lk_completion_patch_min_gain: i64 = 1,
     lk_max_depth: usize = 5,
     lk_backtrack_limit: usize = 100_000,
@@ -63,10 +61,6 @@ pub const SolveStats = struct {
     lk_nonseq_rejected: u64 = 0,
     lk_nonseq_depth_total: u64 = 0,
     lk_nonseq_deepest_accepted_depth: usize = 0,
-    lk_chain_nonseq_depth_attempts: [8]u64 = .{0} ** 8,
-    lk_chain_nonseq_depth_accepted: [8]u64 = .{0} ** 8,
-    lk_chain_nonseq_depth_gain_rejected: [8]u64 = .{0} ** 8,
-    lk_chain_nonseq_depth_apply_rejected: [8]u64 = .{0} ** 8,
     lk_completion_attempts: u64 = 0,
     lk_completion_accepted: u64 = 0,
     lk_completion_2opt_hits: u64 = 0,
@@ -1154,8 +1148,6 @@ pub fn solve(
             .max_passes = options.max_passes,
             .enable_or_opt = options.enable_or_opt,
             .enable_bounded_three_opt_cleanup = options.enable_bounded_three_opt_cleanup,
-            .enable_move_patching = options.enable_move_patching,
-            .move_patch_min_gain = options.move_patch_min_gain,
             .lk_completion_patch_min_gain = options.lk_completion_patch_min_gain,
             .max_lk_depth = max_lk_depth,
             .lk_backtrack_limit = options.lk_backtrack_limit,
@@ -3297,8 +3289,6 @@ const LocalSearch = struct {
     max_passes: usize,
     enable_or_opt: bool,
     enable_bounded_three_opt_cleanup: bool,
-    enable_move_patching: bool,
-    move_patch_min_gain: i64,
     lk_completion_patch_min_gain: i64,
     max_lk_depth: usize,
     lk_backtrack_limit: usize,
@@ -4052,7 +4042,7 @@ const LocalSearch = struct {
 
     fn testAndApplyCompletionMove(self: *LocalSearch, removed_count: usize, added_count: usize, stats: *SolveStats) bool {
         const patch_hits_before = stats.move_plan_patch_hits;
-        if (!self.planAndApplyMoveInternal(removed_count, added_count, stats, true, true, false)) return false;
+        if (!self.planAndApplyMoveInternal(removed_count, added_count, stats, true, false)) return false;
         stats.lk_applied_depth_total += removed_count;
         stats.lk_deepest_applied_depth = @max(stats.lk_deepest_applied_depth, removed_count);
         if (stats.move_plan_patch_hits > patch_hits_before) stats.lk_completion_patch_hits += 1;
@@ -4063,7 +4053,7 @@ const LocalSearch = struct {
 
     fn testAndApplyGain23BridgeMove(self: *LocalSearch, edge_count: usize, stats: *SolveStats) bool {
         const patch_hits_before = stats.move_plan_patch_hits;
-        if (!self.planAndApplyMoveInternal(edge_count, edge_count, stats, true, true, true)) return false;
+        if (!self.planAndApplyMoveInternal(edge_count, edge_count, stats, true, true)) return false;
         if (stats.move_plan_patch_hits > patch_hits_before) stats.lk_completion_patch_hits += 1;
         const depth = edge_count + 2;
         stats.lk_applied_depth_total += depth;
@@ -4074,10 +4064,10 @@ const LocalSearch = struct {
     }
 
     fn planAndApplyMove(self: *LocalSearch, removed_count: usize, added_count: usize, stats: *SolveStats) bool {
-        return self.planAndApplyMoveInternal(removed_count, added_count, stats, false, false, false);
+        return self.planAndApplyMoveInternal(removed_count, added_count, stats, false, false);
     }
 
-    fn planAndApplyMoveInternal(self: *LocalSearch, removed_count: usize, added_count: usize, stats: *SolveStats, allow_completion_patch: bool, suppress_configured_patch: bool, skip_structurally_impossible_fallback: bool) bool {
+    fn planAndApplyMoveInternal(self: *LocalSearch, removed_count: usize, added_count: usize, stats: *SolveStats, allow_completion_patch: bool, skip_structurally_impossible_fallback: bool) bool {
         stats.move_plan_attempts += 1;
         for (0..removed_count) |i| {
             self.move_edges[i] = .{ .a = self.removed_a[i], .b = self.removed_b[i] };
@@ -4107,10 +4097,7 @@ const LocalSearch = struct {
         }
         if (plan.component_count != 1) {
             stats.move_plan_multi_component_fallbacks += 1;
-            const patch_min_gain = if (allow_completion_patch) self.lk_completion_patch_min_gain else self.move_patch_min_gain;
-            const allow_configured_patch = self.enable_move_patching and !suppress_configured_patch and self.tour.len < 256;
-            const allow_patch = allow_configured_patch or allow_completion_patch;
-            if (allow_patch and self.tryPatchTwoComponents(&plan, removed_count, added_count, stats, patch_min_gain)) return true;
+            if (allow_completion_patch and self.tryPatchTwoComponents(&plan, removed_count, added_count, stats, self.lk_completion_patch_min_gain)) return true;
             if (self.applyMoveWithHamiltonianFallback(removed_count, added_count, stats)) return true;
             return false;
         }
@@ -5282,8 +5269,6 @@ test "bounded LK escapes a constructed 2-opt and Or-opt local optimum" {
         .max_passes = 40,
         .enable_or_opt = false,
         .enable_bounded_three_opt_cleanup = false,
-        .enable_move_patching = false,
-        .move_patch_min_gain = 8,
         .lk_completion_patch_min_gain = 24,
         .max_lk_depth = 5,
         .lk_backtrack_limit = 100_000,
