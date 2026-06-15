@@ -1040,20 +1040,27 @@ pub const LocalSearch = struct {
         // accept below. So the authoritative full O(n) scan of candidate_tour is
         // redundant with the value we already hold.
         const before_len = self.current_length;
-        const after_len = self.dist.tourLengthUnchecked(self.tour) catch {
-            @memcpy(self.tour, self.ws.candidate_tour);
-            self.rebuildState();
-            stats.move_plan_patch_rejected += 1;
-            return false;
-        };
+        // after_len is the patched tour's length. validate() above proved the edge
+        // sets are clean (final_added disjoint from final_removed, no duplicates,
+        // degree-delta zero, single Hamiltonian component), so the patched tour's
+        // edge set is EXACTLY candidate_tour - final_removed + final_added. Its
+        // length is therefore the exact delta over those handful of edges (the same
+        // accounting applyLengthDeltaArrays uses for the direct path), not a full
+        // O(n) scan. removed_sum <= before_len (removed edges are all in
+        // candidate_tour), so the subtraction never underflows.
+        var removed_sum: u64 = 0;
+        for (final_removed) |edge| removed_sum += self.dist.distance(edge.a, edge.b);
+        var added_sum: u64 = 0;
+        for (final_added) |edge| added_sum += self.dist.distance(edge.a, edge.b);
+        const after_len = before_len - removed_sum + added_sum;
         if (after_len >= before_len) {
             @memcpy(self.tour, self.ws.candidate_tour);
             self.rebuildState();
             stats.move_plan_patch_rejected += 1;
             return false;
         }
-        // Patch rewrites the edge set; current_length comes straight from the
-        // after-scan this path already computed (no extra cost, exact).
+        // Patch rewrites the edge set; current_length is the exact delta computed
+        // above (no full scan needed, exact by the validate() edge-set guarantee).
         self.current_length = after_len;
         for (final_removed) |edge| {
             self.lkActivate(edge.a);
