@@ -355,6 +355,32 @@ pub const SolverWorkspace = struct {
     }
 };
 
+// Re-optimize a recombination product in place (M1): the one place the merge
+// MECHANISM lives, shared by both size-gated strategies. Copies the trial's
+// search state onto `product`, reactivates only the section boundaries the
+// merge touched, then runs the kick path's light-descent + polish. LK is
+// deterministic (no RNG), so polishing this shadow tour never perturbs the main
+// trajectory. Returns the product's exact length. The STRATEGY choice (IPT vs
+// EAX) and the shadow/incumbent/pool bookkeeping stay at the two call sites:
+// the two recombiners are permanently distinct (see the eax_min_dimension gate),
+// so only their common re-optimization tail is folded here.
+fn reoptimizeRecombinationProduct(
+    search: LocalSearch,
+    product: []usize,
+    boundary: []const usize,
+    stats: *SolveStats,
+    oracle: *DistanceOracle,
+) !u64 {
+    var merge_search = search;
+    merge_search.tour = product;
+    merge_search.rebuildState();
+    merge_search.lkResetActive();
+    for (boundary) |node| merge_search.lkActivate(node);
+    stats.improving_moves += try merge_search.improveLK(stats, false, false);
+    stats.improving_moves += try merge_search.improveLK(stats, false, true);
+    return oracle.tourLengthUnchecked(product);
+}
+
 pub fn solve(
     allocator: std.mem.Allocator,
     p: *const problem.Problem,
@@ -438,8 +464,12 @@ pub fn solve(
     // runs through win-driven window re-arms). At and above the gate the
     // kick-only regime starves for recombination material and EAX is
     // strictly stronger (fl1577 22254 beats LKH's 22262; IPT never went
-    // below 22262). The elite-pool build is expected to replace both
-    // mergers with one structure (consolidation rule).
+    // below 22262). This dual strategy is PERMANENT, not transitional (M1):
+    // making EAX reproduce the sub-1000 IPT trajectories was measured strictly
+    // worse — it reshuffles knife-edge optima, costs ~10% time, and loses
+    // lin318/rd400/pcb442/u574-class optima (see HANDOFF do-not-retry). So this
+    // is the ONE dispatch point between two permanently-distinct recombiners;
+    // their only shared code is reoptimizeRecombinationProduct (the re-opt tail).
     const eax_min_dimension: usize = 1000;
     var kick_touched: [4][6]usize = undefined;
     var kick_count: usize = 0;
@@ -655,21 +685,7 @@ pub fn solve(
                         stats.eax_merge_wins += 1;
                         const merge_nodes_before = stats.lk_search_nodes;
                         if (!outcome.winner_is_a) @memcpy(ipt.tour_a, ipt.tour_b);
-                        // Re-optimize only the neighborhoods around the
-                        // transcribed section boundaries, mirroring the kick
-                        // path's light-descent-then-polish pattern. LK is
-                        // deterministic (no RNG), so polishing the shadow
-                        // tour cannot perturb the main trajectory.
-                        var merge_search = search;
-                        merge_search.tour = ipt.tour_a;
-                        merge_search.rebuildState();
-                        merge_search.lkResetActive();
-                        for (ipt.boundary[0..outcome.boundary_count]) |node| merge_search.lkActivate(node);
-                        const merge_moves = try merge_search.improveLK(&stats, false, false);
-                        stats.improving_moves += merge_moves;
-                        const polish_moves = try merge_search.improveLK(&stats, false, true);
-                        stats.improving_moves += polish_moves;
-                        const merged_now = try oracle.tourLengthUnchecked(ipt.tour_a);
+                        const merged_now = try reoptimizeRecombinationProduct(search, ipt.tour_a, ipt.boundary[0..outcome.boundary_count], &stats, &oracle);
                         if (merged_now < merged_len) {
                             merged_len = merged_now;
                             @memcpy(ipt.merged, ipt.tour_a);
@@ -734,21 +750,7 @@ pub fn solve(
                         stats.eax_merge_wins += 1;
                         const merge_nodes_before = stats.lk_search_nodes;
                         if (!outcome.winner_is_a) @memcpy(eax.tour_a, eax.tour_b);
-                        // Re-optimize only the neighborhoods around the
-                        // changed edges, mirroring the kick path's
-                        // light-descent-then-polish pattern. LK is
-                        // deterministic (no RNG), so polishing the shadow
-                        // tour cannot perturb the main trajectory.
-                        var merge_search = search;
-                        merge_search.tour = eax.tour_a;
-                        merge_search.rebuildState();
-                        merge_search.lkResetActive();
-                        for (eax.boundary[0..outcome.boundary_count]) |node| merge_search.lkActivate(node);
-                        const merge_moves = try merge_search.improveLK(&stats, false, false);
-                        stats.improving_moves += merge_moves;
-                        const polish_moves = try merge_search.improveLK(&stats, false, true);
-                        stats.improving_moves += polish_moves;
-                        const merged_now = try oracle.tourLengthUnchecked(eax.tour_a);
+                        const merged_now = try reoptimizeRecombinationProduct(search, eax.tour_a, eax.boundary[0..outcome.boundary_count], &stats, &oracle);
                         if (merged_now < merged_len) {
                             merged_len = merged_now;
                             @memcpy(eax.merged, eax.tour_a);
