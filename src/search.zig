@@ -498,7 +498,16 @@ pub const LocalSearch = struct {
 
             const edge_cost: i64 = @intCast(self.candidates.candDist(even, ci));
             const next_gain = gain - edge_cost;
-            if (next_gain <= 0) continue;
+            // R5 admissible early-break: with a distance-sorted row, edge_cost is
+            // monotone non-decreasing, so once the added edge alone wipes out the
+            // gain every later candidate does too. The skipped candidates would
+            // have hit the same `continue` (no recordLKNode/searchRemoved here),
+            // so this is bit-identical, never a budget change. Alpha-nearness
+            // rows are not distance-sorted, so the scan stays exhaustive.
+            if (next_gain <= 0) {
+                if (self.candidates.dist_sorted) break;
+                continue;
+            }
 
             self.added_a[depth - 1] = even;
             self.added_b[depth - 1] = odd_next;

@@ -18,6 +18,12 @@ pub const Candidates = struct {
     // candidate. Holds the BASE distance only (no DistanceOracle penalty, which
     // is dormant); a future penalty caller must bypass this cache.
     cand_dist: []u32,
+    // True iff each row is sorted ascending by `cand_dist` (the nearest_distance
+    // mode, where alpha == distance). Alpha-nearness rows are sorted by alpha,
+    // whose distance order is arbitrary. The R5 admissible early-break in
+    // searchAdded (gain monotone in the added-edge distance) is only valid when
+    // this holds; under alpha-nearness it stays off and the scan is exhaustive.
+    dist_sorted: bool,
 
     pub fn deinit(self: *Candidates) void {
         self.allocator.free(self.data);
@@ -119,7 +125,7 @@ fn buildNearestCandidates(allocator: std.mem.Allocator, dist_oracle: *DistanceOr
     fillCandidateDistances(dist_oracle, data, cand_dist, width);
 
     candidate_stats.nearest_edges += @as(u64, @intCast(n * width));
-    return .{ .allocator = allocator, .width = width, .data = data, .alpha = alpha, .cand_dist = cand_dist };
+    return .{ .allocator = allocator, .width = width, .data = data, .alpha = alpha, .cand_dist = cand_dist, .dist_sorted = true };
 }
 
 /// Fill the SoA distance cache from the FINAL candidate rows (after any patch
@@ -301,7 +307,7 @@ fn buildAlphaCandidates(
     const total_edges: u64 = @intCast(n * width);
     candidate_stats.alpha_edges += total_edges - candidate_stats.patched_edges;
     candidate_stats.nearest_edges += candidate_stats.patched_edges;
-    return .{ .allocator = allocator, .width = width, .data = data, .alpha = alpha, .cand_dist = cand_dist };
+    return .{ .allocator = allocator, .width = width, .data = data, .alpha = alpha, .cand_dist = cand_dist, .dist_sorted = false };
 }
 
 fn symmetrizeCandidateRows(
