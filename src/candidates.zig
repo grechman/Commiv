@@ -12,10 +12,17 @@ pub const Candidates = struct {
     width: usize,
     data: []usize,
     alpha: []u64,
+    // Base distance d(node, data[node*width+k]) for each candidate, parallel to
+    // `data` (R2). Filled once at build time; the LK inner loop reads this
+    // contiguous u32 instead of re-issuing a random-access matrix load per
+    // candidate. Holds the BASE distance only (no DistanceOracle penalty, which
+    // is dormant); a future penalty caller must bypass this cache.
+    cand_dist: []u32,
 
     pub fn deinit(self: *Candidates) void {
         self.allocator.free(self.data);
         self.allocator.free(self.alpha);
+        self.allocator.free(self.cand_dist);
         self.* = undefined;
     }
 
@@ -27,6 +34,12 @@ pub const Candidates = struct {
     pub fn alphaRow(self: *const Candidates, node: usize) []const u64 {
         const start = node * self.width;
         return self.alpha[start .. start + self.width];
+    }
+
+    /// Precomputed base distance to the k-th candidate of `node`. Equals
+    /// `oracle.distance(node, row(node)[k])` under the null-penalty default.
+    pub fn candDist(self: *const Candidates, node: usize, k: usize) u32 {
+        return self.cand_dist[node * self.width + k];
     }
 };
 
@@ -101,8 +114,25 @@ fn buildNearestCandidates(allocator: std.mem.Allocator, dist_oracle: *DistanceOr
         validateCandidateRow(i, row);
     }
 
+    const cand_dist = try allocator.alloc(u32, total_candidates);
+    errdefer allocator.free(cand_dist);
+    fillCandidateDistances(dist_oracle, data, cand_dist, width);
+
     candidate_stats.nearest_edges += @as(u64, @intCast(n * width));
-    return .{ .allocator = allocator, .width = width, .data = data, .alpha = alpha };
+    return .{ .allocator = allocator, .width = width, .data = data, .alpha = alpha, .cand_dist = cand_dist };
+}
+
+/// Fill the SoA distance cache from the FINAL candidate rows (after any patch
+/// or symmetrize reordering), so cand_dist[i*width+k] == d(i, data[i*width+k]).
+/// Build-time only; oracle.resetCounters() runs after this, so these lookups do
+/// not pollute the per-trial cost counters.
+fn fillCandidateDistances(dist_oracle: *DistanceOracle, data: []const usize, cand_dist: []u32, width: usize) void {
+    const n = dist_oracle.p.dimension;
+    for (0..n) |i| {
+        for (0..width) |k| {
+            cand_dist[i * width + k] = dist_oracle.distance(i, data[i * width + k]);
+        }
+    }
 }
 
 fn buildAlphaCandidates(
@@ -264,10 +294,14 @@ fn buildAlphaCandidates(
 
     candidate_stats.patched_edges += symmetrizeCandidateRows(dist_oracle, data, alpha, width);
 
+    const cand_dist = try allocator.alloc(u32, total_candidates);
+    errdefer allocator.free(cand_dist);
+    fillCandidateDistances(dist_oracle, data, cand_dist, width);
+
     const total_edges: u64 = @intCast(n * width);
     candidate_stats.alpha_edges += total_edges - candidate_stats.patched_edges;
     candidate_stats.nearest_edges += candidate_stats.patched_edges;
-    return .{ .allocator = allocator, .width = width, .data = data, .alpha = alpha };
+    return .{ .allocator = allocator, .width = width, .data = data, .alpha = alpha, .cand_dist = cand_dist };
 }
 
 fn symmetrizeCandidateRows(

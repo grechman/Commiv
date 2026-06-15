@@ -64,10 +64,12 @@ const fixtures = [_]TsplibFixture{
     .{ .name = "pr1002", .path = "vendor/tsplib/pr1002.tsp", .tour_path = ".zig-cache/lkh-tours/pr1002.tour", .optimum = 259045 },
     .{ .name = "fl1577", .path = "vendor/tsplib/fl1577.tsp", .tour_path = ".zig-cache/lkh-tours/fl1577.tour", .optimum = 22249 },
     .{ .name = "rl11849", .path = "vendor/tsplib/rl11849.tsp", .tour_path = ".zig-cache/lkh-tours/rl11849.tour", .optimum = 923288, .headline_only = true, .fixed_trials = 400 },
-    // d18512 (n=18512) is gated OUT of the always-run suite: the 1.37 GB cached
-    // matrix makes fixed_trials=400 take ~hours (item-0 TODO). Re-enable once
-    // item 6 (on-the-fly distances) drops the big matrix. Probe it manually via
-    // commiv-profile when needed.
+    // d18512 (n=18512) stays gated OUT of the always-run suite. Memory is no
+    // longer the blocker: with the R2 candidate-distance cache, commiv-profile
+    // PROF_MAXCACHE=0 runs it on-the-fly at ~5 MB RSS (vs the 1.37 GB forced
+    // matrix). What remains is pure runtime — fixed_trials=400 at ~67 s/trial
+    // on-the-fly is hours. Probe it on demand via commiv-profile (whose default
+    // budget is now memory-safe for any n).
     // .{ .name = "d18512", .path = "vendor/tsplib/d18512.tsp", .tour_path = ".zig-cache/lkh-tours/d18512.tour", .optimum = 645238, .headline_only = true, .fixed_trials = 400 },
 };
 
@@ -232,6 +234,12 @@ fn runMode(allocator: std.mem.Allocator, p: *const commiv.Problem, optimum: ?u64
             .trials = trials,
             .trial_extension_factor = trial_extension_factor,
             .max_passes = max_passes,
+            // Force the full matrix for headline timing. Measured: on rl11849
+            // the on-the-fly path is ~11% slower (29.8 -> 33.1 s/20-trial,
+            // bit-identical tour) because ~half of per-trial lookups are
+            // tour-length scans the R2 candidate cache does not cover. The
+            // matrix RAM is a non-issue on the bench host; commiv-profile is
+            // the memory-bounded path for n where the matrix won't fit.
             .max_distance_cache_bytes = n * n * @sizeOf(u32),
         },
         .candidates = .{

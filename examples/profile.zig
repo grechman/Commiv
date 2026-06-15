@@ -28,11 +28,14 @@ pub fn main(init: std.process.Init) !void {
     const ext_arg = init.environ_map.get("PROF_EXT") orelse "0";
     const seed_arg = init.environ_map.get("PROF_SEED") orelse "12345";
     const width_arg = init.environ_map.get("PROF_WIDTH") orelse "0";
-    // Roadmap item 6 knob: max distance-cache budget in BYTES. Default n*n*4
-    // (force the full u32 matrix, as the bench does). Set PROF_MAXCACHE=0 to
-    // force the on-the-fly coordinate path (no matrix) and measure the
-    // cached-vs-uncached wall-clock at n>=10k — the item-6 gating measurement.
+    // Distance-cache budget in BYTES. Default is the library budget (16 MB),
+    // NOT a forced n*n matrix: with the R2 candidate-distance cache covering the
+    // hot LK lookups, large instances (rl11849, d18512) run memory-safe on the
+    // on-the-fly coordinate path instead of allocating a multi-GB matrix
+    // (d18512 = 1.37 GB). Small instances still fit the 16 MB budget and stay
+    // cached. Set PROF_MAXCACHE to override (0 = always on-the-fly).
     const maxcache_arg = init.environ_map.get("PROF_MAXCACHE") orelse "";
+    const default_cache_bytes = (commiv.SolveOptions.Budget{}).max_distance_cache_bytes;
 
     const start_ns = monotonicNanos();
     var result = try commiv.solve(allocator, &p, .{
@@ -41,7 +44,7 @@ pub fn main(init: std.process.Init) !void {
             .trials = trials,
             .trial_extension_factor = try std.fmt.parseInt(usize, ext_arg, 10),
             .max_passes = 64,
-            .max_distance_cache_bytes = if (maxcache_arg.len > 0) try std.fmt.parseInt(usize, maxcache_arg, 10) else n * n * @sizeOf(u32),
+            .max_distance_cache_bytes = if (maxcache_arg.len > 0) try std.fmt.parseInt(usize, maxcache_arg, 10) else default_cache_bytes,
         },
         .candidates = .{
             .candidate_count = blk: {

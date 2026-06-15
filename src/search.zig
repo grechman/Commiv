@@ -199,7 +199,7 @@ pub const LocalSearch = struct {
             const removed_first: i64 = @intCast(self.dist.distance(s1, s2));
             var breadth: usize = 0;
 
-            for (self.candidates.row(s2)) |s3| {
+            for (self.candidates.row(s2), 0..) |s3, ci| {
                 if (breadth >= self.lk_nonseq_branch_limit) break;
                 if (s3 == s1 or s3 == s2 or self.isTourEdge(s2, s3)) continue;
                 const s4 = self.tourNext(s3);
@@ -209,7 +209,7 @@ pub const LocalSearch = struct {
 
                 const gain =
                     removed_first -
-                    @as(i64, @intCast(self.dist.distance(s2, s3))) +
+                    @as(i64, @intCast(self.candidates.candDist(s2, ci))) +
                     @as(i64, @intCast(self.dist.distance(s3, s4))) -
                     @as(i64, @intCast(self.dist.distance(s4, s1)));
                 if (gain <= 0) continue;
@@ -264,11 +264,11 @@ pub const LocalSearch = struct {
 
             const gain0 = base_gain + @as(i64, @intCast(self.dist.distance(t1, t2)));
             var breadth2: usize = 0;
-            for (self.candidates.row(t2)) |t3| {
+            for (self.candidates.row(t2), 0..) |t3, ci| {
                 if (breadth2 >= self.lk_nonseq_branch_limit) break;
                 if (t3 == t1 or t3 == t2 or self.isTourEdge(t2, t3)) continue;
                 if (self.nodeInCircularSegment(segment.from, t3, segment.to)) continue;
-                const gain1 = gain0 - @as(i64, @intCast(self.dist.distance(t2, t3)));
+                const gain1 = gain0 - @as(i64, @intCast(self.candidates.candDist(t2, ci)));
                 if (gain1 <= 0) continue;
                 breadth2 += 1;
 
@@ -374,12 +374,12 @@ pub const LocalSearch = struct {
         stats: *SolveStats,
     ) bool {
         var breadth4: usize = 0;
-        for (self.candidates.row(s4)) |s5| {
+        for (self.candidates.row(s4), 0..) |s5, ci| {
             if (breadth4 >= self.lk_nonseq_branch_limit) break;
             if (s5 == s1 or s5 == s2 or s5 == s3 or s5 == s4) continue;
             if (self.isTourEdge(s4, s5)) continue;
 
-            const after_second_add = base_gain - @as(i64, @intCast(self.dist.distance(s4, s5)));
+            const after_second_add = base_gain - @as(i64, @intCast(self.candidates.candDist(s4, ci)));
             if (after_second_add <= 0) continue;
             breadth4 += 1;
 
@@ -489,14 +489,14 @@ pub const LocalSearch = struct {
         // commits to the first viable candidate instead of retrying siblings
         // after a failed subtree.
         const greedy = depth > self.lk_backtrack_depth;
-        for (self.candidates.row(even)) |odd_next| {
+        for (self.candidates.row(even), 0..) |odd_next, ci| {
             if (odd_next == t1) continue;
             if (self.vertexInSequence(odd_next, sequence_len)) continue;
             if (self.isTourEdge(even, odd_next)) continue;
             if (self.edgeInList(even, odd_next, self.removed_a, self.removed_b, depth)) continue;
             if (self.edgeInList(even, odd_next, self.added_a, self.added_b, depth - 1)) continue;
 
-            const edge_cost: i64 = @intCast(self.dist.distance(even, odd_next));
+            const edge_cost: i64 = @intCast(self.candidates.candDist(even, ci));
             const next_gain = gain - edge_cost;
             if (next_gain <= 0) continue;
 
@@ -559,7 +559,7 @@ pub const LocalSearch = struct {
     pub fn tryLKCompletion2Opt(self: *LocalSearch, depth: usize, even: usize, gain: i64, stats: *SolveStats) bool {
         const t1 = self.lk_t[0];
         var tried: usize = 0;
-        for (self.candidates.row(even)) |u| {
+        for (self.candidates.row(even), 0..) |u, ci| {
             if (tried >= self.lk_nonseq_branch_limit) break;
             if (u == t1 or self.vertexInSequence(u, 2 * depth)) continue;
             if (self.isTourEdge(even, u)) continue;
@@ -569,7 +569,7 @@ pub const LocalSearch = struct {
             stats.lk_completion_attempts += 1;
             tried += 1;
 
-            const after_first_add = gain - @as(i64, @intCast(self.dist.distance(even, u)));
+            const after_first_add = gain - @as(i64, @intCast(self.candidates.candDist(even, ci)));
             if (after_first_add <= 0) {
                 stats.lk_completion_rejected += 1;
                 continue;
@@ -612,7 +612,7 @@ pub const LocalSearch = struct {
     pub fn tryLKCompletion3Opt(self: *LocalSearch, depth: usize, even: usize, gain: i64, stats: *SolveStats) bool {
         const t1 = self.lk_t[0];
         var tried: usize = 0;
-        for (self.candidates.row(even)) |u| {
+        for (self.candidates.row(even), 0..) |u, ci| {
             if (tried >= self.lk_nonseq_branch_limit) break;
             if (u == t1 or self.vertexInSequence(u, 2 * depth)) continue;
             if (self.isTourEdge(even, u)) continue;
@@ -622,7 +622,7 @@ pub const LocalSearch = struct {
             stats.lk_completion_attempts += 1;
             tried += 1;
 
-            const after_first_add = gain - @as(i64, @intCast(self.dist.distance(even, u)));
+            const after_first_add = gain - @as(i64, @intCast(self.candidates.candDist(even, ci)));
             if (after_first_add <= 0) {
                 stats.lk_completion_rejected += 1;
                 continue;
@@ -641,7 +641,7 @@ pub const LocalSearch = struct {
                     continue;
                 }
 
-                for (self.candidates.row(v)) |w| {
+                for (self.candidates.row(v), 0..) |w, wi| {
                     if (w == t1 or w == even or w == u) continue;
                     if (self.vertexInSequence(w, 2 * depth)) continue;
                     if (self.isTourEdge(v, w)) continue;
@@ -649,7 +649,7 @@ pub const LocalSearch = struct {
                     if (sameUndirectedEdge(v, w, even, u)) continue;
                     if (self.edgeInList(v, w, self.added_a, self.added_b, depth - 1)) continue;
 
-                    const after_second_add = after_first_remove - @as(i64, @intCast(self.dist.distance(v, w)));
+                    const after_second_add = after_first_remove - @as(i64, @intCast(self.candidates.candDist(v, wi)));
                     if (after_second_add <= 0) continue;
 
                     var second_remove_choices = [2]usize{ self.tourNext(w), self.tourPrev(w) };
@@ -1431,7 +1431,7 @@ pub const LocalSearch = struct {
             const b = self.tour[(i + 1) % n];
             const old_ab = self.dist.distance(a, b);
 
-            for (self.candidates.row(a)) |c| {
+            for (self.candidates.row(a), 0..) |c, ci| {
                 const j = self.tourSeq(c);
                 if (j <= i + 1) continue;
                 if (i == 0 and j == n - 1) continue;
@@ -1439,7 +1439,7 @@ pub const LocalSearch = struct {
                 if (b == c or a == d) continue;
 
                 const old_cd = self.dist.distance(c, d);
-                const new_ac = self.dist.distance(a, c);
+                const new_ac = self.candidates.candDist(a, ci);
                 const new_bd = self.dist.distance(b, d);
                 if (@as(u64, old_ab) + old_cd > @as(u64, new_ac) + new_bd) {
                     self.reverseBetween(b, c);
@@ -1462,14 +1462,15 @@ pub const LocalSearch = struct {
             const remove_old = @as(u64, self.dist.distance(a, b)) + self.dist.distance(b, c);
             const remove_new = self.dist.distance(a, c);
 
-            for (self.candidates.row(b)) |x| {
+            for (self.candidates.row(b), 0..) |x, ci| {
                 const j = self.tourSeq(x);
                 const y = self.tour[(j + 1) % n];
                 if (x == a or x == b or x == c or y == a or y == b) continue;
                 if ((j + 1) % n == i) continue;
 
                 const insert_old = self.dist.distance(x, y);
-                const insert_new = @as(u64, self.dist.distance(x, b)) + self.dist.distance(b, y);
+                // candDist(b, ci) == d(b, x) == d(x, b) by symmetry (R2 cache).
+                const insert_new = @as(u64, self.candidates.candDist(b, ci)) + self.dist.distance(b, y);
                 if (remove_old + insert_old > @as(u64, remove_new) + insert_new) {
                     if (i < j) {
                         const moved = self.tour[i];
