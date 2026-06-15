@@ -9,8 +9,6 @@ const Candidates = candidates_mod.Candidates;
 const TourEdge = tour_mod.TourEdge;
 const MovePlan = tour_mod.MovePlan;
 const TourView = tour_mod.TourView;
-const useSegmentTour = tour_mod.useSegmentTour;
-const segmentTargetSize = tour_mod.segmentTargetSize;
 const tourEdgeInSlice = tour_mod.tourEdgeInSlice;
 const removeTourEdgeFromSlice = tour_mod.removeTourEdgeFromSlice;
 const sameUndirectedEdge = tour_mod.sameUndirectedEdge;
@@ -805,15 +803,12 @@ pub const LocalSearch = struct {
             stats.lk_applied_depth_total += removed_count;
             stats.lk_deepest_applied_depth = @max(stats.lk_deepest_applied_depth, removed_count);
             if (std.debug.runtime_safety) std.debug.assert(self.debugTourIsValid());
-            if (std.debug.runtime_safety) std.debug.assert(self.debugSegmentMatchesFlatMaterialization());
             return true;
         }
         if (!self.planAndApplyMove(removed_count, added_count, stats)) return false;
         stats.lk_applied_depth_total += removed_count;
         stats.lk_deepest_applied_depth = @max(stats.lk_deepest_applied_depth, removed_count);
-        if (std.debug.runtime_safety) std.debug.assert(self.debugTourIsValid());
-        if (std.debug.runtime_safety) std.debug.assert(self.debugSegmentMatchesFlatMaterialization());
-        return true;
+        if (std.debug.runtime_safety) std.debug.assert(self.debugTourIsValid());        return true;
     }
 
     pub fn testAndApplyCompletionMove(self: *LocalSearch, removed_count: usize, added_count: usize, stats: *SolveStats) bool {
@@ -822,9 +817,7 @@ pub const LocalSearch = struct {
         stats.lk_applied_depth_total += removed_count;
         stats.lk_deepest_applied_depth = @max(stats.lk_deepest_applied_depth, removed_count);
         if (stats.move_plan_patch_hits > patch_hits_before) stats.lk_completion_patch_hits += 1;
-        if (std.debug.runtime_safety) std.debug.assert(self.debugTourIsValid());
-        if (std.debug.runtime_safety) std.debug.assert(self.debugSegmentMatchesFlatMaterialization());
-        return true;
+        if (std.debug.runtime_safety) std.debug.assert(self.debugTourIsValid());        return true;
     }
 
     pub fn testAndApplyGain23BridgeMove(self: *LocalSearch, edge_count: usize, stats: *SolveStats) bool {
@@ -834,9 +827,7 @@ pub const LocalSearch = struct {
         const depth = edge_count + 2;
         stats.lk_applied_depth_total += depth;
         stats.lk_deepest_applied_depth = @max(stats.lk_deepest_applied_depth, depth);
-        if (std.debug.runtime_safety) std.debug.assert(self.debugTourIsValid());
-        if (std.debug.runtime_safety) std.debug.assert(self.debugSegmentMatchesFlatMaterialization());
-        return true;
+        if (std.debug.runtime_safety) std.debug.assert(self.debugTourIsValid());        return true;
     }
 
     pub fn planAndApplyMove(self: *LocalSearch, removed_count: usize, added_count: usize, stats: *SolveStats) bool {
@@ -896,7 +887,7 @@ pub const LocalSearch = struct {
         self.stats.tour_rebuilds += 1;
         // applyEdges only succeeds after walking a single Hamiltonian cycle and
         // rebuilding; the O(n) re-validation is debug-build paranoia.
-        if (std.debug.runtime_safety and (!self.debugTourIsValid() or !self.debugSegmentMatchesFlatMaterialization())) {
+        if (std.debug.runtime_safety and !self.debugTourIsValid()) {
             stats.move_plan_apply_fallbacks += 1;
             return self.applyMoveWithHamiltonianFallback(removed_count, added_count, stats);
         }
@@ -1027,7 +1018,7 @@ pub const LocalSearch = struct {
             return false;
         }
         self.stats.tour_rebuilds += 1;
-        if (std.debug.runtime_safety and (!self.debugTourIsValid() or !self.debugSegmentMatchesFlatMaterialization())) {
+        if (std.debug.runtime_safety and !self.debugTourIsValid()) {
             @memcpy(self.tour, self.ws.candidate_tour);
             self.rebuildState();
             stats.move_plan_patch_rejected += 1;
@@ -1278,8 +1269,7 @@ pub const LocalSearch = struct {
         }
         @memcpy(self.tour, self.ws.candidate_tour);
         self.rebuildState();
-        const valid = !std.debug.runtime_safety or
-            (self.debugTourIsValid() and self.debugSegmentMatchesFlatMaterialization());
+        const valid = !std.debug.runtime_safety or self.debugTourIsValid();
         if (!valid) {
             @memcpy(self.tour, self.ws.move_component_size);
             @memcpy(self.ws.candidate_tour, self.ws.move_component_size);
@@ -1330,33 +1320,6 @@ pub const LocalSearch = struct {
         return true;
     }
 
-    pub fn debugSegmentMatchesFlatMaterialization(self: *LocalSearch) bool {
-        if (!useSegmentTour(self.tour.len)) return true;
-        var view = self.tourView();
-        // Must not materialize into candidate_tour: callers (tryPatchTwoComponents,
-        // planAndApplyMoveInternal) rely on candidate_tour holding the pre-move
-        // snapshot for gain comparison and restore-on-reject.
-        view.materialize(self.ws.move_component);
-        if (!std.mem.eql(usize, self.tour, self.ws.move_component)) return false;
-
-        const n = self.tour.len;
-        const size = segmentTargetSize(n);
-        var segment_count: usize = 0;
-        var start: usize = 0;
-        while (start < n) : (segment_count += 1) {
-            const len = @min(size, n - start);
-            if (self.ws.segment_start[segment_count] != start) return false;
-            if (self.ws.segment_len[segment_count] != len) return false;
-            if (self.ws.segment_reversed[segment_count]) return false;
-            for (0..len) |rank| {
-                const node = self.tour[start + rank];
-                if (self.ws.segment_of_node[node] != segment_count) return false;
-                if (self.ws.rank_in_segment[node] != rank) return false;
-            }
-            start += len;
-        }
-        return segment_count > 0;
-    }
 
     pub fn buildMoveTour(self: *LocalSearch, removed_count: usize, added_count: usize, out: []usize) bool {
         const n = self.tour.len;
@@ -1601,22 +1564,6 @@ pub const LocalSearch = struct {
     }
 
     pub fn tourView(self: anytype) TourView {
-        if (useSegmentTour(self.tour.len)) {
-            return TourView.initSegment(
-                self.tour,
-                self.ws.pos,
-                self.ws.next,
-                self.ws.prev,
-                self.ws.scratch_neighbor0,
-                self.ws.scratch_neighbor1,
-                self.ws.scratch_seen,
-                self.ws.segment_of_node,
-                self.ws.rank_in_segment,
-                self.ws.segment_start,
-                self.ws.segment_len,
-                self.ws.segment_reversed,
-            );
-        }
         return TourView.initFlat(self.tour, self.ws.pos, self.ws.next, self.ws.prev, self.ws.scratch_neighbor0, self.ws.scratch_neighbor1, self.ws.scratch_seen);
     }
 

@@ -161,7 +161,12 @@ pub fn removeTourEdgeFromSlice(edges: []const TourEdge, edge: TourEdge) ?usize {
     return null;
 }
 
-pub const FlatTourView = struct {
+// Flat array tour representation: the tour order plus a position index and a
+// cached next/prev adjacency. This is the solver's only tour ADT. (A two-level
+// segment variant was prototyped behind this same interface for R1 but never
+// paid off — see plans/commiv/14.md — and was removed; if revived it slots back
+// in as an alternate backend exposing this exact method set.)
+pub const TourView = struct {
     tour: []usize,
     pos: []usize,
     next_nodes: []usize,
@@ -170,7 +175,35 @@ pub const FlatTourView = struct {
     scratch_neighbor1: []usize,
     scratch_seen: []bool,
 
-    pub fn rebuild(self: *FlatTourView) void {
+    pub fn initFlat(
+        tour: []usize,
+        pos: []usize,
+        next_nodes: []usize,
+        prev_nodes: []usize,
+        scratch_neighbor0: []usize,
+        scratch_neighbor1: []usize,
+        scratch_seen: []bool,
+    ) TourView {
+        return .{
+            .tour = tour,
+            .pos = pos,
+            .next_nodes = next_nodes,
+            .prev_nodes = prev_nodes,
+            .scratch_neighbor0 = scratch_neighbor0,
+            .scratch_neighbor1 = scratch_neighbor1,
+            .scratch_seen = scratch_seen,
+        };
+    }
+
+    pub fn len(self: *const TourView) usize {
+        return self.tour.len;
+    }
+
+    pub fn isTourEdge(self: *const TourView, a: usize, b: usize) bool {
+        return self.next(a) == b or self.prev(a) == b;
+    }
+
+    pub fn rebuild(self: *TourView) void {
         const n = self.tour.len;
         for (self.tour, 0..) |node, idx| {
             self.pos[node] = idx;
@@ -179,15 +212,15 @@ pub const FlatTourView = struct {
         }
     }
 
-    pub fn next(self: *const FlatTourView, node: usize) usize {
+    pub fn next(self: *const TourView, node: usize) usize {
         return self.next_nodes[node];
     }
 
-    pub fn prev(self: *const FlatTourView, node: usize) usize {
+    pub fn prev(self: *const TourView, node: usize) usize {
         return self.prev_nodes[node];
     }
 
-    pub fn between(self: *const FlatTourView, a: usize, b: usize, c: usize) bool {
+    pub fn between(self: *const TourView, a: usize, b: usize, c: usize) bool {
         if (a == b or b == c) return false;
         const pa = self.pos[a];
         const pb = self.pos[b];
@@ -196,7 +229,7 @@ pub const FlatTourView = struct {
         return pb > pa or pb < pc;
     }
 
-    pub fn flipPath(self: *FlatTourView, first_node: usize, last_node: usize) void {
+    pub fn flipPath(self: *TourView, first_node: usize, last_node: usize) void {
         var first = self.pos[first_node];
         var last = self.pos[last_node];
         if (first > last) std.mem.swap(usize, &first, &last);
@@ -207,7 +240,7 @@ pub const FlatTourView = struct {
         self.rebuild();
     }
 
-    pub fn applyEdges(self: *FlatTourView, removed: []const TourEdge, added: []const TourEdge) bool {
+    pub fn applyEdges(self: *TourView, removed: []const TourEdge, added: []const TourEdge) bool {
         const n = self.tour.len;
         for (0..n) |node| {
             self.scratch_neighbor0[node] = self.prev_nodes[node];
@@ -248,22 +281,22 @@ pub const FlatTourView = struct {
         return true;
     }
 
-    pub fn materialize(self: *const FlatTourView, out: []usize) void {
+    pub fn materialize(self: *const TourView, out: []usize) void {
         std.debug.assert(out.len == self.tour.len);
         @memcpy(out, self.tour);
     }
 
-    pub fn preferredFirstNeighbor(self: *const FlatTourView, start: usize, a: usize, b: usize) usize {
+    pub fn preferredFirstNeighbor(self: *const TourView, start: usize, a: usize, b: usize) usize {
         if (self.next_nodes[start] == a) return a;
         if (self.next_nodes[start] == b) return b;
         return @min(a, b);
     }
 
-    pub fn removeScratchEdge(self: *FlatTourView, a: usize, b: usize) bool {
+    pub fn removeScratchEdge(self: *TourView, a: usize, b: usize) bool {
         return self.removeScratchNeighbor(a, b) and self.removeScratchNeighbor(b, a);
     }
 
-    pub fn removeScratchNeighbor(self: *FlatTourView, a: usize, b: usize) bool {
+    pub fn removeScratchNeighbor(self: *TourView, a: usize, b: usize) bool {
         if (self.scratch_neighbor0[a] == b) {
             self.scratch_neighbor0[a] = std.math.maxInt(usize);
             return true;
@@ -275,14 +308,14 @@ pub const FlatTourView = struct {
         return false;
     }
 
-    pub fn addScratchEdge(self: *FlatTourView, a: usize, b: usize) bool {
+    pub fn addScratchEdge(self: *TourView, a: usize, b: usize) bool {
         if (a == b) return false;
         if (self.scratch_neighbor0[a] == b or self.scratch_neighbor1[a] == b) return false;
         if (self.scratch_neighbor0[b] == a or self.scratch_neighbor1[b] == a) return false;
         return self.addScratchNeighbor(a, b) and self.addScratchNeighbor(b, a);
     }
 
-    pub fn addScratchNeighbor(self: *FlatTourView, a: usize, b: usize) bool {
+    pub fn addScratchNeighbor(self: *TourView, a: usize, b: usize) bool {
         if (self.scratch_neighbor0[a] == std.math.maxInt(usize)) {
             self.scratch_neighbor0[a] = b;
             return true;
@@ -295,217 +328,18 @@ pub const FlatTourView = struct {
     }
 };
 
-pub const SegmentTourView = struct {
-    flat: FlatTourView,
-    segment_of_node: []usize,
-    rank_in_segment: []usize,
-    segment_start: []usize,
-    segment_len: []usize,
-    segment_reversed: []bool,
-    target_segment_size: usize,
-    segment_count: usize = 0,
-
-    pub fn rebuild(self: *SegmentTourView) void {
-        self.flat.rebuild();
-        self.rebuildSegments();
-    }
-
-    pub fn next(self: *const SegmentTourView, node: usize) usize {
-        return self.flat.next(node);
-    }
-
-    pub fn prev(self: *const SegmentTourView, node: usize) usize {
-        return self.flat.prev(node);
-    }
-
-    pub fn between(self: *const SegmentTourView, a: usize, b: usize, c: usize) bool {
-        return self.flat.between(a, b, c);
-    }
-
-    pub fn flipPath(self: *SegmentTourView, first_node: usize, last_node: usize) void {
-        self.flat.flipPath(first_node, last_node);
-        self.rebuildSegments();
-    }
-
-    pub fn applyEdges(self: *SegmentTourView, removed: []const TourEdge, added: []const TourEdge) bool {
-        if (!self.flat.applyEdges(removed, added)) return false;
-        self.rebuildSegments();
-        return true;
-    }
-
-    pub fn materialize(self: *const SegmentTourView, out: []usize) void {
-        self.flat.materialize(out);
-    }
-
-    pub fn rebuildSegments(self: *SegmentTourView) void {
-        // Roadmap item 8 / per-move-rebuild kill: the two-level segment structure
-        // (segment_of_node/rank_in_segment/segment_*) is NEVER read by solver
-        // logic — between()/next()/prev() all use pos[] and the flat next/prev
-        // arrays. Its only reader is debugSegmentMatchesFlatMaterialization, which
-        // runs only under runtime_safety. So in release it is pure O(n)/move
-        // waste; skip it. Debug builds still maintain + validate it. Bit-identical
-        // either way because the structure never influences a move decision.
-        if (!std.debug.runtime_safety) return;
-        const n = self.flat.tour.len;
-        const size = @max(self.target_segment_size, 1);
-        self.segment_count = 0;
-        var start: usize = 0;
-        while (start < n) : (self.segment_count += 1) {
-            const len = @min(size, n - start);
-            self.segment_start[self.segment_count] = start;
-            self.segment_len[self.segment_count] = len;
-            self.segment_reversed[self.segment_count] = false;
-            for (0..len) |rank| {
-                const node = self.flat.tour[start + rank];
-                self.segment_of_node[node] = self.segment_count;
-                self.rank_in_segment[node] = rank;
-            }
-            start += len;
-        }
-    }
-};
-
-pub const TourView = union(enum) {
-    flat: FlatTourView,
-    segment: SegmentTourView,
-
-    pub fn initFlat(
-        tour: []usize,
-        pos: []usize,
-        next_nodes: []usize,
-        prev_nodes: []usize,
-        scratch_neighbor0: []usize,
-        scratch_neighbor1: []usize,
-        scratch_seen: []bool,
-    ) TourView {
-        return .{ .flat = .{
-            .tour = tour,
-            .pos = pos,
-            .next_nodes = next_nodes,
-            .prev_nodes = prev_nodes,
-            .scratch_neighbor0 = scratch_neighbor0,
-            .scratch_neighbor1 = scratch_neighbor1,
-            .scratch_seen = scratch_seen,
-        } };
-    }
-
-    pub fn initSegment(
-        tour: []usize,
-        pos: []usize,
-        next_nodes: []usize,
-        prev_nodes: []usize,
-        scratch_neighbor0: []usize,
-        scratch_neighbor1: []usize,
-        scratch_seen: []bool,
-        segment_of_node: []usize,
-        rank_in_segment: []usize,
-        segment_start: []usize,
-        segment_len: []usize,
-        segment_reversed: []bool,
-    ) TourView {
-        return .{ .segment = .{
-            .flat = .{
-                .tour = tour,
-                .pos = pos,
-                .next_nodes = next_nodes,
-                .prev_nodes = prev_nodes,
-                .scratch_neighbor0 = scratch_neighbor0,
-                .scratch_neighbor1 = scratch_neighbor1,
-                .scratch_seen = scratch_seen,
-            },
-            .segment_of_node = segment_of_node,
-            .rank_in_segment = rank_in_segment,
-            .segment_start = segment_start,
-            .segment_len = segment_len,
-            .segment_reversed = segment_reversed,
-            .target_segment_size = segmentTargetSize(tour.len),
-        } };
-    }
-
-    pub fn rebuild(self: *TourView) void {
-        switch (self.*) {
-            .flat => |*view| view.rebuild(),
-            .segment => |*view| view.rebuild(),
-        }
-    }
-
-    pub fn next(self: *const TourView, node: usize) usize {
-        return switch (self.*) {
-            .flat => |*view| view.next(node),
-            .segment => |*view| view.next(node),
-        };
-    }
-
-    pub fn prev(self: *const TourView, node: usize) usize {
-        return switch (self.*) {
-            .flat => |*view| view.prev(node),
-            .segment => |*view| view.prev(node),
-        };
-    }
-
-    pub fn len(self: *const TourView) usize {
-        return switch (self.*) {
-            .flat => |*view| view.tour.len,
-            .segment => |*view| view.flat.tour.len,
-        };
-    }
-
-    pub fn isTourEdge(self: *const TourView, a: usize, b: usize) bool {
-        return self.next(a) == b or self.prev(a) == b;
-    }
-
-    pub fn between(self: *const TourView, a: usize, b: usize, c: usize) bool {
-        return switch (self.*) {
-            .flat => |*view| view.between(a, b, c),
-            .segment => |*view| view.between(a, b, c),
-        };
-    }
-
-    pub fn flipPath(self: *TourView, first_node: usize, last_node: usize) void {
-        switch (self.*) {
-            .flat => |*view| view.flipPath(first_node, last_node),
-            .segment => |*view| view.flipPath(first_node, last_node),
-        }
-    }
-
-    pub fn applyEdges(self: *TourView, removed: []const TourEdge, added: []const TourEdge) bool {
-        return switch (self.*) {
-            .flat => |*view| view.applyEdges(removed, added),
-            .segment => |*view| view.applyEdges(removed, added),
-        };
-    }
-
-    pub fn materialize(self: *const TourView, out: []usize) void {
-        switch (self.*) {
-            .flat => |*view| view.materialize(out),
-            .segment => |*view| view.materialize(out),
-        }
-    }
-};
-
-pub const segmentTourThreshold: usize = 512;
-
-pub fn useSegmentTour(n: usize) bool {
-    return n >= segmentTourThreshold;
-}
-
-pub fn segmentTargetSize(n: usize) usize {
-    var size: usize = 1;
-    while (size * size < n) : (size += 1) {}
-    return @max(size, 1);
-}
-
 pub fn sameUndirectedEdge(a: usize, b: usize, c: usize, d: usize) bool {
     return (a == c and b == d) or (a == d and b == c);
 }
 
-// --- Differential tour harness (architecture M4) — HARD GATE for R1 ----------
-// Validates a TourView against an independent ground-truth array over random
+// --- Differential tour harness (architecture M4) -----------------------------
+// Validates TourView against an independent ground-truth array over random
 // tours x random reversals, asserting next/prev/between/materialize agree after
 // every move. Against the flat array impl this is a near-tautology ("green at a
-// no-op"), but it is the reusable oracle that turns R1's two-level list from
-// "hope it's bit-identical" into "proven on ~10^6 random ops": drop the new rep
-// in as a second TourView case and it must match this same reference.
+// no-op"), but it is the reusable oracle that would turn any future alternate
+// tour backend (e.g. a two-level list) from "hope it's bit-identical" into
+// "proven on ~10^6 random ops": drop the new rep in as a second case and it
+// must match this same reference.
 const DiffOracle = struct {
     ref: []usize, // ground-truth tour order
     pos: []usize, // ref[pos[node]] == node, kept in sync

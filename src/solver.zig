@@ -38,12 +38,7 @@ const TourEdge = tour_mod.TourEdge;
 const MovePlan = tour_mod.MovePlan;
 const tourEdgeInSlice = tour_mod.tourEdgeInSlice;
 const removeTourEdgeFromSlice = tour_mod.removeTourEdgeFromSlice;
-const FlatTourView = tour_mod.FlatTourView;
-const SegmentTourView = tour_mod.SegmentTourView;
 const TourView = tour_mod.TourView;
-const segmentTourThreshold = tour_mod.segmentTourThreshold;
-const useSegmentTour = tour_mod.useSegmentTour;
-const segmentTargetSize = tour_mod.segmentTargetSize;
 const sameUndirectedEdge = tour_mod.sameUndirectedEdge;
 
 pub const SolveOptions = struct {
@@ -198,11 +193,6 @@ pub const SolverWorkspace = struct {
     scratch_neighbor0: []usize,
     scratch_neighbor1: []usize,
     scratch_seen: []bool,
-    segment_of_node: []usize,
-    rank_in_segment: []usize,
-    segment_start: []usize,
-    segment_len: []usize,
-    segment_reversed: []bool,
     move_degree_delta: []i8,
     move_component: []usize,
     move_component_size: []usize,
@@ -240,16 +230,6 @@ pub const SolverWorkspace = struct {
         errdefer allocator.free(scratch_neighbor1);
         const scratch_seen = try allocator.alloc(bool, n);
         errdefer allocator.free(scratch_seen);
-        const segment_of_node = try allocator.alloc(usize, n);
-        errdefer allocator.free(segment_of_node);
-        const rank_in_segment = try allocator.alloc(usize, n);
-        errdefer allocator.free(rank_in_segment);
-        const segment_start = try allocator.alloc(usize, n);
-        errdefer allocator.free(segment_start);
-        const segment_len = try allocator.alloc(usize, n);
-        errdefer allocator.free(segment_len);
-        const segment_reversed = try allocator.alloc(bool, n);
-        errdefer allocator.free(segment_reversed);
         const move_degree_delta = try allocator.alloc(i8, n);
         errdefer allocator.free(move_degree_delta);
         const move_component = try allocator.alloc(usize, n);
@@ -300,11 +280,6 @@ pub const SolverWorkspace = struct {
             .scratch_neighbor0 = scratch_neighbor0,
             .scratch_neighbor1 = scratch_neighbor1,
             .scratch_seen = scratch_seen,
-            .segment_of_node = segment_of_node,
-            .rank_in_segment = rank_in_segment,
-            .segment_start = segment_start,
-            .segment_len = segment_len,
-            .segment_reversed = segment_reversed,
             .move_degree_delta = move_degree_delta,
             .move_component = move_component,
             .move_component_size = move_component_size,
@@ -333,11 +308,6 @@ pub const SolverWorkspace = struct {
         self.allocator.free(self.scratch_neighbor0);
         self.allocator.free(self.scratch_neighbor1);
         self.allocator.free(self.scratch_seen);
-        self.allocator.free(self.segment_of_node);
-        self.allocator.free(self.rank_in_segment);
-        self.allocator.free(self.segment_start);
-        self.allocator.free(self.segment_len);
-        self.allocator.free(self.segment_reversed);
         self.allocator.free(self.move_degree_delta);
         self.allocator.free(self.move_component);
         self.allocator.free(self.move_component_size);
@@ -981,88 +951,6 @@ test "MovePlan one-cycle plans apply through TourView" {
     try std.testing.expect(view.applyEdges(&removed, &added));
     view.materialize(&out);
     try std.testing.expectEqualSlices(usize, &.{ 0, 1, 4, 3, 2, 5 }, &out);
-}
-
-test "segment TourView agrees with flat backend" {
-    var flat_tour = [_]usize{ 0, 1, 2, 3, 4, 5, 6, 7, 8 };
-    var segment_tour = flat_tour;
-    var flat_pos: [flat_tour.len]usize = undefined;
-    var flat_next: [flat_tour.len]usize = undefined;
-    var flat_prev: [flat_tour.len]usize = undefined;
-    var flat_scratch0: [flat_tour.len]usize = undefined;
-    var flat_scratch1: [flat_tour.len]usize = undefined;
-    var flat_seen: [flat_tour.len]bool = undefined;
-    var segment_pos: [segment_tour.len]usize = undefined;
-    var segment_next: [segment_tour.len]usize = undefined;
-    var segment_prev: [segment_tour.len]usize = undefined;
-    var segment_scratch0: [segment_tour.len]usize = undefined;
-    var segment_scratch1: [segment_tour.len]usize = undefined;
-    var segment_seen: [segment_tour.len]bool = undefined;
-    var segment_of_node: [segment_tour.len]usize = undefined;
-    var rank_in_segment: [segment_tour.len]usize = undefined;
-    var segment_start: [segment_tour.len]usize = undefined;
-    var segment_len: [segment_tour.len]usize = undefined;
-    var segment_reversed: [segment_tour.len]bool = undefined;
-    var flat_out: [flat_tour.len]usize = undefined;
-    var segment_out: [segment_tour.len]usize = undefined;
-
-    var flat = TourView.initFlat(&flat_tour, &flat_pos, &flat_next, &flat_prev, &flat_scratch0, &flat_scratch1, &flat_seen);
-    var segment = TourView.initSegment(
-        &segment_tour,
-        &segment_pos,
-        &segment_next,
-        &segment_prev,
-        &segment_scratch0,
-        &segment_scratch1,
-        &segment_seen,
-        &segment_of_node,
-        &rank_in_segment,
-        &segment_start,
-        &segment_len,
-        &segment_reversed,
-    );
-    flat.rebuild();
-    segment.rebuild();
-
-    try std.testing.expectEqual(@as(usize, 3), segmentTargetSize(segment_tour.len));
-    // The two-level segment index is only built/maintained under runtime_safety
-    // (it is debug-only validation state — never read by solver logic). In
-    // ReleaseFast it is intentionally left unbuilt, so only assert it in debug.
-    if (std.debug.runtime_safety) {
-        try std.testing.expectEqual(@as(usize, 0), segment_of_node[0]);
-        try std.testing.expectEqual(@as(usize, 1), segment_of_node[3]);
-        try std.testing.expectEqual(@as(usize, 2), segment_of_node[8]);
-        try std.testing.expectEqual(@as(usize, 2), rank_in_segment[5]);
-    }
-
-    for (0..segment_tour.len) |node| {
-        try std.testing.expectEqual(flat.next(node), segment.next(node));
-        try std.testing.expectEqual(flat.prev(node), segment.prev(node));
-    }
-    try std.testing.expectEqual(flat.between(7, 1, 3), segment.between(7, 1, 3));
-
-    flat.flipPath(2, 6);
-    segment.flipPath(2, 6);
-    flat.materialize(&flat_out);
-    segment.materialize(&segment_out);
-    try std.testing.expectEqualSlices(usize, &flat_out, &segment_out);
-
-    try std.testing.expect(flat.applyEdges(
-        &.{ .{ .a = 1, .b = 6 }, .{ .a = 7, .b = 8 } },
-        &.{ .{ .a = 1, .b = 7 }, .{ .a = 6, .b = 8 } },
-    ));
-    try std.testing.expect(segment.applyEdges(
-        &.{ .{ .a = 1, .b = 6 }, .{ .a = 7, .b = 8 } },
-        &.{ .{ .a = 1, .b = 7 }, .{ .a = 6, .b = 8 } },
-    ));
-    flat.materialize(&flat_out);
-    segment.materialize(&segment_out);
-    try std.testing.expectEqualSlices(usize, &flat_out, &segment_out);
-}
-
-test "segment tour backend threshold starts at 512 nodes" {
-    try std.testing.expect(!useSegmentTour(511));
-    try std.testing.expect(useSegmentTour(512));
 }
 
 test "solver is deterministic and finds square optimum through exact path" {

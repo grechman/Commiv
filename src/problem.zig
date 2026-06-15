@@ -151,10 +151,6 @@ pub const Problem = struct {
     pub fn validateTour(self: *const Problem, tour: []const usize) !void {
         try validateTourWithAllocator(self.allocator, self.dimension, tour);
     }
-
-    pub fn identityTour(self: *const Problem, allocator: std.mem.Allocator) ![]usize {
-        return identityTourFor(allocator, self.dimension);
-    }
 };
 
 pub fn validateTourWithAllocator(
@@ -172,12 +168,6 @@ pub fn validateTourWithAllocator(
         if (seen[node]) return ProblemError.DuplicateNode;
         seen[node] = true;
     }
-}
-
-pub fn identityTourFor(allocator: std.mem.Allocator, dimension: usize) ![]usize {
-    const tour = try allocator.alloc(usize, dimension);
-    for (tour, 0..) |*node, i| node.* = i;
-    return tour;
 }
 
 fn squareLen(dimension: usize) !usize {
