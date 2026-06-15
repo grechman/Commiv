@@ -334,15 +334,15 @@ pub const LocalSearch = struct {
 
     pub fn circularSegmentSize(self: *const LocalSearch, from: usize, to: usize) usize {
         const n = self.tour.len;
-        const from_pos = self.pos[from];
-        const to_pos = self.pos[to];
+        const from_pos = self.tourSeq(from);
+        const to_pos = self.tourSeq(to);
         return if (to_pos >= from_pos) to_pos - from_pos + 1 else n - from_pos + to_pos + 1;
     }
 
     pub fn nodeInCircularSegment(self: *const LocalSearch, from: usize, node: usize, to: usize) bool {
-        const from_pos = self.pos[from];
-        const node_pos = self.pos[node];
-        const to_pos = self.pos[to];
+        const from_pos = self.tourSeq(from);
+        const node_pos = self.tourSeq(node);
+        const to_pos = self.tourSeq(to);
         if (from_pos <= to_pos) return from_pos <= node_pos and node_pos <= to_pos;
         return node_pos >= from_pos or node_pos <= to_pos;
     }
@@ -428,8 +428,8 @@ pub const LocalSearch = struct {
 
     pub fn segmentIsNoMoreThanHalf(self: *const LocalSearch, from: usize, to: usize) bool {
         const n = self.tour.len;
-        const from_pos = self.pos[from];
-        const to_pos = self.pos[to];
+        const from_pos = self.tourSeq(from);
+        const to_pos = self.tourSeq(to);
         const span = if (to_pos >= from_pos) to_pos - from_pos + 1 else n - from_pos + to_pos + 1;
         return 2 * span <= n;
     }
@@ -1352,8 +1352,8 @@ pub const LocalSearch = struct {
     pub fn buildMoveTour(self: *LocalSearch, removed_count: usize, added_count: usize, out: []usize) bool {
         const n = self.tour.len;
         for (0..n) |node| {
-            self.scratch_neighbor0[node] = self.prev[node];
-            self.scratch_neighbor1[node] = self.next[node];
+            self.scratch_neighbor0[node] = self.tourPrev(node);
+            self.scratch_neighbor1[node] = self.tourNext(node);
         }
 
         for (0..removed_count) |i| {
@@ -1499,16 +1499,35 @@ pub const LocalSearch = struct {
     }
 
     // --- Tour ADT seam (architecture H2) ------------------------------------
-    // The search/move logic reaches the tour ONLY through these accessors, never
-    // through the raw next/prev/pos arrays. For the array representation they are
-    // identity wrappers (inlined, zero cost), so this is a no-op refactor; the
-    // point is the boundary — swapping in a two-level list (math.html R1) becomes
-    // a reimplementation of this surface plus the node-based segment queries
-    // (circularSegmentSize / nodeInCircularSegment / segmentIsNoMoreThanHalf /
-    // between / isTourEdge), with no call-site churn. tourSeq returns an opaque
-    // tour-order token: comparing two tokens is valid in any representation;
+    // Every node-keyed tour query in the search/move logic now goes through this
+    // surface, never the raw next/prev/pos arrays (verified by grep: the only
+    // remaining raw reads are these accessor bodies, the reverseSegment/
+    // rebuildPositions impl, and debugTourIsValid, which validates the cache).
+    // Full seam surface, with the R1 (two-level list) reimplementation target:
+    //   tourNext / tourPrev          -> O(1) linked successors    (next / prev)
+    //   tourSeq                      -> opaque tour-order token    (sequenceId)
+    //   nodeInCircularSegment        -> betweenness on tokens      (order a,b,c)
+    //   circularSegmentSize /
+    //     segmentIsNoMoreThanHalf    -> segment span on tokens
+    //   isTourEdge                   -> adjacency
+    //   reverseBetween               -> segment reversal           (reverse a,b)
+    //   tour[] (read-only iteration) -> materialized order         (materialize)
+    // For the array impl the first three are identity wrappers (inlined, zero
+    // cost). A token is opaque: comparing two tokens is valid in any rep;
     // arithmetic on it (token+1) is array-specific and confined to the warm-up
-    // sweeps that R1 rewrites as next()-walks.
+    // sweeps, which iterate the materialized tour[] directly and which R1
+    // rewrites as next()-walks.
+    //
+    // STALENESS CONTRACT (the item-11 HARD GATE for R1): next/prev is a CACHE,
+    // rebuilt wholesale by rebuildState() (via TourView.rebuild). reverseSegment
+    // updates tour+pos but NOT next/prev, so tourSeq is always current after a
+    // flip while tourNext/tourPrev are STALE until the next rebuildState. The LK
+    // core rebuilds after every applied move, so it reads next/prev only when
+    // current; the warm-up sweeps deliberately avoid next/prev (tourSeq + tour[]
+    // only). R1's prerequisite is to make next/prev always-current (maintained
+    // incrementally inside reverseSegment) so the sweeps can become next-walks
+    // and the per-move O(n) rebuildState can be dropped — that change is R1's,
+    // not this item's (it is a trajectory-neutral perf change, not a no-op).
     inline fn tourNext(self: *const LocalSearch, c: usize) usize {
         return self.next[c];
     }
