@@ -15,6 +15,7 @@ const tourEdgeInSlice = tour_mod.tourEdgeInSlice;
 const removeTourEdgeFromSlice = tour_mod.removeTourEdgeFromSlice;
 const sameUndirectedEdge = tour_mod.sameUndirectedEdge;
 const SolveStats = solver.SolveStats;
+const SolverWorkspace = solver.SolverWorkspace;
 
 /// Caller-owned hard constraint: edges the local search must never break. The
 /// legitimate, non-heuristic successor to the deleted edge-freeze voting
@@ -39,28 +40,18 @@ pub const LocalSearch = struct {
     // struct, not in the ephemeral TourView, so they vote into stats in place.
     stats: *SolveStats,
     candidates: *const Candidates,
+    // The tour-order representation. Kept as its own field (NOT in ws) because
+    // the IPT/EAX merge path shallow-copies the LocalSearch and repoints just
+    // this slice at a shadow tour, sharing every other buffer — see the round-5
+    // aliasing note. pos/next/prev are a cache over this tour and stay in ws
+    // (the merge rebuilds them), so they are shared exactly as before.
     tour: []usize,
-    pos: []usize,
-    next: []usize,
-    prev: []usize,
-    candidate_tour: []usize,
-    scratch_neighbor0: []usize,
-    scratch_neighbor1: []usize,
-    scratch_seen: []bool,
-    segment_of_node: []usize,
-    rank_in_segment: []usize,
-    segment_start: []usize,
-    segment_len: []usize,
-    segment_reversed: []bool,
-    move_degree_delta: []i8,
-    move_component: []usize,
-    move_component_size: []usize,
-    move_edges: []TourEdge,
-    lk_t: []usize,
-    removed_a: []usize,
-    removed_b: []usize,
-    added_a: []usize,
-    added_b: []usize,
+    // All other per-trial scratch buffers live in the SolverWorkspace, reached
+    // through this pointer (H3): one owner, no shallow-copied slice headers to
+    // keep in sync between the workspace and the search. The hot fields
+    // (ws.pos/next/prev, ws.removed_*/added_*/lk_t) are one extra register hop
+    // the optimizer hoists, so this is bit-identical and perf-neutral.
+    ws: *SolverWorkspace,
     max_passes: usize,
     enable_or_opt: bool,
     enable_bounded_three_opt_cleanup: bool,
@@ -73,8 +64,6 @@ pub const LocalSearch = struct {
     // break. Null in the whole current solve path, so all moves are unchanged.
     pinned_edges: ?*const PinnedEdges = null,
     lk_nodes_this_pass: usize = 0,
-    lk_active: []bool,
-    lk_active_queue: []usize,
     lk_active_head: usize = 0,
     lk_active_count: usize = 0,
     // Roadmap item 2 (incremental bookkeeping): the tour length, maintained
@@ -90,43 +79,43 @@ pub const LocalSearch = struct {
     // re-examined; an improving move reactivates every endpoint it touched.
     pub fn lkActivateAll(self: *LocalSearch) void {
         const n = self.tour.len;
-        @memset(self.lk_active, true);
-        @memcpy(self.lk_active_queue, self.tour);
+        @memset(self.ws.lk_active, true);
+        @memcpy(self.ws.lk_active_queue, self.tour);
         self.lk_active_head = 0;
         self.lk_active_count = n;
     }
 
     pub fn lkResetActive(self: *LocalSearch) void {
-        @memset(self.lk_active, false);
+        @memset(self.ws.lk_active, false);
         self.lk_active_head = 0;
         self.lk_active_count = 0;
     }
 
     pub fn lkActivate(self: *LocalSearch, node: usize) void {
-        if (self.lk_active[node]) return;
-        self.lk_active[node] = true;
-        const slot = (self.lk_active_head + self.lk_active_count) % self.lk_active_queue.len;
-        self.lk_active_queue[slot] = node;
+        if (self.ws.lk_active[node]) return;
+        self.ws.lk_active[node] = true;
+        const slot = (self.lk_active_head + self.lk_active_count) % self.ws.lk_active_queue.len;
+        self.ws.lk_active_queue[slot] = node;
         self.lk_active_count += 1;
     }
 
     pub fn lkPopActive(self: *LocalSearch) ?usize {
         if (self.lk_active_count == 0) return null;
-        const node = self.lk_active_queue[self.lk_active_head];
-        self.lk_active_head = (self.lk_active_head + 1) % self.lk_active_queue.len;
+        const node = self.ws.lk_active_queue[self.lk_active_head];
+        self.lk_active_head = (self.lk_active_head + 1) % self.ws.lk_active_queue.len;
         self.lk_active_count -= 1;
-        self.lk_active[node] = false;
+        self.ws.lk_active[node] = false;
         return node;
     }
 
     pub fn lkActivateMoveEndpoints(self: *LocalSearch, removed_count: usize, added_count: usize) void {
         for (0..removed_count) |i| {
-            self.lkActivate(self.removed_a[i]);
-            self.lkActivate(self.removed_b[i]);
+            self.lkActivate(self.ws.removed_a[i]);
+            self.lkActivate(self.ws.removed_b[i]);
         }
         for (0..added_count) |i| {
-            self.lkActivate(self.added_a[i]);
-            self.lkActivate(self.added_b[i]);
+            self.lkActivate(self.ws.added_a[i]);
+            self.lkActivate(self.ws.added_b[i]);
         }
     }
 
@@ -219,14 +208,14 @@ pub const LocalSearch = struct {
                 stats.lk_nonseq_attempts += 1;
                 breadth += 1;
 
-                self.removed_a[0] = s1;
-                self.removed_b[0] = s2;
-                self.removed_a[1] = s3;
-                self.removed_b[1] = s4;
-                self.added_a[0] = s2;
-                self.added_b[0] = s3;
-                self.added_a[1] = s4;
-                self.added_b[1] = s1;
+                self.ws.removed_a[0] = s1;
+                self.ws.removed_b[0] = s2;
+                self.ws.removed_a[1] = s3;
+                self.ws.removed_b[1] = s4;
+                self.ws.added_a[0] = s2;
+                self.ws.added_b[0] = s3;
+                self.ws.added_a[1] = s4;
+                self.ws.added_b[1] = s1;
 
                 if (self.testAndApplyGain23BridgeMove(2, stats)) {
                     stats.lk_completion_accepted += 1;
@@ -289,22 +278,22 @@ pub const LocalSearch = struct {
                     stats.lk_completion_attempts += 1;
                     stats.lk_nonseq_attempts += 1;
 
-                    self.removed_a[0] = s1;
-                    self.removed_b[0] = s2;
-                    self.removed_a[1] = s3;
-                    self.removed_b[1] = s4;
-                    self.removed_a[2] = t1;
-                    self.removed_b[2] = t2;
-                    self.removed_a[3] = t3;
-                    self.removed_b[3] = t4;
-                    self.added_a[0] = s2;
-                    self.added_b[0] = s3;
-                    self.added_a[1] = s4;
-                    self.added_b[1] = s1;
-                    self.added_a[2] = t2;
-                    self.added_b[2] = t3;
-                    self.added_a[3] = t4;
-                    self.added_b[3] = t1;
+                    self.ws.removed_a[0] = s1;
+                    self.ws.removed_b[0] = s2;
+                    self.ws.removed_a[1] = s3;
+                    self.ws.removed_b[1] = s4;
+                    self.ws.removed_a[2] = t1;
+                    self.ws.removed_b[2] = t2;
+                    self.ws.removed_a[3] = t3;
+                    self.ws.removed_b[3] = t4;
+                    self.ws.added_a[0] = s2;
+                    self.ws.added_b[0] = s3;
+                    self.ws.added_a[1] = s4;
+                    self.ws.added_b[1] = s1;
+                    self.ws.added_a[2] = t2;
+                    self.ws.added_b[2] = t3;
+                    self.ws.added_a[3] = t4;
+                    self.ws.added_b[3] = t1;
 
                     if (self.testAndApplyGain23BridgeMove(4, stats)) {
                         stats.lk_completion_accepted += 1;
@@ -399,18 +388,18 @@ pub const LocalSearch = struct {
                 stats.lk_completion_attempts += 1;
                 stats.lk_nonseq_attempts += 1;
 
-                self.removed_a[0] = s1;
-                self.removed_b[0] = s2;
-                self.removed_a[1] = s3;
-                self.removed_b[1] = s4;
-                self.removed_a[2] = s5;
-                self.removed_b[2] = s6;
-                self.added_a[0] = s2;
-                self.added_b[0] = s3;
-                self.added_a[1] = s4;
-                self.added_b[1] = s5;
-                self.added_a[2] = s6;
-                self.added_b[2] = s1;
+                self.ws.removed_a[0] = s1;
+                self.ws.removed_b[0] = s2;
+                self.ws.removed_a[1] = s3;
+                self.ws.removed_b[1] = s4;
+                self.ws.removed_a[2] = s5;
+                self.ws.removed_b[2] = s6;
+                self.ws.added_a[0] = s2;
+                self.ws.added_b[0] = s3;
+                self.ws.added_a[1] = s4;
+                self.ws.added_b[1] = s5;
+                self.ws.added_a[2] = s6;
+                self.ws.added_b[2] = s1;
 
                 if (self.testAndApplyGain23BridgeMove(3, stats)) {
                     stats.lk_completion_accepted += 1;
@@ -448,10 +437,10 @@ pub const LocalSearch = struct {
                     return moves;
                 }
                 stats.lk_attempts += 1;
-                self.lk_t[0] = t1;
-                self.lk_t[1] = t2;
-                self.removed_a[0] = t1;
-                self.removed_b[0] = t2;
+                self.ws.lk_t[0] = t1;
+                self.ws.lk_t[1] = t2;
+                self.ws.removed_a[0] = t1;
+                self.ws.removed_b[0] = t2;
                 const gain: i64 = @intCast(self.dist.distance(t1, t2));
                 if (self.searchAdded(1, t2, gain, stats)) {
                     moves += 1;
@@ -484,7 +473,7 @@ pub const LocalSearch = struct {
     pub fn searchAdded(self: *LocalSearch, depth: usize, even: usize, gain: i64, stats: *SolveStats) bool {
         if (!self.recordLKNode(stats)) return false;
         const sequence_len = 2 * depth;
-        const t1 = self.lk_t[0];
+        const t1 = self.ws.lk_t[0];
         // Backtracking discipline: beyond lk_backtrack_depth the search
         // commits to the first viable candidate instead of retrying siblings
         // after a failed subtree.
@@ -493,8 +482,8 @@ pub const LocalSearch = struct {
             if (odd_next == t1) continue;
             if (self.vertexInSequence(odd_next, sequence_len)) continue;
             if (self.isTourEdge(even, odd_next)) continue;
-            if (self.edgeInList(even, odd_next, self.removed_a, self.removed_b, depth)) continue;
-            if (self.edgeInList(even, odd_next, self.added_a, self.added_b, depth - 1)) continue;
+            if (self.edgeInList(even, odd_next, self.ws.removed_a, self.ws.removed_b, depth)) continue;
+            if (self.edgeInList(even, odd_next, self.ws.added_a, self.ws.added_b, depth - 1)) continue;
 
             const edge_cost: i64 = @intCast(self.candidates.candDist(even, ci));
             const next_gain = gain - edge_cost;
@@ -509,9 +498,9 @@ pub const LocalSearch = struct {
                 continue;
             }
 
-            self.added_a[depth - 1] = even;
-            self.added_b[depth - 1] = odd_next;
-            self.lk_t[sequence_len] = odd_next;
+            self.ws.added_a[depth - 1] = even;
+            self.ws.added_b[depth - 1] = odd_next;
+            self.ws.lk_t[sequence_len] = odd_next;
             if (self.searchRemoved(depth + 1, odd_next, next_gain, stats)) return true;
             if (greedy) return false;
         }
@@ -525,25 +514,25 @@ pub const LocalSearch = struct {
         var choices = [2]usize{ self.tourNext(odd), self.tourPrev(odd) };
         self.orderTourEdgeChoices(odd, &choices);
         const sequence_len_before_even = 2 * depth - 1;
-        const t1 = self.lk_t[0];
+        const t1 = self.ws.lk_t[0];
         const greedy = depth > self.lk_backtrack_depth;
 
         for (choices) |even| {
             if (even == t1) continue;
             if (self.vertexInSequence(even, sequence_len_before_even)) continue;
-            if (self.edgeInList(odd, even, self.removed_a, self.removed_b, depth - 1)) continue;
-            if (self.edgeInList(odd, even, self.added_a, self.added_b, depth - 1)) continue;
+            if (self.edgeInList(odd, even, self.ws.removed_a, self.ws.removed_b, depth - 1)) continue;
+            if (self.edgeInList(odd, even, self.ws.added_a, self.ws.added_b, depth - 1)) continue;
 
-            self.removed_a[depth - 1] = odd;
-            self.removed_b[depth - 1] = even;
-            self.lk_t[sequence_len_before_even] = even;
+            self.ws.removed_a[depth - 1] = odd;
+            self.ws.removed_b[depth - 1] = even;
+            self.ws.lk_t[sequence_len_before_even] = even;
             const gain_with_removed = gain + @as(i64, @intCast(self.dist.distance(odd, even)));
             const closing_cost: i64 = @intCast(self.dist.distance(even, t1));
             const closing_gain = gain_with_removed - closing_cost;
 
-            if (closing_gain > 0 and !self.edgeInList(even, t1, self.added_a, self.added_b, depth - 1)) {
-                self.added_a[depth - 1] = even;
-                self.added_b[depth - 1] = t1;
+            if (closing_gain > 0 and !self.edgeInList(even, t1, self.ws.added_a, self.ws.added_b, depth - 1)) {
+                self.ws.added_a[depth - 1] = even;
+                self.ws.added_b[depth - 1] = t1;
                 if (self.testAndApplyMove(depth, depth, stats)) return true;
                 stats.lk_rejected_closing_moves += 1;
             }
@@ -566,14 +555,14 @@ pub const LocalSearch = struct {
     }
 
     pub fn tryLKCompletion2Opt(self: *LocalSearch, depth: usize, even: usize, gain: i64, stats: *SolveStats) bool {
-        const t1 = self.lk_t[0];
+        const t1 = self.ws.lk_t[0];
         var tried: usize = 0;
         for (self.candidates.row(even), 0..) |u, ci| {
             if (tried >= self.lk_nonseq_branch_limit) break;
             if (u == t1 or self.vertexInSequence(u, 2 * depth)) continue;
             if (self.isTourEdge(even, u)) continue;
-            if (self.edgeInList(even, u, self.removed_a, self.removed_b, depth)) continue;
-            if (self.edgeInList(even, u, self.added_a, self.added_b, depth - 1)) continue;
+            if (self.edgeInList(even, u, self.ws.removed_a, self.ws.removed_b, depth)) continue;
+            if (self.edgeInList(even, u, self.ws.added_a, self.ws.added_b, depth - 1)) continue;
             if (!self.recordLKNode(stats)) return false;
             stats.lk_completion_attempts += 1;
             tried += 1;
@@ -588,25 +577,25 @@ pub const LocalSearch = struct {
             self.orderTourEdgeChoices(u, &choices);
             for (choices) |v| {
                 if (v == t1 or self.vertexInSequence(v, 2 * depth)) continue;
-                if (self.edgeInList(u, v, self.removed_a, self.removed_b, depth)) continue;
-                if (self.edgeInList(u, v, self.added_a, self.added_b, depth - 1)) continue;
+                if (self.edgeInList(u, v, self.ws.removed_a, self.ws.removed_b, depth)) continue;
+                if (self.edgeInList(u, v, self.ws.added_a, self.ws.added_b, depth - 1)) continue;
 
                 const after_remove = after_first_add + @as(i64, @intCast(self.dist.distance(u, v)));
                 if (after_remove <= @as(i64, @intCast(self.dist.distance(v, t1)))) {
                     stats.lk_completion_rejected += 1;
                     continue;
                 }
-                if (sameUndirectedEdge(v, t1, even, u) or self.edgeInList(v, t1, self.added_a, self.added_b, depth - 1)) {
+                if (sameUndirectedEdge(v, t1, even, u) or self.edgeInList(v, t1, self.ws.added_a, self.ws.added_b, depth - 1)) {
                     stats.lk_completion_rejected += 1;
                     continue;
                 }
 
-                self.added_a[depth - 1] = even;
-                self.added_b[depth - 1] = u;
-                self.removed_a[depth] = u;
-                self.removed_b[depth] = v;
-                self.added_a[depth] = v;
-                self.added_b[depth] = t1;
+                self.ws.added_a[depth - 1] = even;
+                self.ws.added_b[depth - 1] = u;
+                self.ws.removed_a[depth] = u;
+                self.ws.removed_b[depth] = v;
+                self.ws.added_a[depth] = v;
+                self.ws.added_b[depth] = t1;
                 if (self.testAndApplyCompletionMove(depth + 1, depth + 1, stats)) {
                     stats.lk_completion_accepted += 1;
                     stats.lk_completion_2opt_hits += 1;
@@ -619,14 +608,14 @@ pub const LocalSearch = struct {
     }
 
     pub fn tryLKCompletion3Opt(self: *LocalSearch, depth: usize, even: usize, gain: i64, stats: *SolveStats) bool {
-        const t1 = self.lk_t[0];
+        const t1 = self.ws.lk_t[0];
         var tried: usize = 0;
         for (self.candidates.row(even), 0..) |u, ci| {
             if (tried >= self.lk_nonseq_branch_limit) break;
             if (u == t1 or self.vertexInSequence(u, 2 * depth)) continue;
             if (self.isTourEdge(even, u)) continue;
-            if (self.edgeInList(even, u, self.removed_a, self.removed_b, depth)) continue;
-            if (self.edgeInList(even, u, self.added_a, self.added_b, depth - 1)) continue;
+            if (self.edgeInList(even, u, self.ws.removed_a, self.ws.removed_b, depth)) continue;
+            if (self.edgeInList(even, u, self.ws.added_a, self.ws.added_b, depth - 1)) continue;
             if (!self.recordLKNode(stats)) return false;
             stats.lk_completion_attempts += 1;
             tried += 1;
@@ -641,8 +630,8 @@ pub const LocalSearch = struct {
             self.orderTourEdgeChoices(u, &first_remove_choices);
             for (first_remove_choices) |v| {
                 if (v == t1 or self.vertexInSequence(v, 2 * depth)) continue;
-                if (self.edgeInList(u, v, self.removed_a, self.removed_b, depth)) continue;
-                if (self.edgeInList(u, v, self.added_a, self.added_b, depth - 1)) continue;
+                if (self.edgeInList(u, v, self.ws.removed_a, self.ws.removed_b, depth)) continue;
+                if (self.edgeInList(u, v, self.ws.added_a, self.ws.added_b, depth - 1)) continue;
 
                 const after_first_remove = after_first_add + @as(i64, @intCast(self.dist.distance(u, v)));
                 if (after_first_remove <= 0) {
@@ -654,9 +643,9 @@ pub const LocalSearch = struct {
                     if (w == t1 or w == even or w == u) continue;
                     if (self.vertexInSequence(w, 2 * depth)) continue;
                     if (self.isTourEdge(v, w)) continue;
-                    if (self.edgeInList(v, w, self.removed_a, self.removed_b, depth)) continue;
+                    if (self.edgeInList(v, w, self.ws.removed_a, self.ws.removed_b, depth)) continue;
                     if (sameUndirectedEdge(v, w, even, u)) continue;
-                    if (self.edgeInList(v, w, self.added_a, self.added_b, depth - 1)) continue;
+                    if (self.edgeInList(v, w, self.ws.added_a, self.ws.added_b, depth - 1)) continue;
 
                     const after_second_add = after_first_remove - @as(i64, @intCast(self.candidates.candDist(v, wi)));
                     if (after_second_add <= 0) continue;
@@ -667,30 +656,30 @@ pub const LocalSearch = struct {
                         if (x == t1 or x == even or x == u or x == v) continue;
                         if (self.vertexInSequence(x, 2 * depth)) continue;
                         if (sameUndirectedEdge(w, x, u, v)) continue;
-                        if (self.edgeInList(w, x, self.removed_a, self.removed_b, depth)) continue;
+                        if (self.edgeInList(w, x, self.ws.removed_a, self.ws.removed_b, depth)) continue;
                         if (sameUndirectedEdge(w, x, even, u) or sameUndirectedEdge(w, x, v, w)) continue;
-                        if (self.edgeInList(w, x, self.added_a, self.added_b, depth - 1)) continue;
+                        if (self.edgeInList(w, x, self.ws.added_a, self.ws.added_b, depth - 1)) continue;
 
                         const after_second_remove = after_second_add + @as(i64, @intCast(self.dist.distance(w, x)));
                         if (after_second_remove <= @as(i64, @intCast(self.dist.distance(x, t1)))) {
                             stats.lk_completion_rejected += 1;
                             continue;
                         }
-                        if (sameUndirectedEdge(x, t1, even, u) or sameUndirectedEdge(x, t1, v, w) or self.edgeInList(x, t1, self.added_a, self.added_b, depth - 1)) {
+                        if (sameUndirectedEdge(x, t1, even, u) or sameUndirectedEdge(x, t1, v, w) or self.edgeInList(x, t1, self.ws.added_a, self.ws.added_b, depth - 1)) {
                             stats.lk_completion_rejected += 1;
                             continue;
                         }
 
-                        self.added_a[depth - 1] = even;
-                        self.added_b[depth - 1] = u;
-                        self.removed_a[depth] = u;
-                        self.removed_b[depth] = v;
-                        self.added_a[depth] = v;
-                        self.added_b[depth] = w;
-                        self.removed_a[depth + 1] = w;
-                        self.removed_b[depth + 1] = x;
-                        self.added_a[depth + 1] = x;
-                        self.added_b[depth + 1] = t1;
+                        self.ws.added_a[depth - 1] = even;
+                        self.ws.added_b[depth - 1] = u;
+                        self.ws.removed_a[depth] = u;
+                        self.ws.removed_b[depth] = v;
+                        self.ws.added_a[depth] = v;
+                        self.ws.added_b[depth] = w;
+                        self.ws.removed_a[depth + 1] = w;
+                        self.ws.removed_b[depth + 1] = x;
+                        self.ws.added_a[depth + 1] = x;
+                        self.ws.added_b[depth + 1] = t1;
                         if (self.testAndApplyCompletionMove(depth + 2, depth + 2, stats)) {
                             stats.lk_completion_accepted += 1;
                             stats.lk_completion_3opt_hits += 1;
@@ -759,48 +748,48 @@ pub const LocalSearch = struct {
         pattern: BoundedThreeOptCleanupPattern,
         stats: *SolveStats,
     ) bool {
-        self.removed_a[0] = a;
-        self.removed_b[0] = b;
-        self.removed_a[1] = c;
-        self.removed_b[1] = d;
-        self.removed_a[2] = e;
-        self.removed_b[2] = f;
+        self.ws.removed_a[0] = a;
+        self.ws.removed_b[0] = b;
+        self.ws.removed_a[1] = c;
+        self.ws.removed_b[1] = d;
+        self.ws.removed_a[2] = e;
+        self.ws.removed_b[2] = f;
 
         const added_cost: u64 = switch (pattern) {
             .case_a => blk: {
-                self.added_a[0] = a;
-                self.added_b[0] = c;
-                self.added_a[1] = b;
-                self.added_b[1] = e;
-                self.added_a[2] = d;
-                self.added_b[2] = f;
+                self.ws.added_a[0] = a;
+                self.ws.added_b[0] = c;
+                self.ws.added_a[1] = b;
+                self.ws.added_b[1] = e;
+                self.ws.added_a[2] = d;
+                self.ws.added_b[2] = f;
                 break :blk self.dist.distance(a, c) + @as(u64, self.dist.distance(b, e)) + self.dist.distance(d, f);
             },
             .case_b => blk: {
-                self.added_a[0] = a;
-                self.added_b[0] = d;
-                self.added_a[1] = e;
-                self.added_b[1] = b;
-                self.added_a[2] = c;
-                self.added_b[2] = f;
+                self.ws.added_a[0] = a;
+                self.ws.added_b[0] = d;
+                self.ws.added_a[1] = e;
+                self.ws.added_b[1] = b;
+                self.ws.added_a[2] = c;
+                self.ws.added_b[2] = f;
                 break :blk self.dist.distance(a, d) + @as(u64, self.dist.distance(e, b)) + self.dist.distance(c, f);
             },
             .case_c => blk: {
-                self.added_a[0] = a;
-                self.added_b[0] = e;
-                self.added_a[1] = d;
-                self.added_b[1] = b;
-                self.added_a[2] = c;
-                self.added_b[2] = f;
+                self.ws.added_a[0] = a;
+                self.ws.added_b[0] = e;
+                self.ws.added_a[1] = d;
+                self.ws.added_b[1] = b;
+                self.ws.added_a[2] = c;
+                self.ws.added_b[2] = f;
                 break :blk self.dist.distance(a, e) + @as(u64, self.dist.distance(d, b)) + self.dist.distance(c, f);
             },
             .case_d => blk: {
-                self.added_a[0] = a;
-                self.added_b[0] = c;
-                self.added_a[1] = b;
-                self.added_b[1] = d;
-                self.added_a[2] = e;
-                self.added_b[2] = f;
+                self.ws.added_a[0] = a;
+                self.ws.added_b[0] = c;
+                self.ws.added_a[1] = b;
+                self.ws.added_b[1] = d;
+                self.ws.added_a[2] = e;
+                self.ws.added_b[2] = f;
                 break :blk self.dist.distance(a, c) + @as(u64, self.dist.distance(b, d)) + self.dist.distance(e, f);
             },
         };
@@ -857,26 +846,26 @@ pub const LocalSearch = struct {
     pub fn planAndApplyMoveInternal(self: *LocalSearch, removed_count: usize, added_count: usize, stats: *SolveStats, allow_completion_patch: bool, skip_structurally_impossible_fallback: bool) bool {
         stats.move_plan_attempts += 1;
         for (0..removed_count) |i| {
-            self.move_edges[i] = .{ .a = self.removed_a[i], .b = self.removed_b[i] };
+            self.ws.move_edges[i] = .{ .a = self.ws.removed_a[i], .b = self.ws.removed_b[i] };
         }
         for (0..added_count) |i| {
-            self.move_edges[removed_count + i] = .{ .a = self.added_a[i], .b = self.added_b[i] };
+            self.ws.move_edges[removed_count + i] = .{ .a = self.ws.added_a[i], .b = self.ws.added_b[i] };
         }
 
-        const removed_edges = self.move_edges[0..removed_count];
-        const added_edges = self.move_edges[removed_count .. removed_count + added_count];
+        const removed_edges = self.ws.move_edges[0..removed_count];
+        const added_edges = self.ws.move_edges[removed_count .. removed_count + added_count];
         var view = self.tourView();
         if (skip_structurally_impossible_fallback and !self.moveDeltaHasValidEdgeSet(&view, removed_edges, added_edges)) return false;
         var plan = MovePlan.init(removed_edges, added_edges);
-        @memcpy(self.candidate_tour, self.tour);
+        @memcpy(self.ws.candidate_tour, self.tour);
         if (!plan.validate(
             &view,
-            self.move_degree_delta,
-            self.scratch_neighbor0,
-            self.scratch_neighbor1,
-            self.move_component,
-            self.move_component_size,
-            self.scratch_seen,
+            self.ws.move_degree_delta,
+            self.ws.scratch_neighbor0,
+            self.ws.scratch_neighbor1,
+            self.ws.move_component,
+            self.ws.move_component_size,
+            self.ws.scratch_seen,
         )) {
             if (skip_structurally_impossible_fallback) return false;
             stats.move_plan_invalid_fallbacks += 1;
@@ -908,24 +897,24 @@ pub const LocalSearch = struct {
     pub fn moveDeltaHasValidEdgeSet(self: *LocalSearch, view: *const TourView, removed_edges: []const TourEdge, added_edges: []const TourEdge) bool {
         const n = view.len();
         if (removed_edges.len == 0 or removed_edges.len != added_edges.len) return false;
-        @memset(self.move_degree_delta, 0);
+        @memset(self.ws.move_degree_delta, 0);
 
         for (removed_edges, 0..) |edge, i| {
             if (!MovePlan.validEdge(edge, n)) return false;
             if (!view.isTourEdge(edge.a, edge.b)) return false;
             if (tourEdgeInSlice(edge, removed_edges[0..i])) return false;
-            self.move_degree_delta[edge.a] -= 1;
-            self.move_degree_delta[edge.b] -= 1;
+            self.ws.move_degree_delta[edge.a] -= 1;
+            self.ws.move_degree_delta[edge.b] -= 1;
         }
         for (added_edges, 0..) |edge, i| {
             if (!MovePlan.validEdge(edge, n)) return false;
             if (view.isTourEdge(edge.a, edge.b)) return false;
             if (tourEdgeInSlice(edge, added_edges[0..i])) return false;
             if (tourEdgeInSlice(edge, removed_edges)) return false;
-            self.move_degree_delta[edge.a] += 1;
-            self.move_degree_delta[edge.b] += 1;
+            self.ws.move_degree_delta[edge.a] += 1;
+            self.ws.move_degree_delta[edge.b] += 1;
         }
-        for (self.move_degree_delta) |delta| {
+        for (self.ws.move_degree_delta) |delta| {
             if (delta != 0) return false;
         }
         return true;
@@ -942,20 +931,20 @@ pub const LocalSearch = struct {
         var best_bridge1: TourEdge = undefined;
         var best_gain: i64 = 0;
         const patched_start = removed_count + added_count;
-        const patched_removed = self.move_edges[patched_start .. patched_start + removed_count + 2];
-        const patched_added = self.move_edges[patched_start + removed_count + 2 .. patched_start + removed_count + added_count + 4];
+        const patched_removed = self.ws.move_edges[patched_start .. patched_start + removed_count + 2];
+        const patched_added = self.ws.move_edges[patched_start + removed_count + 2 .. patched_start + removed_count + added_count + 4];
 
         // Candidate-row scan over the smaller component only (LKH PatchCycles:
         // in-edges come from candidate sets). The previous exhaustive O(n^2)
         // edge-pair scan for n > 128 dominated total runtime once patching
         // started firing on every nonsequential close.
-        const smaller_component = if (self.move_component_size[0] <= self.move_component_size[1]) @as(usize, 0) else @as(usize, 1);
+        const smaller_component = if (self.ws.move_component_size[0] <= self.ws.move_component_size[1]) @as(usize, 0) else @as(usize, 1);
         for (0..n) |a| {
-            if (self.move_component[a] != smaller_component) continue;
-            const neighbors = [2]usize{ self.scratch_neighbor0[a], self.scratch_neighbor1[a] };
+            if (self.ws.move_component[a] != smaller_component) continue;
+            const neighbors = [2]usize{ self.ws.scratch_neighbor0[a], self.ws.scratch_neighbor1[a] };
             for (neighbors) |b| {
                 if (b == std.math.maxInt(usize) or a > b) continue;
-                if (self.move_component[a] != self.move_component[b]) continue;
+                if (self.ws.move_component[a] != self.ws.move_component[b]) continue;
                 self.tryPatchCandidatesFromEndpoint(
                     a,
                     b,
@@ -1010,12 +999,12 @@ pub const LocalSearch = struct {
         var patched_plan = MovePlan.init(final_removed, final_added);
         if (!patched_plan.validate(
             &view,
-            self.move_degree_delta,
-            self.scratch_neighbor0,
-            self.scratch_neighbor1,
-            self.move_component,
-            self.move_component_size,
-            self.scratch_seen,
+            self.ws.move_degree_delta,
+            self.ws.scratch_neighbor0,
+            self.ws.scratch_neighbor1,
+            self.ws.move_component,
+            self.ws.move_component_size,
+            self.ws.scratch_seen,
         ) or patched_plan.component_count != 1) {
             stats.move_plan_patch_rejected += 1;
             return false;
@@ -1027,25 +1016,25 @@ pub const LocalSearch = struct {
         }
         self.stats.tour_rebuilds += 1;
         if (std.debug.runtime_safety and (!self.debugTourIsValid() or !self.debugSegmentMatchesFlatMaterialization())) {
-            @memcpy(self.tour, self.candidate_tour);
+            @memcpy(self.tour, self.ws.candidate_tour);
             self.rebuildState();
             stats.move_plan_patch_rejected += 1;
             return false;
         }
-        const before_len = self.dist.tourLengthUnchecked(self.candidate_tour) catch {
-            @memcpy(self.tour, self.candidate_tour);
+        const before_len = self.dist.tourLengthUnchecked(self.ws.candidate_tour) catch {
+            @memcpy(self.tour, self.ws.candidate_tour);
             self.rebuildState();
             stats.move_plan_patch_rejected += 1;
             return false;
         };
         const after_len = self.dist.tourLengthUnchecked(self.tour) catch {
-            @memcpy(self.tour, self.candidate_tour);
+            @memcpy(self.tour, self.ws.candidate_tour);
             self.rebuildState();
             stats.move_plan_patch_rejected += 1;
             return false;
         };
         if (after_len >= before_len) {
-            @memcpy(self.tour, self.candidate_tour);
+            @memcpy(self.tour, self.ws.candidate_tour);
             self.rebuildState();
             stats.move_plan_patch_rejected += 1;
             return false;
@@ -1080,11 +1069,11 @@ pub const LocalSearch = struct {
         best_bridge1: *TourEdge,
     ) void {
         for (self.candidates.row(endpoint)) |other| {
-            if (self.move_component[other] == self.move_component[endpoint]) continue;
-            const neighbor_choices = [2]usize{ self.scratch_neighbor0[other], self.scratch_neighbor1[other] };
+            if (self.ws.move_component[other] == self.ws.move_component[endpoint]) continue;
+            const neighbor_choices = [2]usize{ self.ws.scratch_neighbor0[other], self.ws.scratch_neighbor1[other] };
             for (neighbor_choices) |other_mate| {
                 if (other_mate == std.math.maxInt(usize)) continue;
-                if (self.move_component[other_mate] != self.move_component[other]) continue;
+                if (self.ws.move_component[other_mate] != self.ws.move_component[other]) continue;
                 if (other_mate == endpoint or other_mate == mate) continue;
 
                 self.recordPatchCandidate(
@@ -1190,11 +1179,11 @@ pub const LocalSearch = struct {
         var removed_len: usize = 0;
         var added_len: usize = 0;
         for (0..removed_count) |i| {
-            out_removed[removed_len] = .{ .a = self.removed_a[i], .b = self.removed_b[i] };
+            out_removed[removed_len] = .{ .a = self.ws.removed_a[i], .b = self.ws.removed_b[i] };
             removed_len += 1;
         }
         for (0..added_count) |i| {
-            out_added[added_len] = .{ .a = self.added_a[i], .b = self.added_b[i] };
+            out_added[added_len] = .{ .a = self.ws.added_a[i], .b = self.ws.added_b[i] };
             added_len += 1;
         }
 
@@ -1258,22 +1247,22 @@ pub const LocalSearch = struct {
     }
 
     pub fn applyMoveWithHamiltonianFallback(self: *LocalSearch, removed_count: usize, added_count: usize, stats: *SolveStats) bool {
-        @memcpy(self.move_component_size, self.candidate_tour);
-        @memcpy(self.tour, self.candidate_tour);
+        @memcpy(self.ws.move_component_size, self.ws.candidate_tour);
+        @memcpy(self.tour, self.ws.candidate_tour);
         self.rebuildState();
-        if (!self.buildMoveTour(removed_count, added_count, self.candidate_tour)) {
-            @memcpy(self.tour, self.move_component_size);
-            @memcpy(self.candidate_tour, self.move_component_size);
+        if (!self.buildMoveTour(removed_count, added_count, self.ws.candidate_tour)) {
+            @memcpy(self.tour, self.ws.move_component_size);
+            @memcpy(self.ws.candidate_tour, self.ws.move_component_size);
             self.rebuildState();
             return false;
         }
-        @memcpy(self.tour, self.candidate_tour);
+        @memcpy(self.tour, self.ws.candidate_tour);
         self.rebuildState();
         const valid = !std.debug.runtime_safety or
             (self.debugTourIsValid() and self.debugSegmentMatchesFlatMaterialization());
         if (!valid) {
-            @memcpy(self.tour, self.move_component_size);
-            @memcpy(self.candidate_tour, self.move_component_size);
+            @memcpy(self.tour, self.ws.move_component_size);
+            @memcpy(self.ws.candidate_tour, self.ws.move_component_size);
             self.rebuildState();
             return false;
         }
@@ -1284,13 +1273,13 @@ pub const LocalSearch = struct {
     }
 
     pub fn applyDepth2ClosingMove(self: *LocalSearch) bool {
-        const a = self.removed_a[0];
-        const b = self.removed_b[0];
-        const c = self.removed_a[1];
-        const d = self.removed_b[1];
+        const a = self.ws.removed_a[0];
+        const b = self.ws.removed_b[0];
+        const c = self.ws.removed_a[1];
+        const d = self.ws.removed_b[1];
         if (!self.isTourEdge(a, b) or !self.isTourEdge(c, d)) return false;
-        if (!sameUndirectedEdge(self.added_a[0], self.added_b[0], b, c)) return false;
-        if (!sameUndirectedEdge(self.added_a[1], self.added_b[1], d, a)) return false;
+        if (!sameUndirectedEdge(self.ws.added_a[0], self.ws.added_b[0], b, c)) return false;
+        if (!sameUndirectedEdge(self.ws.added_a[1], self.ws.added_b[1], d, a)) return false;
 
         // The close adds (b,c) and (d,a). That is only a single-cycle 2-opt when
         // the removed edges face each other, i.e. tour ...a->b ... d->c...; the
@@ -1309,14 +1298,14 @@ pub const LocalSearch = struct {
     }
 
     pub fn debugTourIsValid(self: *LocalSearch) bool {
-        @memset(self.scratch_seen, false);
+        @memset(self.ws.scratch_seen, false);
         for (self.tour) |node| {
-            if (node >= self.tour.len or self.scratch_seen[node]) return false;
-            self.scratch_seen[node] = true;
+            if (node >= self.tour.len or self.ws.scratch_seen[node]) return false;
+            self.ws.scratch_seen[node] = true;
         }
         for (self.tour, 0..) |node, idx| {
-            if (self.next[node] != self.tour[(idx + 1) % self.tour.len]) return false;
-            if (self.prev[node] != self.tour[(idx + self.tour.len - 1) % self.tour.len]) return false;
+            if (self.ws.next[node] != self.tour[(idx + 1) % self.tour.len]) return false;
+            if (self.ws.prev[node] != self.tour[(idx + self.tour.len - 1) % self.tour.len]) return false;
         }
         return true;
     }
@@ -1327,8 +1316,8 @@ pub const LocalSearch = struct {
         // Must not materialize into candidate_tour: callers (tryPatchTwoComponents,
         // planAndApplyMoveInternal) rely on candidate_tour holding the pre-move
         // snapshot for gain comparison and restore-on-reject.
-        view.materialize(self.move_component);
-        if (!std.mem.eql(usize, self.tour, self.move_component)) return false;
+        view.materialize(self.ws.move_component);
+        if (!std.mem.eql(usize, self.tour, self.ws.move_component)) return false;
 
         const n = self.tour.len;
         const size = segmentTargetSize(n);
@@ -1336,13 +1325,13 @@ pub const LocalSearch = struct {
         var start: usize = 0;
         while (start < n) : (segment_count += 1) {
             const len = @min(size, n - start);
-            if (self.segment_start[segment_count] != start) return false;
-            if (self.segment_len[segment_count] != len) return false;
-            if (self.segment_reversed[segment_count]) return false;
+            if (self.ws.segment_start[segment_count] != start) return false;
+            if (self.ws.segment_len[segment_count] != len) return false;
+            if (self.ws.segment_reversed[segment_count]) return false;
             for (0..len) |rank| {
                 const node = self.tour[start + rank];
-                if (self.segment_of_node[node] != segment_count) return false;
-                if (self.rank_in_segment[node] != rank) return false;
+                if (self.ws.segment_of_node[node] != segment_count) return false;
+                if (self.ws.rank_in_segment[node] != rank) return false;
             }
             start += len;
         }
@@ -1352,27 +1341,27 @@ pub const LocalSearch = struct {
     pub fn buildMoveTour(self: *LocalSearch, removed_count: usize, added_count: usize, out: []usize) bool {
         const n = self.tour.len;
         for (0..n) |node| {
-            self.scratch_neighbor0[node] = self.tourPrev(node);
-            self.scratch_neighbor1[node] = self.tourNext(node);
+            self.ws.scratch_neighbor0[node] = self.tourPrev(node);
+            self.ws.scratch_neighbor1[node] = self.tourNext(node);
         }
 
         for (0..removed_count) |i| {
-            if (!self.removeScratchEdge(self.removed_a[i], self.removed_b[i])) return false;
+            if (!self.removeScratchEdge(self.ws.removed_a[i], self.ws.removed_b[i])) return false;
         }
         for (0..added_count) |i| {
-            if (!self.addScratchEdge(self.added_a[i], self.added_b[i])) return false;
+            if (!self.addScratchEdge(self.ws.added_a[i], self.ws.added_b[i])) return false;
         }
 
-        @memset(self.scratch_seen, false);
+        @memset(self.ws.scratch_seen, false);
         const start = self.tour[0];
         var previous: usize = std.math.maxInt(usize);
         var current = start;
         for (0..n) |idx| {
-            if (self.scratch_seen[current]) return false;
-            self.scratch_seen[current] = true;
+            if (self.ws.scratch_seen[current]) return false;
+            self.ws.scratch_seen[current] = true;
             out[idx] = current;
-            const a = self.scratch_neighbor0[current];
-            const b = self.scratch_neighbor1[current];
+            const a = self.ws.scratch_neighbor0[current];
+            const b = self.ws.scratch_neighbor1[current];
             if (a == std.math.maxInt(usize) or b == std.math.maxInt(usize)) return false;
             const next_node = if (idx == 0)
                 self.preferredFirstNeighbor(start, a, b)
@@ -1400,12 +1389,12 @@ pub const LocalSearch = struct {
     }
 
     pub fn removeScratchNeighbor(self: *LocalSearch, a: usize, b: usize) bool {
-        if (self.scratch_neighbor0[a] == b) {
-            self.scratch_neighbor0[a] = std.math.maxInt(usize);
+        if (self.ws.scratch_neighbor0[a] == b) {
+            self.ws.scratch_neighbor0[a] = std.math.maxInt(usize);
             return true;
         }
-        if (self.scratch_neighbor1[a] == b) {
-            self.scratch_neighbor1[a] = std.math.maxInt(usize);
+        if (self.ws.scratch_neighbor1[a] == b) {
+            self.ws.scratch_neighbor1[a] = std.math.maxInt(usize);
             return true;
         }
         return false;
@@ -1413,18 +1402,18 @@ pub const LocalSearch = struct {
 
     pub fn addScratchEdge(self: *LocalSearch, a: usize, b: usize) bool {
         if (a == b) return false;
-        if (self.scratch_neighbor0[a] == b or self.scratch_neighbor1[a] == b) return false;
-        if (self.scratch_neighbor0[b] == a or self.scratch_neighbor1[b] == a) return false;
+        if (self.ws.scratch_neighbor0[a] == b or self.ws.scratch_neighbor1[a] == b) return false;
+        if (self.ws.scratch_neighbor0[b] == a or self.ws.scratch_neighbor1[b] == a) return false;
         return self.addScratchNeighbor(a, b) and self.addScratchNeighbor(b, a);
     }
 
     pub fn addScratchNeighbor(self: *LocalSearch, a: usize, b: usize) bool {
-        if (self.scratch_neighbor0[a] == std.math.maxInt(usize)) {
-            self.scratch_neighbor0[a] = b;
+        if (self.ws.scratch_neighbor0[a] == std.math.maxInt(usize)) {
+            self.ws.scratch_neighbor0[a] = b;
             return true;
         }
-        if (self.scratch_neighbor1[a] == std.math.maxInt(usize)) {
-            self.scratch_neighbor1[a] = b;
+        if (self.ws.scratch_neighbor1[a] == std.math.maxInt(usize)) {
+            self.ws.scratch_neighbor1[a] = b;
             return true;
         }
         return false;
@@ -1529,13 +1518,13 @@ pub const LocalSearch = struct {
     // and the per-move O(n) rebuildState can be dropped — that change is R1's,
     // not this item's (it is a trajectory-neutral perf change, not a no-op).
     inline fn tourNext(self: *const LocalSearch, c: usize) usize {
-        return self.next[c];
+        return self.ws.next[c];
     }
     inline fn tourPrev(self: *const LocalSearch, c: usize) usize {
-        return self.prev[c];
+        return self.ws.prev[c];
     }
     inline fn tourSeq(self: *const LocalSearch, c: usize) usize {
-        return self.pos[c];
+        return self.ws.pos[c];
     }
     // Reverse the tour segment running from `first_node` to `last_node` in tour
     // order (caller guarantees first precedes last). Node-based so callers never
@@ -1549,13 +1538,13 @@ pub const LocalSearch = struct {
         self.stats.flip_elements += last - first + 1;
         std.mem.reverse(usize, self.tour[first .. last + 1]);
         for (first..last + 1) |idx| {
-            self.pos[self.tour[idx]] = idx;
+            self.ws.pos[self.tour[idx]] = idx;
         }
     }
 
     pub fn rebuildPositions(self: *LocalSearch) void {
         for (self.tour, 0..) |node, idx| {
-            self.pos[node] = idx;
+            self.ws.pos[node] = idx;
         }
     }
 
@@ -1579,9 +1568,9 @@ pub const LocalSearch = struct {
     // from their own after-scan instead of calling this.)
     pub fn applyLengthDeltaArrays(self: *LocalSearch, removed_count: usize, added_count: usize) void {
         var added_sum: u64 = 0;
-        for (0..added_count) |i| added_sum += self.dist.distance(self.added_a[i], self.added_b[i]);
+        for (0..added_count) |i| added_sum += self.dist.distance(self.ws.added_a[i], self.ws.added_b[i]);
         var removed_sum: u64 = 0;
-        for (0..removed_count) |i| removed_sum += self.dist.distance(self.removed_a[i], self.removed_b[i]);
+        for (0..removed_count) |i| removed_sum += self.dist.distance(self.ws.removed_a[i], self.ws.removed_b[i]);
         // current_length includes the removed edges, so current_length +
         // added_sum >= removed_sum; no unsigned underflow.
         self.current_length = self.current_length + added_sum - removed_sum;
@@ -1595,24 +1584,24 @@ pub const LocalSearch = struct {
         if (useSegmentTour(self.tour.len)) {
             return TourView.initSegment(
                 self.tour,
-                self.pos,
-                self.next,
-                self.prev,
-                self.scratch_neighbor0,
-                self.scratch_neighbor1,
-                self.scratch_seen,
-                self.segment_of_node,
-                self.rank_in_segment,
-                self.segment_start,
-                self.segment_len,
-                self.segment_reversed,
+                self.ws.pos,
+                self.ws.next,
+                self.ws.prev,
+                self.ws.scratch_neighbor0,
+                self.ws.scratch_neighbor1,
+                self.ws.scratch_seen,
+                self.ws.segment_of_node,
+                self.ws.rank_in_segment,
+                self.ws.segment_start,
+                self.ws.segment_len,
+                self.ws.segment_reversed,
             );
         }
-        return TourView.initFlat(self.tour, self.pos, self.next, self.prev, self.scratch_neighbor0, self.scratch_neighbor1, self.scratch_seen);
+        return TourView.initFlat(self.tour, self.ws.pos, self.ws.next, self.ws.prev, self.ws.scratch_neighbor0, self.ws.scratch_neighbor1, self.ws.scratch_seen);
     }
 
     pub fn vertexInSequence(self: *const LocalSearch, node: usize, len: usize) bool {
-        for (self.lk_t[0..len]) |existing| {
+        for (self.ws.lk_t[0..len]) |existing| {
             if (existing == node) return true;
         }
         return false;
