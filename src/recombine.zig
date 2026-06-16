@@ -470,6 +470,78 @@ pub fn elitePoolOffer(pool: *ElitePool, scratch: *EaxScratch, tour: []const usiz
     }
 }
 
+/// Test-and-set spinlock. This Zig std build has no std.Thread.Mutex; a spinlock
+/// is the right primitive here anyway -- islands contend only at trial
+/// boundaries and the critical section is a handful of memcpys.
+const SpinLock = struct {
+    locked: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    fn lock(self: *SpinLock) void {
+        while (self.locked.swap(true, .acquire)) {
+            std.atomic.spinLoopHint();
+        }
+    }
+    fn unlock(self: *SpinLock) void {
+        self.locked.store(false, .release);
+    }
+};
+
+/// Thread-safe migration buffer for cooperative parallel islands. Islands offer
+/// their best tours into it and drain its population into their own local pool,
+/// so a good tour found by one island becomes recombination material for the
+/// others. Every access copies under the lock -- no island ever holds a slice
+/// into another island's memory, and the hot merge loop still reads only the
+/// island-local pool with no locking.
+pub const SharedElitePool = struct {
+    lock_state: SpinLock = .{},
+    pool: ElitePool,
+    scratch: EaxScratch,
+
+    pub fn init(allocator: std.mem.Allocator, n: usize) !SharedElitePool {
+        var pool = try ElitePool.init(allocator, n);
+        errdefer pool.deinit();
+        const scratch = try EaxScratch.init(allocator, n);
+        return .{ .pool = pool, .scratch = scratch };
+    }
+
+    pub fn deinit(self: *SharedElitePool) void {
+        self.pool.deinit();
+        self.scratch.deinit();
+    }
+
+    pub fn offer(self: *SharedElitePool, tour: []const usize, len: u64) void {
+        self.lock_state.lock();
+        defer self.lock_state.unlock();
+        elitePoolOffer(&self.pool, &self.scratch, tour, len);
+    }
+
+    /// Copy the shared population into a caller-owned local pool (dedup uses the
+    /// caller's own scratch). Run at trial boundaries so the island's EAX merge
+    /// loop, which iterates its local pool, sees the other islands' best tours.
+    pub fn drainInto(self: *SharedElitePool, local: *ElitePool, local_scratch: *EaxScratch) void {
+        self.lock_state.lock();
+        defer self.lock_state.unlock();
+        for (0..self.pool.count) |i| {
+            elitePoolOffer(local, local_scratch, self.pool.tours[i], self.pool.lens[i]);
+        }
+    }
+
+    /// Copy the single best shared tour into `out`, returning its length, or null
+    /// if the pool is empty. Used by the n<1000 IPT path, which merges against a
+    /// single reference rather than a pool.
+    pub fn bestInto(self: *SharedElitePool, out: []usize) ?u64 {
+        self.lock_state.lock();
+        defer self.lock_state.unlock();
+        if (self.pool.count == 0) return null;
+        var best: usize = 0;
+        for (1..self.pool.count) |i| {
+            if (self.pool.lens[i] < self.pool.lens[best]) best = i;
+        }
+        @memcpy(out, self.pool.tours[best]);
+        return self.pool.lens[best];
+    }
+};
+
 const EaxOutcome = struct {
     length: u64,
     winner_is_a: bool,

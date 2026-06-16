@@ -19,6 +19,7 @@ pub const bruteForce = exact.bruteForce;
 pub const ExactOptions = exact.ExactOptions;
 
 pub const solve = solver.solve;
+pub const solveWithSharedPool = solver.solveWithSharedPool;
 pub const SolveOptions = solver.SolveOptions;
 pub const SolveResult = solver.SolveResult;
 pub const SolveStats = solver.SolveStats;

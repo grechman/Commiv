@@ -22,6 +22,7 @@ const iptMergeTours = recombine.iptMergeTours;
 const EaxScratch = recombine.EaxScratch;
 const ElitePool = recombine.ElitePool;
 const elitePoolOffer = recombine.elitePoolOffer;
+const SharedElitePool = recombine.SharedElitePool;
 const eaxMergeTours = recombine.eaxMergeTours;
 pub const DistanceOracle = distance.DistanceOracle;
 const nearestNeighborTour = construct.nearestNeighborTour;
@@ -356,6 +357,20 @@ pub fn solve(
     p: *const problem.Problem,
     options: SolveOptions,
 ) !SolveResult {
+    return solveWithSharedPool(allocator, p, options, null);
+}
+
+// Cooperative-island entry: identical to solve() but, when `shared` is non-null,
+// the trial loop offers its incumbent into the shared pool and pulls migrants
+// back each trial so parallel islands recombine each other's discoveries. With
+// `shared == null` it is bit-identical to the single-island search (the migrant
+// hooks are all null-guarded).
+pub fn solveWithSharedPool(
+    allocator: std.mem.Allocator,
+    p: *const problem.Problem,
+    options: SolveOptions,
+    shared: ?*SharedElitePool,
+) !SolveResult {
     const n = p.dimension;
     if (n <= 10) {
         const exact_result = exact.bruteForce(allocator, p, .{ .max_nodes = 10 }) catch |err| switch (err) {
@@ -394,6 +409,13 @@ pub fn solve(
     defer ipt.deinit();
     var elite = try ElitePool.init(allocator, n);
     defer elite.deinit();
+
+    // Cooperative-island migration (no-op when shared == null): the best tour
+    // pulled from the shared pool, used as an extra IPT merge reference below.
+    // Length 0 when not cooperating (keeps the type []usize, allocates nothing).
+    const migrant = try allocator.alloc(usize, if (shared != null) n else 0);
+    defer allocator.free(migrant);
+    var migrant_len: u64 = std.math.maxInt(u64);
 
     var prng = std.Random.DefaultPrng.init(options.seed);
     var random = prng.random();
@@ -642,9 +664,19 @@ pub fn solve(
         // Gated to trials within ~3% of the incumbent so hopeless tours don't
         // pay the scan.
         if (n < eax_min_dimension and options.search.enable_lk and best_len != std.math.maxInt(u64)) {
-            const use_merged = merged_len < best_len;
-            const ref_tour: []const usize = if (use_merged) ipt.merged else workspace.best_tour;
-            const ref_len = if (use_merged) merged_len else best_len;
+            // Reference = the best available recombination parent: the local
+            // incumbent, the merge accumulator, or (cooperative islands only) a
+            // migrant from a sibling island that is currently ahead of us.
+            var ref_tour: []const usize = workspace.best_tour;
+            var ref_len = best_len;
+            if (merged_len < ref_len) {
+                ref_tour = ipt.merged;
+                ref_len = merged_len;
+            }
+            if (shared != null and migrant_len < ref_len) {
+                ref_tour = migrant;
+                ref_len = migrant_len;
+            }
             const trial_len = search.current_length;
             if (trial_len <= ref_len + ref_len / 32) {
                 stats.eax_merge_attempts += 1;
@@ -785,6 +817,19 @@ pub fn solve(
             last_progress_trial = trial;
         } else if (kick_trial) {
             stale_kicks += 1;
+        }
+
+        // Cooperative-island migration (no-op when shared == null): contribute
+        // our incumbent and pull the siblings' best back. n>=1000 drains the
+        // shared population into the local EAX pool (read by the merge loop);
+        // n<1000 refreshes the single migrant the IPT path merges against.
+        if (shared) |sp| {
+            if (best_len != std.math.maxInt(u64)) sp.offer(workspace.best_tour, best_len);
+            if (n >= eax_min_dimension) {
+                sp.drainInto(&elite, &eax);
+            } else if (sp.bestInto(migrant)) |ml| {
+                migrant_len = ml;
+            }
         }
     }
     stats.trials = trial;

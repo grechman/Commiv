@@ -1,37 +1,41 @@
 const std = @import("std");
 const problem = @import("problem.zig");
 const solver = @import("solver.zig");
+const recombine = @import("recombine.zig");
 
 const SolveOptions = solver.SolveOptions;
 const SolveResult = solver.SolveResult;
 const SolveStats = solver.SolveStats;
+const SharedElitePool = recombine.SharedElitePool;
 
 // Island-model parallel solving. Trials are independent units of work and each
 // solve() call is fully self-contained (own oracle, candidates, workspace,
-// elite pool, and RNG seeded from options.seed), so K independent islands with
-// distinct seeds run with zero shared mutable state. The Problem is read-only
-// and shared. Results are NOT bit-identical to the single-core run (independent
-// exploration) -- that is the point: we spend the cores the serial path cannot.
-// Determinism is preserved per (seed, thread-count): island i uses seed+i and
-// the winner is chosen by min length with a low-index tie-break, independent of
-// thread scheduling.
+// elite pool, RNG seeded from options.seed), so islands with distinct seeds run
+// with no shared mutable state beyond the optional cooperative pool. The Problem
+// is read-only and shared. Results are NOT bit-identical to the single-core run
+// (independent exploration), and cooperative runs are non-deterministic
+// (migration timing); the winner is still chosen by min length with a low-index
+// tie-break.
+//
+// Both modes split the trial budget across islands (trials/K each) for the ~K x
+// wall-time speedup. `cooperative` additionally shares each island's best tour
+// through a thread-safe pool, so islands recombine each other's discoveries --
+// the experiment to claw back the accuracy `split_budget` gives up.
 
 pub const ParallelMode = enum {
-    /// Each island runs the FULL trial budget with a distinct seed; the best
-    /// tour wins. ~K x the compute at ~the single-island wall-time -> maximize
-    /// quality.
-    best_of_islands,
-    /// The trial budget is split across islands (trials/K each); ~K x faster
-    /// wall-time at roughly single-island quality -> maximize speed.
+    /// Independent islands, budget split K ways. ~K x faster, lower accuracy.
     split_budget,
+    /// Split-budget islands that migrate best tours through a shared pool, to
+    /// recover accuracy without giving up the speedup.
+    cooperative,
 };
 
 pub const ParallelOptions = struct {
-    /// 0 = auto: max(1, cpuCount - 1), always leaving one core free for the
-    /// rest of the machine. 1 = serial: routes straight to solve() (so the
-    /// single-core path stays bit-identical). >1 = that many islands.
+    /// 0 = auto: max(1, cpuCount - 1), always leaving one core free for the rest
+    /// of the machine. 1 = serial: routes straight to solve() (bit-identical).
+    /// >1 = that many islands.
     threads: usize = 0,
-    mode: ParallelMode = .best_of_islands,
+    mode: ParallelMode = .split_budget,
 };
 
 /// Resolve a requested thread count to an actual island count, leaving one core
@@ -49,14 +53,14 @@ const IslandSlot = struct {
     ok: bool,
 };
 
-fn islandWorker(p: *const problem.Problem, options: SolveOptions, slot: *IslandSlot) void {
-    // Per-island arena over the thread-safe page allocator: solve() allocates
-    // everything here, and it is torn down before the worker returns. The
-    // result tour (arena-owned) is copied into the parent-owned slot buffer
-    // first, so nothing the parent reads outlives this frame's arena.
+fn islandWorker(p: *const problem.Problem, options: SolveOptions, shared: ?*SharedElitePool, slot: *IslandSlot) void {
+    // Per-island arena over the thread-safe page allocator: the solve allocates
+    // everything here and it is torn down before the worker returns. The result
+    // tour (arena-owned) is copied into the parent-owned slot buffer first, so
+    // nothing the parent reads outlives this frame's arena.
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
-    const result = solver.solve(arena.allocator(), p, options) catch {
+    const result = solver.solveWithSharedPool(arena.allocator(), p, options, shared) catch {
         slot.ok = false;
         return;
     };
@@ -66,8 +70,15 @@ fn islandWorker(p: *const problem.Problem, options: SolveOptions, slot: *IslandS
     slot.ok = true;
 }
 
-/// Run the solver across `par.threads` independent islands and return the best
-/// result, owned by `allocator`. threads<=1 calls solve() directly.
+fn islandOptions(base: SolveOptions, idx: usize, k: usize, total_trials: usize) SolveOptions {
+    var opts = base;
+    opts.seed = base.seed +% @as(u64, idx);
+    opts.budget.trials = @max((total_trials + k - 1) / k, 1);
+    return opts;
+}
+
+/// Run the solver across `par.threads` islands and return the best result, owned
+/// by `allocator`. threads<=1 calls solve() directly (bit-identical serial).
 pub fn solveParallel(
     allocator: std.mem.Allocator,
     p: *const problem.Problem,
@@ -79,6 +90,10 @@ pub fn solveParallel(
 
     const n = p.dimension;
     const total_trials = @max(options.budget.trials, 1);
+
+    var shared: ?SharedElitePool = if (par.mode == .cooperative) try SharedElitePool.init(allocator, n) else null;
+    defer if (shared) |*sp| sp.deinit();
+    const shared_ptr: ?*SharedElitePool = if (shared) |*sp| sp else null;
 
     const slots = try allocator.alloc(IslandSlot, k);
     defer allocator.free(slots);
@@ -98,26 +113,17 @@ pub fn solveParallel(
     const threads = try allocator.alloc(std.Thread, k);
     defer allocator.free(threads);
 
-    const islandOptions = struct {
-        fn make(base: SolveOptions, idx: usize, kk: usize, total: usize, mode: ParallelMode) SolveOptions {
-            var opts = base;
-            opts.seed = base.seed +% @as(u64, idx);
-            if (mode == .split_budget) opts.budget.trials = @max((total + kk - 1) / kk, 1);
-            return opts;
-        }
-    }.make;
-
     var spawned: usize = 0;
     for (0..k) |i| {
-        const opts = islandOptions(options, i, k, total_trials, par.mode);
-        threads[i] = std.Thread.spawn(.{}, islandWorker, .{ p, opts, &slots[i] }) catch break;
+        const opts = islandOptions(options, i, k, total_trials);
+        threads[i] = std.Thread.spawn(.{}, islandWorker, .{ p, opts, shared_ptr, &slots[i] }) catch break;
         spawned += 1;
     }
     // If a spawn failed (e.g. thread limit), run the remainder inline so every
     // island still produces a result.
     for (spawned..k) |i| {
-        const opts = islandOptions(options, i, k, total_trials, par.mode);
-        islandWorker(p, opts, &slots[i]);
+        const opts = islandOptions(options, i, k, total_trials);
+        islandWorker(p, opts, shared_ptr, &slots[i]);
     }
     for (0..spawned) |i| threads[i].join();
 
@@ -139,15 +145,16 @@ pub fn solveParallel(
     };
 }
 
+const ring_coords = [_]problem.Coord{
+    .{ .x = 0, .y = 0 },   .{ .x = 2, .y = 0 }, .{ .x = 4, .y = 0 },
+    .{ .x = 6, .y = 1 },   .{ .x = 6, .y = 4 }, .{ .x = 4, .y = 6 },
+    .{ .x = 2, .y = 6 },   .{ .x = 0, .y = 4 }, .{ .x = 1, .y = 2 },
+    .{ .x = 5, .y = 3 },   .{ .x = 3, .y = 2 },
+};
+
 test "solveParallel: threads=1 routes to solve() (bit-identical)" {
     const allocator = std.testing.allocator;
-    const coords = [_]problem.Coord{
-        .{ .x = 0, .y = 0 },   .{ .x = 2, .y = 0 }, .{ .x = 4, .y = 0 },
-        .{ .x = 6, .y = 1 },   .{ .x = 6, .y = 4 }, .{ .x = 4, .y = 6 },
-        .{ .x = 2, .y = 6 },   .{ .x = 0, .y = 4 }, .{ .x = 1, .y = 2 },
-        .{ .x = 5, .y = 3 },   .{ .x = 3, .y = 2 },
-    };
-    var p = try problem.Problem.initCoords(allocator, "ring", .euc_2d, &coords);
+    var p = try problem.Problem.initCoords(allocator, "ring", .euc_2d, &ring_coords);
     defer p.deinit();
     const opts = SolveOptions{ .seed = 42, .budget = .{ .trials = 8, .max_passes = 40 }, .candidates = .{ .candidate_count = 6 } };
 
@@ -159,28 +166,17 @@ test "solveParallel: threads=1 routes to solve() (bit-identical)" {
     try std.testing.expectEqualSlices(usize, serial.tour, par.tour);
 }
 
-test "solveParallel: best_of_islands is a valid tour no worse than serial" {
+test "solveParallel: split and cooperative produce valid self-consistent tours" {
     const allocator = std.testing.allocator;
-    const coords = [_]problem.Coord{
-        .{ .x = 0, .y = 0 },   .{ .x = 2, .y = 0 }, .{ .x = 4, .y = 0 },
-        .{ .x = 6, .y = 1 },   .{ .x = 6, .y = 4 }, .{ .x = 4, .y = 6 },
-        .{ .x = 2, .y = 6 },   .{ .x = 0, .y = 4 }, .{ .x = 1, .y = 2 },
-        .{ .x = 5, .y = 3 },   .{ .x = 3, .y = 2 },
-    };
-    var p = try problem.Problem.initCoords(allocator, "ring", .euc_2d, &coords);
+    var p = try problem.Problem.initCoords(allocator, "ring", .euc_2d, &ring_coords);
     defer p.deinit();
-    const opts = SolveOptions{ .seed = 1, .budget = .{ .trials = 8, .max_passes = 40 }, .candidates = .{ .candidate_count = 6 } };
+    const opts = SolveOptions{ .seed = 1, .budget = .{ .trials = 12, .max_passes = 40 }, .candidates = .{ .candidate_count = 6 } };
 
-    var serial = try solver.solve(allocator, &p, opts);
-    defer serial.deinit();
-    inline for (.{ ParallelMode.best_of_islands, ParallelMode.split_budget }) |mode| {
+    inline for (.{ ParallelMode.split_budget, ParallelMode.cooperative }) |mode| {
         var par = try solveParallel(allocator, &p, opts, .{ .threads = 3, .mode = mode });
         defer par.deinit();
         try p.validateTour(par.tour);
         try std.testing.expectEqual(par.length, try p.tourLength(par.tour));
-        // best_of runs >= the serial budget per island -> never worse; split
-        // divides the budget so only assert validity + self-consistency there.
-        if (mode == .best_of_islands) try std.testing.expect(par.length <= serial.length);
     }
 }
 

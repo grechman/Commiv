@@ -55,8 +55,8 @@ pub fn main(init: std.process.Init) !void {
         break :blk std.fmt.parseInt(usize, s, 10) catch 0;
     };
     const pmode: commiv.ParallelMode = blk: {
-        const s = init.environ_map.get("BENCH_PMODE") orelse "best";
-        break :blk if (std.mem.eql(u8, s, "split")) .split_budget else .best_of_islands;
+        const s = init.environ_map.get("BENCH_PMODE") orelse "split";
+        break :blk if (std.mem.eql(u8, s, "coop")) .cooperative else .split_budget;
     };
     const island_count = commiv.parallel.resolveThreadCount(threads);
 
