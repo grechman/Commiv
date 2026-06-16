@@ -5,6 +5,7 @@ pub const tsplib = @import("tsplib.zig");
 pub const exact = @import("exact.zig");
 pub const solver = @import("solver.zig");
 pub const parallel = @import("parallel.zig");
+pub const spatial = @import("spatial.zig");
 
 pub const Coord = problem.Coord;
 pub const DistanceKind = problem.DistanceKind;

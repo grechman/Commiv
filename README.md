@@ -163,7 +163,22 @@ Headline `alpha-w8-kick` mode at seed 12345 (size-gated IPT/EAX merging, elite p
 | d657 | 657 | 48916 | 0.008% | 1.78 s | 48912 | 0.000% | 2.49 s |
 | pr1002 | 1002 | 259045 | 0.000% | 7.44 s | 259045 | 0.000% | 2.96 s |
 | fl1577 | 1577 | 22256 | 0.031% | 11.6 s | 22262 | 0.058% | 145.66 s |
-| rl11849 | 11849 | 930671 | 0.800% | 160 s (400-trial probe) | 923288 | 0.000% | 1287.6 s |
+| rl11849 | 11849 | 929968 | 0.724% | 76 s | 924149 | 0.093% | 219 s |
+| d18512 | 18512 | 651846 | 1.024% | 77 s | 645382 | 0.022% | 659 s |
+
+The last two rows are a **bounded large-n probe** (2026-06-16), distinct from the
+small rows' LKH `RUNS=1` default-trials basis: both commiv and LKH run a fixed
+200-trial budget at seed 12345, on-the-fly (no n×n matrix), single core. These
+use the **sparse k-NN candidate build** (default at n>=2000): the 1-tree ascent
+runs over each node's k-NN graph (O(n·k)/iter) instead of the complete graph, so
+the candidate build drops from ~28 s → ~6.5 s (rl11849) and ~58 s → ~8 s (d18512)
+at the same tour quality. (LKH's own candidate generation costs **187 s / 533 s** —
+81-85% of its wall — because a tight held-Karp bound needs ~O(n) ascent iterations;
+that buys its accuracy. commiv trades that bound for speed.) The build speedup
+dominates at low budgets: rl11849 at a 30-trial budget is **11.4 s** (gap 1.65%),
+under the 15 s target. The gap is under-search, not a floor (0.72% at 76 s →
+~0.4% at ~360 s); closing it to LKH's 0.09% is a search/recombination problem,
+not a candidate one. Full breakdown: `~/.claude/plans/commiv/large-n-findings.md`.
 
 ### Parallel execution (island model, 3 of 4 cores)
 
@@ -188,10 +203,24 @@ Findings on this 4-core host (3 islands), each value reproducible across runs:
 | d657 | 657 | 1.78 s (0.008%) | 1.17 s (0.074%) | 2.49 s (0.000%) |
 | pr1002 | 1002 | 7.44 s (0.000%) | 3.0 s (0.046%) | 2.96 s (0.000%) |
 | fl1577 | 1577 | 11.6 s (0.031%) | 4.8 s (0.126%) | 145.66 s (0.058%) |
+| rl11849 | 11849 | 76 s (0.724%) | 67.5 s (1.031%)† | 219.0 s (0.093%) |
+| d18512 | 18512 | 77 s (1.024%) | 125.3 s (1.263%)† | 659.3 s (0.022%) |
+
+(† split-3 large-n figures predate the sparse build and were not re-run — parallel
+is deprioritized. The earlier finding stands: split-3 barely helps at large n
+because each island repeats the candidate build; with the build now ~4-7x cheaper
+that replication matters even less. Serial is the large-n default.)
+
+(Large-n rows: 200-trial budget, on-the-fly; LKH at MAX_TRIALS=200. seed 12345.)
 
 - **split_budget is the one parallel mode** -- deterministic, ~2.5x faster, at a
   small reproducible accuracy cost. For maximum accuracy, run serial (which hits
-  the optimum on most instances).
+  the optimum on most instances). **The ~2.5x holds only up to ~n=1577.** At
+  large n the speedup collapses (rl11849 1.45x, d18512 1.02x): each island
+  repeats the full O(n^2) candidate build (~25 s / ~58 s), 3 concurrent builds
+  contend for memory bandwidth, and only the trial loop is split -- so the
+  replicated build, not the search, sets the wall. At d18512 the build is large
+  enough to nearly erase the trial-loop savings. **At large n, run serial.**
 - The bigger point the single-core table already makes: **we beat LKH on
   wall-time on the medium/large instances on one core** (fl1577 11.6 s vs 145.66 s,
   att532 1.49 s vs 8.82 s, fl417 2.60 s vs 10.29 s) at equal or near-equal
@@ -206,10 +235,15 @@ Findings on this 4-core host (3 islands), each value reproducible across runs:
   chaotic run-to-run swings (pr1002 0.001%-0.267% for the *same* config). The
   only deterministic fix is to redo serial's recombination, i.e. just run serial.
 - Memory: the n×n distance matrix is the only large allocation (561 MB at
-  rl11849). It is **optional** -- the library default runs large n on-the-fly at
-  ~5 MB; the matrix is forced only for the fastest headline timing, and even that
-  edge is now ~10% (it was the obsolete pre-scan-removal premise). rl11849 /
-  d18512 parallel + a fresh LKH re-run are deferred (big-runtime).
+  rl11849, 1.37 GB at d18512). It is **optional** and **not worth it at large n**.
+  Measured at a 200-trial budget, identical tours: rl11849 on-the-fly 97.4 s / 6 MB
+  vs matrix 93.2 s / 542 MB; d18512 on-the-fly 132.8 s / 9 MB vs matrix 119.0 s /
+  1316 MB. The matrix's whole edge is in the build (sequential Prim access avoids
+  the EUC_2D sqrt); the random-access trial loop is marginally *slower* with the
+  matrix (cache thrash). Net: 4.5-10% faster total for 90-146x the RAM. on-the-fly
+  is the correct large-n default; the per-island matrix would also make d18512
+  split-3 infeasible (3 × 1.37 GB). Each island builds its own oracle, so the
+  matrix does not amortize across the pool.
 
 Current read:
 

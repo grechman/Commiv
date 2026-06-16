@@ -1,6 +1,7 @@
 const std = @import("std");
 const distance = @import("distance.zig");
 const DistanceOracle = distance.DistanceOracle;
+const spatial = @import("spatial.zig");
 
 pub const CandidateMode = enum {
     nearest_distance,
@@ -654,5 +655,517 @@ fn validateCandidateRow(node: usize, row: []const usize) void {
         std.debug.assert(candidate != node);
         for (row[0..k]) |previous| std.debug.assert(previous != candidate);
     }
+}
+
+// ===========================================================================
+// Sparse (k-NN seeded) alpha-nearness candidate build.
+//
+// Identical alpha-nearness output structure to buildAlphaCandidates, but the
+// 1-tree subgradient ascent runs over each node's k-NN neighbor graph (built by
+// a grid) instead of the complete graph: O(n*k) per 1-tree vs O(n^2). This makes
+// the proper Helsgaun period (n/2) ascent affordable at large n, which tightens
+// the held-Karp bound (and thus the alpha ranking) far beyond the throttled
+// dense ascent. Geometric instances only (needs coordinates). The dense path
+// (buildAlphaCandidates) is untouched and remains the path for small n and
+// explicit-matrix instances, so its pinned-optimal fixtures stay bit-identical.
+// ===========================================================================
+
+/// Symmetric neighbor adjacency (CSR) with base distances, built from the
+/// directed k-NN graph by adding each directed edge in both directions. May
+/// contain duplicate entries for mutual edges; consumers dedupe (Prim is lazy,
+/// the alpha scan uses a per-row stamp).
+const SparseNeighbors = struct {
+    allocator: std.mem.Allocator,
+    start: []usize, // len n+1
+    node: []usize,
+    dist: []i64,
+
+    fn deinit(self: *SparseNeighbors) void {
+        self.allocator.free(self.start);
+        self.allocator.free(self.node);
+        self.allocator.free(self.dist);
+        self.* = undefined;
+    }
+    fn row(self: *const SparseNeighbors, i: usize) []const usize {
+        return self.node[self.start[i] .. self.start[i + 1]];
+    }
+    fn distRow(self: *const SparseNeighbors, i: usize) []const i64 {
+        return self.dist[self.start[i] .. self.start[i + 1]];
+    }
+};
+
+fn buildSparseNeighbors(allocator: std.mem.Allocator, dist_oracle: *DistanceOracle, knn: *const spatial.KnnGraph) !SparseNeighbors {
+    const n = knn.n;
+    const start = try allocator.alloc(usize, n + 1);
+    errdefer allocator.free(start);
+    @memset(start, 0);
+    for (0..n) |i| {
+        for (knn.row(i)) |j| {
+            start[i + 1] += 1;
+            start[j + 1] += 1;
+        }
+    }
+    for (1..n + 1) |i| start[i] += start[i - 1];
+    const total = start[n];
+    const node = try allocator.alloc(usize, total);
+    errdefer allocator.free(node);
+    const dist = try allocator.alloc(i64, total);
+    errdefer allocator.free(dist);
+    const cursor = try allocator.alloc(usize, n);
+    defer allocator.free(cursor);
+    @memcpy(cursor, start[0..n]);
+    for (0..n) |i| {
+        for (knn.row(i)) |j| {
+            const d: i64 = @intCast(dist_oracle.distance(i, j));
+            node[cursor[i]] = j;
+            dist[cursor[i]] = d;
+            cursor[i] += 1;
+            node[cursor[j]] = i;
+            dist[cursor[j]] = d;
+            cursor[j] += 1;
+        }
+    }
+    return .{ .allocator = allocator, .start = start, .node = node, .dist = dist };
+}
+
+fn heapLessPair(ka: i64, na: usize, kb: i64, nb: usize) bool {
+    return ka < kb or (ka == kb and na < nb);
+}
+
+fn sparseHeapPush(hk: []i64, hn: []usize, hf: []usize, len: *usize, key: i64, node_id: usize, from: usize) void {
+    var i = len.*;
+    hk[i] = key;
+    hn[i] = node_id;
+    hf[i] = from;
+    len.* += 1;
+    while (i > 0) {
+        const p = (i - 1) / 2;
+        if (!heapLessPair(hk[i], hn[i], hk[p], hn[p])) break;
+        std.mem.swap(i64, &hk[i], &hk[p]);
+        std.mem.swap(usize, &hn[i], &hn[p]);
+        std.mem.swap(usize, &hf[i], &hf[p]);
+        i = p;
+    }
+}
+
+const HeapEntry = struct { key: i64, node: usize, from: usize };
+
+fn sparseHeapPop(hk: []i64, hn: []usize, hf: []usize, len: *usize) HeapEntry {
+    const top: HeapEntry = .{ .key = hk[0], .node = hn[0], .from = hf[0] };
+    len.* -= 1;
+    const last = len.*;
+    hk[0] = hk[last];
+    hn[0] = hn[last];
+    hf[0] = hf[last];
+    var i: usize = 0;
+    while (true) {
+        const l = 2 * i + 1;
+        const r = 2 * i + 2;
+        var m = i;
+        if (l < last and heapLessPair(hk[l], hn[l], hk[m], hn[m])) m = l;
+        if (r < last and heapLessPair(hk[r], hn[r], hk[m], hn[m])) m = r;
+        if (m == i) break;
+        std.mem.swap(i64, &hk[i], &hk[m]);
+        std.mem.swap(usize, &hn[i], &hn[m]);
+        std.mem.swap(usize, &hf[i], &hf[m]);
+        i = m;
+    }
+    return top;
+}
+
+/// Sparse minimum 1-tree over the k-NN neighbor graph. Mirrors
+/// buildOneTreeApprox's outputs (MST over nodes 1..n-1 rooted at 1, node 0 the
+/// special node via its two cheapest edges) so the downstream alpha machinery
+/// is reused unchanged. Lazy heap-Prim; on disconnection (rare with k>=10) the
+/// nearest remaining node is attached to node 1 via a true distance lookup.
+fn buildSparseOneTree(
+    dist_oracle: *DistanceOracle,
+    pi: []const i64,
+    nbr: *const SparseNeighbors,
+    parent: []usize,
+    mst_edge: []i64,
+    in_tree: []bool,
+    degree: []i32,
+    root_edges: *[2]usize,
+    hk: []i64,
+    hn: []usize,
+    hf: []usize,
+) i64 {
+    const n = dist_oracle.p.dimension;
+    @memset(parent, std.math.maxInt(usize));
+    @memset(mst_edge, std.math.maxInt(i64));
+    @memset(in_tree, false);
+    @memset(degree, 0);
+    root_edges.* = .{ std.math.maxInt(usize), std.math.maxInt(usize) };
+    if (n <= 2) return 0;
+
+    var heap_len: usize = 0;
+    var tree_cost: i64 = 0;
+    var added: usize = 1; // node 1 is the MST root.
+    in_tree[1] = true;
+    mst_edge[1] = 0;
+    relaxSparseNode(1, dist_oracle, pi, nbr, in_tree, hk, hn, hf, &heap_len);
+
+    while (added < n - 1) {
+        if (heap_len == 0) {
+            // Disconnected k-NN graph: attach the first uncovered node (>=1) to
+            // the root via its true distance, then continue Prim from it.
+            var f: usize = 1;
+            while (f < n and (f == 0 or in_tree[f])) f += 1;
+            if (f >= n) break;
+            const c = adjustedCost(dist_oracle, pi, 1, f);
+            sparseHeapPush(hk, hn, hf, &heap_len, c, f, 1);
+        }
+        const e = sparseHeapPop(hk, hn, hf, &heap_len);
+        if (in_tree[e.node]) continue;
+        in_tree[e.node] = true;
+        parent[e.node] = e.from;
+        mst_edge[e.node] = e.key;
+        degree[e.node] += 1;
+        degree[e.from] += 1;
+        tree_cost += e.key;
+        added += 1;
+        relaxSparseNode(e.node, dist_oracle, pi, nbr, in_tree, hk, hn, hf, &heap_len);
+    }
+
+    // Special node 0: its two cheapest adjusted edges among its neighbors.
+    var root_costs = [_]i64{ std.math.maxInt(i64), std.math.maxInt(i64) };
+    const zero_nbr = nbr.row(0);
+    const zero_dist = nbr.distRow(0);
+    for (zero_nbr, zero_dist) |node_id, base| {
+        if (node_id == 0) continue;
+        const d = base + pi[0] + pi[node_id];
+        if (d < root_costs[0] or (d == root_costs[0] and node_id < root_edges.*[0])) {
+            root_costs[1] = root_costs[0];
+            root_edges.*[1] = root_edges.*[0];
+            root_costs[0] = d;
+            root_edges.*[0] = node_id;
+        } else if (d < root_costs[1] or (d == root_costs[1] and node_id < root_edges.*[1])) {
+            root_costs[1] = d;
+            root_edges.*[1] = node_id;
+        }
+    }
+    if (root_edges.*[0] != std.math.maxInt(usize)) {
+        tree_cost += root_costs[0];
+        degree[0] += 1;
+        degree[root_edges.*[0]] += 1;
+    }
+    if (root_edges.*[1] != std.math.maxInt(usize)) {
+        tree_cost += root_costs[1];
+        degree[0] += 1;
+        degree[root_edges.*[1]] += 1;
+    }
+    return tree_cost;
+}
+
+fn relaxSparseNode(
+    u: usize,
+    dist_oracle: *DistanceOracle,
+    pi: []const i64,
+    nbr: *const SparseNeighbors,
+    in_tree: []const bool,
+    hk: []i64,
+    hn: []usize,
+    hf: []usize,
+    heap_len: *usize,
+) void {
+    _ = dist_oracle;
+    const row = nbr.row(u);
+    const drow = nbr.distRow(u);
+    for (row, drow) |j, base| {
+        if (j == 0 or in_tree[j]) continue; // node 0 is the special 1-tree node
+        const key = base + pi[u] + pi[j];
+        sparseHeapPush(hk, hn, hf, heap_len, key, j, u);
+    }
+}
+
+/// Subgradient ascent over the SPARSE 1-tree. Mirrors runAlphaAscent's step/
+/// period machinery but with Helsgaun's period = n/2 (decoupled from the
+/// iteration cap) and the sparse 1-tree builder. The reported lower bound is
+/// approximate (the sparse MST >= the true MST) and is used only for the alpha
+/// RANKING, never as a valid bound.
+fn runSparseAscent(
+    dist_oracle: *DistanceOracle,
+    max_iterations: usize,
+    nbr: *const SparseNeighbors,
+    parent: []usize,
+    mst_edge: []i64,
+    in_tree: []bool,
+    degree: []i32,
+    pi: []i64,
+    best_pi: []i64,
+    best_parent: []usize,
+    best_mst_edge: []i64,
+    last_degree: []i32,
+    best_root_edges: *[2]usize,
+    hk: []i64,
+    hn: []usize,
+    hf: []usize,
+    stats: *CandidateBuildStats,
+) void {
+    const n = dist_oracle.p.dimension;
+    @memset(pi, 0);
+    @memset(best_pi, 0);
+    @memset(last_degree, 0);
+    var root_edges: [2]usize = .{ std.math.maxInt(usize), std.math.maxInt(usize) };
+    var step: i64 = initialAscentStep(dist_oracle);
+    var period: usize = @max(n / 2, 1);
+    var initial_phase = true;
+    var best_bound: i64 = std.math.minInt(i64);
+    var best_norm: i64 = std.math.maxInt(i64);
+
+    var iter: usize = 0;
+    while (iter < max_iterations and step > 0 and period > 0) {
+        var p: usize = 0;
+        while (iter < max_iterations and p < period and step > 0) : ({
+            iter += 1;
+            p += 1;
+        }) {
+            const adjusted_tree_cost = buildSparseOneTree(dist_oracle, pi, nbr, parent, mst_edge, in_tree, degree, &root_edges, hk, hn, hf);
+            var pi_sum: i64 = 0;
+            for (pi) |value| pi_sum += value;
+            const lower_bound = adjusted_tree_cost - 2 * pi_sum;
+
+            var norm: i64 = 0;
+            for (degree) |deg| {
+                const deficit = deg - 2;
+                norm += @as(i64, deficit) * @as(i64, deficit);
+            }
+
+            if (lower_bound > best_bound or (lower_bound == best_bound and norm < best_norm)) {
+                best_bound = lower_bound;
+                best_norm = norm;
+                @memcpy(best_pi, pi);
+                @memcpy(best_parent, parent);
+                @memcpy(best_mst_edge, mst_edge);
+                best_root_edges.* = root_edges;
+                if (initial_phase and norm > 0) step = step * 2;
+                if (p + 1 == period and period < n / 2) period *= 2;
+            }
+
+            if (norm == 0) {
+                iter += 1;
+                stats.iterations = iter;
+                stats.best_lower_bound = best_bound;
+                return;
+            }
+
+            for (pi, degree, last_degree) |*penalty, deg, last| {
+                const deficit = deg - 2;
+                const last_deficit = if (iter == 0) deficit else last - 2;
+                if (deficit != 0) penalty.* += @divTrunc(step * @as(i64, 7 * deficit + 3 * last_deficit), 10);
+            }
+            @memcpy(last_degree, degree);
+            if (initial_phase and p > period / 2) {
+                initial_phase = false;
+                p = 0;
+                step = @divTrunc(3 * step, 4);
+            }
+        }
+        period /= 2;
+        step = @divTrunc(step, 2);
+    }
+
+    if (best_bound == std.math.minInt(i64)) {
+        _ = buildSparseOneTree(dist_oracle, pi, nbr, best_parent, best_mst_edge, in_tree, degree, best_root_edges, hk, hn, hf);
+        best_bound = 0;
+    }
+    stats.iterations = iter;
+    stats.best_lower_bound = best_bound;
+}
+
+fn buildSparseAlphaCandidates(
+    allocator: std.mem.Allocator,
+    dist_oracle: *DistanceOracle,
+    width: usize,
+    ascent_iterations: usize,
+    nearest_patch_count: usize,
+    neighbor_pool_count: usize,
+    candidate_stats: *CandidateBuildStats,
+) !Candidates {
+    const n = dist_oracle.p.dimension;
+    const total_candidates = std.math.mul(usize, n, width) catch return error.OutOfMemory;
+    var data = try allocator.alloc(usize, total_candidates);
+    errdefer allocator.free(data);
+    var alpha = try allocator.alloc(u64, total_candidates);
+    errdefer allocator.free(alpha);
+    var row_dist = try allocator.alloc(u64, width);
+    defer allocator.free(row_dist);
+
+    // k-NN pool (at least width, plus headroom for the symmetric union).
+    const pool_k = @max(@max(neighbor_pool_count, width), 5);
+    var knn = try spatial.buildKnn(allocator, dist_oracle.p.coords, pool_k);
+    defer knn.deinit();
+    var nbr = try buildSparseNeighbors(allocator, dist_oracle, &knn);
+    defer nbr.deinit();
+
+    const parent = try allocator.alloc(usize, n);
+    defer allocator.free(parent);
+    const mst_edge = try allocator.alloc(i64, n);
+    defer allocator.free(mst_edge);
+    const in_tree = try allocator.alloc(bool, n);
+    defer allocator.free(in_tree);
+    const degree = try allocator.alloc(i32, n);
+    defer allocator.free(degree);
+    const pi = try allocator.alloc(i64, n);
+    defer allocator.free(pi);
+    const best_pi = try allocator.alloc(i64, n);
+    defer allocator.free(best_pi);
+    const best_parent = try allocator.alloc(usize, n);
+    defer allocator.free(best_parent);
+    const best_mst_edge = try allocator.alloc(i64, n);
+    defer allocator.free(best_mst_edge);
+    const last_degree = try allocator.alloc(i32, n);
+    defer allocator.free(last_degree);
+    var best_root_edges: [2]usize = .{ std.math.maxInt(usize), std.math.maxInt(usize) };
+
+    // Lazy-Prim heap: at most one push per directed adjacency entry, plus the
+    // disconnection fallback (<= n).
+    const heap_cap = nbr.start[n] + n + 1;
+    const hk = try allocator.alloc(i64, heap_cap);
+    defer allocator.free(hk);
+    const hn = try allocator.alloc(usize, heap_cap);
+    defer allocator.free(hn);
+    const hf = try allocator.alloc(usize, heap_cap);
+    defer allocator.free(hf);
+
+    runSparseAscent(dist_oracle, @max(ascent_iterations, 1), &nbr, parent, mst_edge, in_tree, degree, pi, best_pi, best_parent, best_mst_edge, last_degree, &best_root_edges, hk, hn, hf, candidate_stats);
+
+    // CSR adjacency of the best 1-tree (nodes 1..n-1), for path-bottleneck BFS.
+    const edge_slots = if (n >= 3) 2 * (n - 2) else 0;
+    const adj_start = try allocator.alloc(usize, n + 1);
+    defer allocator.free(adj_start);
+    const adj_node = try allocator.alloc(usize, edge_slots);
+    defer allocator.free(adj_node);
+    const adj_weight = try allocator.alloc(i64, edge_slots);
+    defer allocator.free(adj_weight);
+    const bottleneck = try allocator.alloc(i64, n);
+    defer allocator.free(bottleneck);
+    const bfs_queue = try allocator.alloc(usize, n);
+    defer allocator.free(bfs_queue);
+
+    @memset(adj_start, 0);
+    for (2..n) |node| {
+        adj_start[node + 1] += 1;
+        adj_start[best_parent[node] + 1] += 1;
+    }
+    for (1..n + 1) |k| adj_start[k] += adj_start[k - 1];
+    @memcpy(bfs_queue, adj_start[0..n]);
+    for (2..n) |node| {
+        const dad = best_parent[node];
+        const weight = best_mst_edge[node];
+        adj_node[bfs_queue[node]] = dad;
+        adj_weight[bfs_queue[node]] = weight;
+        bfs_queue[node] += 1;
+        adj_node[bfs_queue[dad]] = node;
+        adj_weight[bfs_queue[dad]] = weight;
+        bfs_queue[dad] += 1;
+    }
+
+    var second_root_cost: i64 = std.math.maxInt(i64);
+    {
+        var first_root_cost: i64 = std.math.maxInt(i64);
+        for (1..n) |node| {
+            const cost = adjustedCost(dist_oracle, best_pi, 0, node);
+            if (cost < first_root_cost) {
+                second_root_cost = first_root_cost;
+                first_root_cost = cost;
+            } else if (cost < second_root_cost) {
+                second_root_cost = cost;
+            }
+        }
+    }
+
+    // Per-row dedupe stamp for the (duplicate-bearing) symmetric neighbor scan.
+    const seen = try allocator.alloc(usize, n);
+    defer allocator.free(seen);
+    @memset(seen, std.math.maxInt(usize));
+
+    for (0..n) |i| {
+        if (i != 0) fillTreeBottleneck(i, adj_start, adj_node, adj_weight, in_tree, bfs_queue, bottleneck);
+        @memset(row_dist, std.math.maxInt(u64));
+        const row = data[i * width .. i * width + width];
+        const alpha_row = alpha[i * width .. i * width + width];
+        @memset(row, std.math.maxInt(usize));
+        @memset(alpha_row, std.math.maxInt(u64));
+
+        for (nbr.row(i)) |j| {
+            if (j == i or seen[j] == i) continue;
+            seen[j] = i;
+            const d = @as(u64, dist_oracle.distance(i, j));
+            const a = rowAlphaScore(dist_oracle, i, j, best_pi, best_parent, best_root_edges, second_root_cost, bottleneck);
+            var slot: ?usize = null;
+            for (0..width) |k| {
+                if (a < alpha_row[k] or
+                    (a == alpha_row[k] and d < row_dist[k]) or
+                    (a == alpha_row[k] and d == row_dist[k] and j < row[k]))
+                {
+                    slot = k;
+                    break;
+                }
+            }
+            if (slot) |k| {
+                if (k + 1 < width) {
+                    std.mem.copyBackwards(u64, alpha_row[k + 1 ..], alpha_row[k .. width - 1]);
+                    std.mem.copyBackwards(u64, row_dist[k + 1 ..], row_dist[k .. width - 1]);
+                    std.mem.copyBackwards(usize, row[k + 1 ..], row[k .. width - 1]);
+                }
+                alpha_row[k] = a;
+                row_dist[k] = d;
+                row[k] = j;
+            }
+        }
+
+        // Nearest-distance patch from the k-NN row (already nearest-first).
+        const patch_limit = @min(nearest_patch_count, knn.k);
+        for (knn.row(i)[0..patch_limit]) |patch_node| {
+            if (rowContains(row, patch_node)) continue;
+            const d = @as(u64, dist_oracle.distance(i, patch_node));
+            const a = rowAlphaScore(dist_oracle, i, patch_node, best_pi, best_parent, best_root_edges, second_root_cost, bottleneck);
+            if (!candidateLess(a, d, patch_node, alpha_row[width - 1], row_dist[width - 1], row[width - 1])) continue;
+            row[width - 1] = patch_node;
+            alpha_row[width - 1] = a;
+            row_dist[width - 1] = d;
+            sortCandidateRow(row, alpha_row, row_dist);
+            candidate_stats.patched_edges += 1;
+        }
+
+        validateCandidateRow(i, row);
+    }
+
+    candidate_stats.patched_edges += symmetrizeCandidateRows(dist_oracle, data, alpha, width);
+
+    const cand_dist = try allocator.alloc(u32, total_candidates);
+    errdefer allocator.free(cand_dist);
+    fillCandidateDistances(dist_oracle, data, cand_dist, width);
+
+    const total_edges: u64 = @intCast(n * width);
+    candidate_stats.alpha_edges += total_edges - candidate_stats.patched_edges;
+    candidate_stats.nearest_edges += candidate_stats.patched_edges;
+    return .{ .allocator = allocator, .width = width, .data = data, .alpha = alpha, .cand_dist = cand_dist, .dist_sorted = false };
+}
+
+/// Dispatch: sparse alpha build for geometric instances at or above
+/// `sparse_min_dimension` (0 disables); otherwise the dense path. Used by the
+/// headline solve path; other internal callers keep buildCandidates directly.
+pub fn buildCandidatesAuto(
+    allocator: std.mem.Allocator,
+    dist_oracle: *DistanceOracle,
+    width: usize,
+    mode: CandidateMode,
+    alpha_ascent_iterations: usize,
+    alpha_nearest_patch_count: usize,
+    neighbor_pool_count: usize,
+    sparse_ascent_iterations: usize,
+    sparse_min_dimension: usize,
+    candidate_stats: *CandidateBuildStats,
+) !Candidates {
+    const n = dist_oracle.p.dimension;
+    const geometric = dist_oracle.p.coords.len == n and n >= 3;
+    if (mode == .alpha_nearness and geometric and sparse_min_dimension != 0 and n >= sparse_min_dimension) {
+        const iters = if (sparse_ascent_iterations != 0) sparse_ascent_iterations else alpha_ascent_iterations;
+        return buildSparseAlphaCandidates(allocator, dist_oracle, width, iters, alpha_nearest_patch_count, neighbor_pool_count, candidate_stats);
+    }
+    return buildCandidates(allocator, dist_oracle, width, mode, alpha_ascent_iterations, alpha_nearest_patch_count, candidate_stats);
 }
 

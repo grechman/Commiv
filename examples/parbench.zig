@@ -112,7 +112,9 @@ fn headlineOptions(n: usize) commiv.SolveOptions {
             .trials = n,
             .trial_extension_factor = if (n >= 1000) @as(usize, 2) else @as(usize, 4),
             .max_passes = 64,
-            .max_distance_cache_bytes = n * n * @sizeOf(u32),
+            // Default 16 MB budget: small n cached, large n on-the-fly (never a
+            // multi-GB matrix -- which would also be replicated per island).
+            .max_distance_cache_bytes = (commiv.SolveOptions.Budget{}).max_distance_cache_bytes,
         },
         .candidates = .{
             .candidate_count = if (n >= 1000) @as(usize, 5) else @as(usize, 8),

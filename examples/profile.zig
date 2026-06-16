@@ -52,6 +52,20 @@ pub fn main(init: std.process.Init) !void {
                 break :blk if (w != 0) w else if (n >= 1000) @as(usize, 5) else @as(usize, 8);
             },
             .candidate_mode = .alpha_nearness,
+            // Defaults mirror the library (CandidateOptions): sparse on for
+            // n >= 2000. Set PROF_SPARSE_MIN=0 to force the dense path.
+            .neighbor_pool_count = blk: {
+                const s = init.environ_map.get("PROF_POOL") orelse "";
+                break :blk if (s.len > 0) try std.fmt.parseInt(usize, s, 10) else 10;
+            },
+            .sparse_ascent_iterations = blk: {
+                const s = init.environ_map.get("PROF_SPARSE_ASCENT") orelse "";
+                break :blk if (s.len > 0) try std.fmt.parseInt(usize, s, 10) else 100;
+            },
+            .sparse_min_dimension = blk: {
+                const s = init.environ_map.get("PROF_SPARSE_MIN") orelse "";
+                break :blk if (s.len > 0) try std.fmt.parseInt(usize, s, 10) else 2000;
+            },
         },
         .search = .{
             .enable_lk = true,
@@ -62,7 +76,7 @@ pub fn main(init: std.process.Init) !void {
     });
     defer result.deinit();
     const elapsed = monotonicNanos() - start_ns;
-    std.debug.print("{s} n={} trials={} len={} time={d:.0}ms nodes={} best_trial={} max_prog_gap={} final_prog_gap={} worst_ratio={}\n", .{ p.name, n, trials, result.length, @as(f64, @floatFromInt(elapsed)) / 1e6, result.stats.lk_search_nodes, result.stats.best_trial, result.stats.eax_max_progress_gap, result.stats.eax_final_progress_gap, result.stats.eax_worst_gap_ratio_x100 });
+    std.debug.print("{s} n={} trials={} len={} time={d:.0}ms nodes={} best_trial={} lb={} max_prog_gap={} final_prog_gap={} worst_ratio={}\n", .{ p.name, n, trials, result.length, @as(f64, @floatFromInt(elapsed)) / 1e6, result.stats.lk_search_nodes, result.stats.best_trial, result.stats.alpha_ascent_best_lower_bound, result.stats.eax_max_progress_gap, result.stats.eax_final_progress_gap, result.stats.eax_worst_gap_ratio_x100 });
 
     // Roadmap item-1 per-trial cost breakdown (gates items 2/6/8). Trial-loop
     // only; the one-time candidate build is excluded by oracle.resetCounters.

@@ -234,13 +234,13 @@ fn runMode(allocator: std.mem.Allocator, p: *const commiv.Problem, optimum: ?u64
             .trials = trials,
             .trial_extension_factor = trial_extension_factor,
             .max_passes = max_passes,
-            // Force the full matrix for headline timing. Measured: on rl11849
-            // the on-the-fly path is ~11% slower (29.8 -> 33.1 s/20-trial,
-            // bit-identical tour) because ~half of per-trial lookups are
-            // tour-length scans the R2 candidate cache does not cover. The
-            // matrix RAM is a non-issue on the bench host; commiv-profile is
-            // the memory-bounded path for n where the matrix won't fit.
-            .max_distance_cache_bytes = n * n * @sizeOf(u32),
+            // Default 16 MB cache budget: small instances (n <= ~2000) stay
+            // matrix-cached for fast headline timing; large n (rl11849, d18512)
+            // runs on-the-fly. Measured 2026-06-16: forcing the full large-n
+            // matrix bought only ~5-11% wall for 90-146x the RAM (561 MB / 1.37 GB)
+            // and is the ONLY thing standing between d18512 and a runnable bench,
+            // so we never build it here. on-the-fly is the honest large-n path.
+            .max_distance_cache_bytes = (commiv.SolveOptions.Budget{}).max_distance_cache_bytes,
         },
         .candidates = .{
             .candidate_count = candidate_count,

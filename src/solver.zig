@@ -72,6 +72,15 @@ pub const SolveOptions = struct {
         candidate_mode: CandidateMode = .nearest_distance,
         alpha_ascent_iterations: usize = 32,
         alpha_nearest_patch_count: usize = 2,
+        // Sparse (k-NN seeded) alpha build for large geometric instances. Each
+        // 1-tree runs over the k-NN graph (O(n*k)) instead of the complete graph
+        // (O(n^2)): same candidate quality, far cheaper build (rl11849 ~28s -> ~7s,
+        // d18512 ~58s -> ~13s). Gated to n >= sparse_min_dimension so every benched
+        // fixture (<= 1577) stays on the bit-identical dense path. Geometric only
+        // (needs coordinates). sparse_min_dimension == 0 disables it entirely.
+        neighbor_pool_count: usize = 10,
+        sparse_ascent_iterations: usize = 100, // 0 => use alpha_ascent_iterations
+        sparse_min_dimension: usize = 2000, // 0 => sparse disabled
     };
 
     // Local-search behaviour: which moves run and how LK explores.
@@ -379,7 +388,18 @@ pub fn solve(
 
     const width = candidateWidth(n, options.candidates.candidate_count);
     var candidate_stats: CandidateBuildStats = .{};
-    var candidates = try buildCandidates(allocator, &oracle, width, options.candidates.candidate_mode, options.candidates.alpha_ascent_iterations, options.candidates.alpha_nearest_patch_count, &candidate_stats);
+    var candidates = try candidates_mod.buildCandidatesAuto(
+        allocator,
+        &oracle,
+        width,
+        options.candidates.candidate_mode,
+        options.candidates.alpha_ascent_iterations,
+        options.candidates.alpha_nearest_patch_count,
+        options.candidates.neighbor_pool_count,
+        options.candidates.sparse_ascent_iterations,
+        options.candidates.sparse_min_dimension,
+        &candidate_stats,
+    );
     defer candidates.deinit();
     oracle.resetCounters();
 
