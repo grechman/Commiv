@@ -412,51 +412,29 @@ pub const EaxScratch = struct {
 // replaced once the pool is full and the offer beats it. Kicks still come
 // from the single incumbent — pool-sourced kicks were measured dead in
 // round 4 (they dilute intensification).
-/// The per-island EAX merge pool stays at the tuned size: enlarging it was
-/// measured to REGRESS (pr1002 0% -> 0.14%) because the merge loop adopts
-/// products from every in-range member and the adoption dynamics are knife-edge.
-pub fn elitePoolCapacity(n: usize) usize {
-    _ = n;
-    return 6;
-}
-
-/// The cooperative SHARED migration pool is sized larger and adaptively: it only
-/// stores cross-island diversity (drained into each island's tuned-size local
-/// pool), so it does NOT touch the local adoption dynamics -- it just lets more
-/// distinct island discoveries survive between migrations, which large instances
-/// (more near-optimal basins) benefit from.
-pub fn sharedPoolCapacity(n: usize) usize {
-    return std.math.clamp(n / 80, 12, 48);
-}
+const elite_pool_capacity = 6;
 
 pub const ElitePool = struct {
     allocator: std.mem.Allocator,
-    tours: [][]usize,
-    lens: []u64,
+    tours: [elite_pool_capacity][]usize,
+    lens: [elite_pool_capacity]u64,
     count: usize,
 
     pub fn init(allocator: std.mem.Allocator, n: usize) !ElitePool {
-        return initCapacity(allocator, n, elitePoolCapacity(n));
-    }
-
-    pub fn initCapacity(allocator: std.mem.Allocator, n: usize, capacity: usize) !ElitePool {
-        const tours = try allocator.alloc([]usize, capacity);
-        errdefer allocator.free(tours);
-        const lens = try allocator.alloc(u64, capacity);
-        errdefer allocator.free(lens);
+        var self: ElitePool = undefined;
+        self.allocator = allocator;
+        self.count = 0;
         var allocated: usize = 0;
-        errdefer for (tours[0..allocated]) |t| allocator.free(t);
-        for (tours) |*slot| {
+        errdefer for (self.tours[0..allocated]) |t| allocator.free(t);
+        for (&self.tours) |*slot| {
             slot.* = try allocator.alloc(usize, n);
             allocated += 1;
         }
-        return .{ .allocator = allocator, .tours = tours, .lens = lens, .count = 0 };
+        return self;
     }
 
     pub fn deinit(self: *ElitePool) void {
         for (self.tours) |t| self.allocator.free(t);
-        self.allocator.free(self.tours);
-        self.allocator.free(self.lens);
         self.* = undefined;
     }
 };
@@ -476,14 +454,14 @@ pub fn elitePoolOffer(pool: *ElitePool, scratch: *EaxScratch, tour: []const usiz
     for (0..pool.count) |i| {
         if (pool.lens[i] == len and eaxToursShareAllEdges(scratch, pool.tours[i], tour)) return;
     }
-    if (pool.count < pool.tours.len) {
+    if (pool.count < elite_pool_capacity) {
         @memcpy(pool.tours[pool.count], tour);
         pool.lens[pool.count] = len;
         pool.count += 1;
         return;
     }
     var worst: usize = 0;
-    for (1..pool.tours.len) |i| {
+    for (1..elite_pool_capacity) |i| {
         if (pool.lens[i] > pool.lens[worst]) worst = i;
     }
     if (len < pool.lens[worst]) {
@@ -491,78 +469,6 @@ pub fn elitePoolOffer(pool: *ElitePool, scratch: *EaxScratch, tour: []const usiz
         pool.lens[worst] = len;
     }
 }
-
-/// Test-and-set spinlock. This Zig std build has no std.Thread.Mutex; a spinlock
-/// is the right primitive here anyway -- islands contend only at trial
-/// boundaries and the critical section is a handful of memcpys.
-const SpinLock = struct {
-    locked: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-
-    fn lock(self: *SpinLock) void {
-        while (self.locked.swap(true, .acquire)) {
-            std.atomic.spinLoopHint();
-        }
-    }
-    fn unlock(self: *SpinLock) void {
-        self.locked.store(false, .release);
-    }
-};
-
-/// Thread-safe migration buffer for cooperative parallel islands. Islands offer
-/// their best tours into it and drain its population into their own local pool,
-/// so a good tour found by one island becomes recombination material for the
-/// others. Every access copies under the lock -- no island ever holds a slice
-/// into another island's memory, and the hot merge loop still reads only the
-/// island-local pool with no locking.
-pub const SharedElitePool = struct {
-    lock_state: SpinLock = .{},
-    pool: ElitePool,
-    scratch: EaxScratch,
-
-    pub fn init(allocator: std.mem.Allocator, n: usize) !SharedElitePool {
-        var pool = try ElitePool.initCapacity(allocator, n, sharedPoolCapacity(n));
-        errdefer pool.deinit();
-        const scratch = try EaxScratch.init(allocator, n);
-        return .{ .pool = pool, .scratch = scratch };
-    }
-
-    pub fn deinit(self: *SharedElitePool) void {
-        self.pool.deinit();
-        self.scratch.deinit();
-    }
-
-    pub fn offer(self: *SharedElitePool, tour: []const usize, len: u64) void {
-        self.lock_state.lock();
-        defer self.lock_state.unlock();
-        elitePoolOffer(&self.pool, &self.scratch, tour, len);
-    }
-
-    /// Copy the shared population into a caller-owned local pool (dedup uses the
-    /// caller's own scratch). Run at trial boundaries so the island's EAX merge
-    /// loop, which iterates its local pool, sees the other islands' best tours.
-    pub fn drainInto(self: *SharedElitePool, local: *ElitePool, local_scratch: *EaxScratch) void {
-        self.lock_state.lock();
-        defer self.lock_state.unlock();
-        for (0..self.pool.count) |i| {
-            elitePoolOffer(local, local_scratch, self.pool.tours[i], self.pool.lens[i]);
-        }
-    }
-
-    /// Copy the single best shared tour into `out`, returning its length, or null
-    /// if the pool is empty. Used by the n<1000 IPT path, which merges against a
-    /// single reference rather than a pool.
-    pub fn bestInto(self: *SharedElitePool, out: []usize) ?u64 {
-        self.lock_state.lock();
-        defer self.lock_state.unlock();
-        if (self.pool.count == 0) return null;
-        var best: usize = 0;
-        for (1..self.pool.count) |i| {
-            if (self.pool.lens[i] < self.pool.lens[best]) best = i;
-        }
-        @memcpy(out, self.pool.tours[best]);
-        return self.pool.lens[best];
-    }
-};
 
 const EaxOutcome = struct {
     length: u64,

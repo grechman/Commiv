@@ -167,47 +167,49 @@ Headline `alpha-w8-kick` mode at seed 12345 (size-gated IPT/EAX merging, elite p
 
 ### Parallel execution (island model, 3 of 4 cores)
 
-`solveParallel` runs K islands, budget split K ways (so ~K x wall-time speedup),
-leaving one core free. Two modes: `split_budget` (independent islands) and
-`cooperative` (islands migrate best tours through a thread-safe pool ~8x over the
-run). `threads=1` is the bit-identical serial path. Command:
+`solveParallel` runs K independent islands, the trial budget split K ways (so
+~K x wall-time speedup), leaving one core free. Each island is a self-contained
+`solve()` with a distinct seed; the best island wins. This is **deterministic**
+per (seed, thread-count) -- fixed per-island seeds, no shared state -- so it
+reproduces exactly run to run. `threads=1` is the bit-identical serial path.
+Command:
 
 ```sh
-BENCH_THREADS=3 BENCH_PMODE=coop taskset -c 0-2 nice -n 10 zig build parbench -Doptimize=ReleaseFast
+BENCH_THREADS=3 taskset -c 0-2 nice -n 10 zig build parbench -Doptimize=ReleaseFast
 ```
 
-Honest findings on this 4-core host (3 islands):
+Findings on this 4-core host (3 islands), each value reproducible across runs:
 
-- **`split_budget` is a real ~2x wall-time lever** at a small accuracy cost (each
-  island sees trials/3). Most interesting against LKH where LKH is slow.
-- **`cooperative` recovers much of that accuracy at n>=1000** (where islands share
-  through the EAX elite pool) and is even slightly faster than split. Below 1000
-  the shared-reference IPT mechanism is weaker (a wash). Reproducible, two runs:
+| Instance | n | serial (gap) | split-3 (gap) | LKH (gap) |
+|---|---:|---:|---:|---:|
+| fl417 | 417 | 2.60 s (0.000%) | 1.35 s (0.000%) | 10.29 s (0.000%) |
+| att532 | 532 | 1.49 s (0.000%) | 1.16 s (0.061%) | 8.82 s (0.000%) |
+| u574 | 574 | 3.19 s (0.000%) | 2.06 s (0.000%) | 4.80 s (0.000%) |
+| d657 | 657 | 1.78 s (0.008%) | 1.17 s (0.074%) | 2.49 s (0.000%) |
+| pr1002 | 1002 | 7.44 s (0.000%) | 3.0 s (0.046%) | 2.96 s (0.000%) |
+| fl1577 | 1577 | 11.6 s (0.031%) | 4.8 s (0.126%) | 145.66 s (0.058%) |
 
-  | Instance | n | serial (gap) | split-3 (gap) | coop-3 (gap) | LKH (gap) |
-  |---|---:|---:|---:|---:|---:|
-  | fl417 | 417 | 2.60 s (0.000%) | 1.35 s (0.000%) | 1.36 s (0.000%) | 10.29 s (0.000%) |
-  | att532 | 532 | 1.49 s (0.000%) | 1.16 s (0.061%) | 0.87 s (0.069%) | 8.82 s (0.000%) |
-  | u574 | 574 | 3.19 s (0.000%) | 2.06 s (0.000%) | 1.70 s (0.000%) | 4.80 s (0.000%) |
-  | d657 | 657 | 1.78 s (0.008%) | 1.17 s (0.074%) | 1.40 s (0.074%) | 2.49 s (0.000%) |
-  | pr1002 | 1002 | 7.44 s (0.000%) | 3.12 s (0.046%) | **2.7 s (0.031%)** | 2.96 s (0.000%) |
-  | fl1577 | 1577 | 11.6 s (0.031%) | 5.04 s (0.126%) | **4.5 s (0.076%)** | 145.66 s (0.058%) |
-
-  (`best_of_islands` -- full budget per island -- was implemented and **deleted**:
-  on a memory-bandwidth-bound workload 3 full islands contend and run *slower*
-  with no quality gain, since the search is already near-optimal single-core.)
-
+- **split_budget is the one parallel mode** -- deterministic, ~2.5x faster, at a
+  small reproducible accuracy cost. For maximum accuracy, run serial (which hits
+  the optimum on most instances).
 - The bigger point the single-core table already makes: **we beat LKH on
   wall-time on the medium/large instances on one core** (fl1577 11.6 s vs 145.66 s,
   att532 1.49 s vs 8.82 s, fl417 2.60 s vs 10.29 s) at equal or near-equal
-  quality. The one instance where LKH was faster (pr1002, 2.96 s vs our 7.44 s)
-  is matched by `cooperative` (2.7 s) at a 0.031% gap.
+  quality. Parallelism is a speed lever, not an accuracy lever: there is no
+  parallel trick that beats serial's accuracy without redoing serial's
+  recombination work.
+- Two parallel variants were built and **removed**: `best_of_islands` (full
+  budget per island) ran *slower* with no quality gain -- on a
+  memory-bandwidth-bound workload 3 full islands just contend. `cooperative`
+  (islands migrating tours mid-search) was high-variance: the migration content
+  is thread-timing-dependent and the merge-then-adopt step amplifies it into
+  chaotic run-to-run swings (pr1002 0.001%-0.267% for the *same* config). The
+  only deterministic fix is to redo serial's recombination, i.e. just run serial.
 - Memory: the n×n distance matrix is the only large allocation (561 MB at
   rl11849). It is **optional** -- the library default runs large n on-the-fly at
   ~5 MB; the matrix is forced only for the fastest headline timing, and even that
-  edge is now ~10% (it was the obsolete pre-scan-removal premise). Cooperative
-  results are non-deterministic (migration timing). rl11849 / d18512 parallel +
-  multi-seed coop confirmation + a fresh LKH re-run are deferred (big-runtime).
+  edge is now ~10% (it was the obsolete pre-scan-removal premise). rl11849 /
+  d18512 parallel + a fresh LKH re-run are deferred (big-runtime).
 
 Current read:
 

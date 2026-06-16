@@ -19,14 +19,12 @@ pub const bruteForce = exact.bruteForce;
 pub const ExactOptions = exact.ExactOptions;
 
 pub const solve = solver.solve;
-pub const solveWithSharedPool = solver.solveWithSharedPool;
 pub const SolveOptions = solver.SolveOptions;
 pub const SolveResult = solver.SolveResult;
 pub const SolveStats = solver.SolveStats;
 pub const CandidateMode = solver.CandidateMode;
 
 pub const solveParallel = parallel.solveParallel;
-pub const ParallelMode = parallel.ParallelMode;
 pub const ParallelOptions = parallel.ParallelOptions;
 
 test {

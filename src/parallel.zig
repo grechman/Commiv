@@ -1,41 +1,30 @@
 const std = @import("std");
 const problem = @import("problem.zig");
 const solver = @import("solver.zig");
-const recombine = @import("recombine.zig");
 
 const SolveOptions = solver.SolveOptions;
 const SolveResult = solver.SolveResult;
 const SolveStats = solver.SolveStats;
-const SharedElitePool = recombine.SharedElitePool;
 
-// Island-model parallel solving. Trials are independent units of work and each
-// solve() call is fully self-contained (own oracle, candidates, workspace,
-// elite pool, RNG seeded from options.seed), so islands with distinct seeds run
-// with no shared mutable state beyond the optional cooperative pool. The Problem
-// is read-only and shared. Results are NOT bit-identical to the single-core run
-// (independent exploration), and cooperative runs are non-deterministic
-// (migration timing); the winner is still chosen by min length with a low-index
-// tie-break.
+// Island-model parallel solving. The trial budget is split across K independent
+// islands (trials/K each) with distinct seeds; each solve() is fully
+// self-contained (own oracle, candidates, workspace, elite pool, RNG seeded from
+// options.seed) and the Problem is read-only, so there is no shared mutable
+// state. The best island wins (min length, low-index tie-break), which makes the
+// whole thing DETERMINISTIC per (seed, thread-count) -- a fixed ~K x speedup at a
+// small, reproducible accuracy cost.
 //
-// Both modes split the trial budget across islands (trials/K each) for the ~K x
-// wall-time speedup. `cooperative` additionally shares each island's best tour
-// through a thread-safe pool, so islands recombine each other's discoveries --
-// the experiment to claw back the accuracy `split_budget` gives up.
-
-pub const ParallelMode = enum {
-    /// Independent islands, budget split K ways. ~K x faster, lower accuracy.
-    split_budget,
-    /// Split-budget islands that migrate best tours through a shared pool, to
-    /// recover accuracy without giving up the speedup.
-    cooperative,
-};
+// (A cooperative variant that migrated tours between islands mid-search was built
+// and removed: in-search migration content is thread-timing-dependent and the
+// merge-then-adopt step amplifies it into chaotic run-to-run variance. The only
+// deterministic way to recover the accuracy split gives up is to redo serial's
+// recombination work -- i.e. just run serial, which already hits the optimum.)
 
 pub const ParallelOptions = struct {
     /// 0 = auto: max(1, cpuCount - 1), always leaving one core free for the rest
     /// of the machine. 1 = serial: routes straight to solve() (bit-identical).
     /// >1 = that many islands.
     threads: usize = 0,
-    mode: ParallelMode = .split_budget,
 };
 
 /// Resolve a requested thread count to an actual island count, leaving one core
@@ -53,14 +42,14 @@ const IslandSlot = struct {
     ok: bool,
 };
 
-fn islandWorker(p: *const problem.Problem, options: SolveOptions, shared: ?*SharedElitePool, slot: *IslandSlot) void {
+fn islandWorker(p: *const problem.Problem, options: SolveOptions, slot: *IslandSlot) void {
     // Per-island arena over the thread-safe page allocator: the solve allocates
     // everything here and it is torn down before the worker returns. The result
     // tour (arena-owned) is copied into the parent-owned slot buffer first, so
     // nothing the parent reads outlives this frame's arena.
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
-    const result = solver.solveWithSharedPool(arena.allocator(), p, options, shared) catch {
+    const result = solver.solve(arena.allocator(), p, options) catch {
         slot.ok = false;
         return;
     };
@@ -91,10 +80,6 @@ pub fn solveParallel(
     const n = p.dimension;
     const total_trials = @max(options.budget.trials, 1);
 
-    var shared: ?SharedElitePool = if (par.mode == .cooperative) try SharedElitePool.init(allocator, n) else null;
-    defer if (shared) |*sp| sp.deinit();
-    const shared_ptr: ?*SharedElitePool = if (shared) |*sp| sp else null;
-
     const slots = try allocator.alloc(IslandSlot, k);
     defer allocator.free(slots);
 
@@ -116,14 +101,14 @@ pub fn solveParallel(
     var spawned: usize = 0;
     for (0..k) |i| {
         const opts = islandOptions(options, i, k, total_trials);
-        threads[i] = std.Thread.spawn(.{}, islandWorker, .{ p, opts, shared_ptr, &slots[i] }) catch break;
+        threads[i] = std.Thread.spawn(.{}, islandWorker, .{ p, opts, &slots[i] }) catch break;
         spawned += 1;
     }
     // If a spawn failed (e.g. thread limit), run the remainder inline so every
     // island still produces a result.
     for (spawned..k) |i| {
         const opts = islandOptions(options, i, k, total_trials);
-        islandWorker(p, opts, shared_ptr, &slots[i]);
+        islandWorker(p, opts, &slots[i]);
     }
     for (0..spawned) |i| threads[i].join();
 
@@ -166,18 +151,16 @@ test "solveParallel: threads=1 routes to solve() (bit-identical)" {
     try std.testing.expectEqualSlices(usize, serial.tour, par.tour);
 }
 
-test "solveParallel: split and cooperative produce valid self-consistent tours" {
+test "solveParallel: split islands produce a valid self-consistent tour" {
     const allocator = std.testing.allocator;
     var p = try problem.Problem.initCoords(allocator, "ring", .euc_2d, &ring_coords);
     defer p.deinit();
     const opts = SolveOptions{ .seed = 1, .budget = .{ .trials = 12, .max_passes = 40 }, .candidates = .{ .candidate_count = 6 } };
 
-    inline for (.{ ParallelMode.split_budget, ParallelMode.cooperative }) |mode| {
-        var par = try solveParallel(allocator, &p, opts, .{ .threads = 3, .mode = mode });
-        defer par.deinit();
-        try p.validateTour(par.tour);
-        try std.testing.expectEqual(par.length, try p.tourLength(par.tour));
-    }
+    var par = try solveParallel(allocator, &p, opts, .{ .threads = 3 });
+    defer par.deinit();
+    try p.validateTour(par.tour);
+    try std.testing.expectEqual(par.length, try p.tourLength(par.tour));
 }
 
 test "resolveThreadCount leaves one core free on auto and honors explicit" {

@@ -14,7 +14,6 @@ const commiv = @import("commiv");
 //
 // Env:
 //   BENCH_THREADS  island count (default 0 = auto = cpuCount-1, one core free)
-//   BENCH_PMODE    "best" (default) or "split"
 // Pin with taskset so the machine stays usable, e.g.
 //   BENCH_THREADS=3 taskset -c 0-2 nice -n 10 zig build parbench -Doptimize=ReleaseFast
 
@@ -54,13 +53,9 @@ pub fn main(init: std.process.Init) !void {
         const s = init.environ_map.get("BENCH_THREADS") orelse "0";
         break :blk std.fmt.parseInt(usize, s, 10) catch 0;
     };
-    const pmode: commiv.ParallelMode = blk: {
-        const s = init.environ_map.get("BENCH_PMODE") orelse "split";
-        break :blk if (std.mem.eql(u8, s, "coop")) .cooperative else .split_budget;
-    };
     const island_count = commiv.parallel.resolveThreadCount(threads);
 
-    std.debug.print("# parallel benchmark: {} islands, mode={s}, seed={}\n", .{ island_count, @tagName(pmode), seed });
+    std.debug.print("# parallel benchmark: {} islands (split), seed={}\n", .{ island_count, seed });
     std.debug.print("# {s:<10} {s:>5} | {s:>9} {s:>8} {s:>9} | {s:>9} {s:>8} {s:>9}\n", .{
         "instance", "n", "ser_len", "ser_gap", "ser_ms", "par_len", "par_gap", "par_ms",
     });
@@ -92,7 +87,7 @@ pub fn main(init: std.process.Init) !void {
 
         // Parallel.
         const par_start = monotonicNanos();
-        var par = try commiv.solveParallel(allocator, &p, opts, .{ .threads = threads, .mode = pmode });
+        var par = try commiv.solveParallel(allocator, &p, opts, .{ .threads = threads });
         const par_ms = nanosToMs(monotonicNanos() - par_start);
         defer par.deinit();
         try p.validateTour(par.tour);
