@@ -495,6 +495,12 @@ pub fn solveWithSharedPool(
         std.math.mul(usize, trials, options.budget.trial_extension_factor) catch trials
     else
         trials;
+    // Cooperative islands migrate only every `migration_interval` trials, not
+    // every trial: every-trial migration floods each island's local pool with
+    // siblings' tours and collapses the diversity EAX/IPT recombination feeds
+    // on (premature convergence -- measured strictly worse than no sharing).
+    // ~8 migrations per island over the run is the gentle dose.
+    const migration_interval = @max(max_trials / 8, 1);
     // No adaptive convergence stop: factor-8 progress-gap patience (stop when
     // quiet 8x longer than the run's longest productive quiet, floor 64) was
     // measured and REJECTED — at the pinned seed it cut a280/fl417/ts225
@@ -824,11 +830,13 @@ pub fn solveWithSharedPool(
         // shared population into the local EAX pool (read by the merge loop);
         // n<1000 refreshes the single migrant the IPT path merges against.
         if (shared) |sp| {
-            if (best_len != std.math.maxInt(u64)) sp.offer(workspace.best_tour, best_len);
-            if (n >= eax_min_dimension) {
-                sp.drainInto(&elite, &eax);
-            } else if (sp.bestInto(migrant)) |ml| {
-                migrant_len = ml;
+            if (trial % migration_interval == 0) {
+                if (best_len != std.math.maxInt(u64)) sp.offer(workspace.best_tour, best_len);
+                if (n >= eax_min_dimension) {
+                    sp.drainInto(&elite, &eax);
+                } else if (sp.bestInto(migrant)) |ml| {
+                    migrant_len = ml;
+                }
             }
         }
     }
