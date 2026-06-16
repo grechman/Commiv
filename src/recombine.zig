@@ -412,29 +412,51 @@ pub const EaxScratch = struct {
 // replaced once the pool is full and the offer beats it. Kicks still come
 // from the single incumbent — pool-sourced kicks were measured dead in
 // round 4 (they dilute intensification).
-const elite_pool_capacity = 6;
+/// The per-island EAX merge pool stays at the tuned size: enlarging it was
+/// measured to REGRESS (pr1002 0% -> 0.14%) because the merge loop adopts
+/// products from every in-range member and the adoption dynamics are knife-edge.
+pub fn elitePoolCapacity(n: usize) usize {
+    _ = n;
+    return 6;
+}
+
+/// The cooperative SHARED migration pool is sized larger and adaptively: it only
+/// stores cross-island diversity (drained into each island's tuned-size local
+/// pool), so it does NOT touch the local adoption dynamics -- it just lets more
+/// distinct island discoveries survive between migrations, which large instances
+/// (more near-optimal basins) benefit from.
+pub fn sharedPoolCapacity(n: usize) usize {
+    return std.math.clamp(n / 80, 12, 48);
+}
 
 pub const ElitePool = struct {
     allocator: std.mem.Allocator,
-    tours: [elite_pool_capacity][]usize,
-    lens: [elite_pool_capacity]u64,
+    tours: [][]usize,
+    lens: []u64,
     count: usize,
 
     pub fn init(allocator: std.mem.Allocator, n: usize) !ElitePool {
-        var self: ElitePool = undefined;
-        self.allocator = allocator;
-        self.count = 0;
+        return initCapacity(allocator, n, elitePoolCapacity(n));
+    }
+
+    pub fn initCapacity(allocator: std.mem.Allocator, n: usize, capacity: usize) !ElitePool {
+        const tours = try allocator.alloc([]usize, capacity);
+        errdefer allocator.free(tours);
+        const lens = try allocator.alloc(u64, capacity);
+        errdefer allocator.free(lens);
         var allocated: usize = 0;
-        errdefer for (self.tours[0..allocated]) |t| allocator.free(t);
-        for (&self.tours) |*slot| {
+        errdefer for (tours[0..allocated]) |t| allocator.free(t);
+        for (tours) |*slot| {
             slot.* = try allocator.alloc(usize, n);
             allocated += 1;
         }
-        return self;
+        return .{ .allocator = allocator, .tours = tours, .lens = lens, .count = 0 };
     }
 
     pub fn deinit(self: *ElitePool) void {
         for (self.tours) |t| self.allocator.free(t);
+        self.allocator.free(self.tours);
+        self.allocator.free(self.lens);
         self.* = undefined;
     }
 };
@@ -454,14 +476,14 @@ pub fn elitePoolOffer(pool: *ElitePool, scratch: *EaxScratch, tour: []const usiz
     for (0..pool.count) |i| {
         if (pool.lens[i] == len and eaxToursShareAllEdges(scratch, pool.tours[i], tour)) return;
     }
-    if (pool.count < elite_pool_capacity) {
+    if (pool.count < pool.tours.len) {
         @memcpy(pool.tours[pool.count], tour);
         pool.lens[pool.count] = len;
         pool.count += 1;
         return;
     }
     var worst: usize = 0;
-    for (1..elite_pool_capacity) |i| {
+    for (1..pool.tours.len) |i| {
         if (pool.lens[i] > pool.lens[worst]) worst = i;
     }
     if (len < pool.lens[worst]) {
@@ -498,7 +520,7 @@ pub const SharedElitePool = struct {
     scratch: EaxScratch,
 
     pub fn init(allocator: std.mem.Allocator, n: usize) !SharedElitePool {
-        var pool = try ElitePool.init(allocator, n);
+        var pool = try ElitePool.initCapacity(allocator, n, sharedPoolCapacity(n));
         errdefer pool.deinit();
         const scratch = try EaxScratch.init(allocator, n);
         return .{ .pool = pool, .scratch = scratch };
