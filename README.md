@@ -129,7 +129,7 @@ pub fn main() !void {
 | `solveCvrpSisr` | Large and/or directed instances. This is the road-network case. |
 | `solveCvrpHgs` | Mid-size CVRP, n up to about 500, where you want the last bit of quality. |
 | `solveCvrpSisrParallel` / `solveCvrpHgsParallel` | The same, spread across cores. |
-| `solveCvrp` | A convenience entry point with sensible defaults. |
+| `solveCvrp` | The no-config default. Runs SISR with default params. |
 
 ### 5. Plain TSP and ATSP
 
@@ -184,7 +184,7 @@ unit tests in its own source file.
 - `solveCvrpSisr(allocator, inst, SolveOptions, CvrpSisrParams)` for large or directed.
 - `solveCvrpHgs(allocator, inst, SolveOptions, CvrpHgsParams)` for n up to about 500.
 - `solveCvrpSisrParallel(...)`, `solveCvrpHgsParallel(...)` are the multi-threaded variants.
-- `solveCvrp(...)`, `solveCvrpFleet(...)` are convenience and fixed-fleet entry points.
+- `solveCvrp(...)` is the no-config default and runs SISR; `solveCvrpFleet(...)` is the fixed-fleet entry point.
 
 **VRPTW**
 - `solveVrptw(allocator, inst, SolveOptions)`, `solveVrptwHgs(...)`.
@@ -519,7 +519,7 @@ pub fn main() !void {
 | `solveCvrpSisr` | Большие и/или направленные задачи. Это случай дорожной сети. |
 | `solveCvrpHgs` | Средняя CVRP, n примерно до 500, когда нужна последняя доля качества. |
 | `solveCvrpSisrParallel` / `solveCvrpHgsParallel` | То же самое, но по нескольким ядрам. |
-| `solveCvrp` | Удобная точка входа с разумными значениями по умолчанию. |
+| `solveCvrp` | Точка входа по умолчанию без настройки. Запускает SISR. |
 
 ### 5. Обычные TSP и ATSP
 
@@ -574,7 +574,7 @@ defer atsp.deinit();
 - `solveCvrpSisr(allocator, inst, SolveOptions, CvrpSisrParams)` для больших или направленных.
 - `solveCvrpHgs(allocator, inst, SolveOptions, CvrpHgsParams)` для n примерно до 500.
 - `solveCvrpSisrParallel(...)`, `solveCvrpHgsParallel(...)` — многопоточные варианты.
-- `solveCvrp(...)`, `solveCvrpFleet(...)` — удобная точка входа и вход с фиксированным парком.
+- `solveCvrp(...)` — точка входа по умолчанию без настройки (запускает SISR); `solveCvrpFleet(...)` — вход с фиксированным парком.
 
 **VRPTW**
 - `solveVrptw(allocator, inst, SolveOptions)`, `solveVrptwHgs(...)`.
