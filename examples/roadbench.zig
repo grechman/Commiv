@@ -132,9 +132,14 @@ fn parseRoad(allocator: std.mem.Allocator, bytes: []const u8) !Road {
             continue;
         } else if (std.mem.eql(u8, first, "DIM")) {
             dim = try std.fmt.parseInt(usize, tok.next() orelse return error.BadFormat, 10);
+            // Cap the dimension and use a checked multiply: a hostile/garbled file
+            // could otherwise wrap dim*dim (silent in ReleaseFast) into an
+            // undersized buffer and OOB-write, or demand an absurd allocation.
+            if (dim < 1 or dim > 100_000) return error.BadFormat;
+            const cells = std.math.mul(usize, dim, dim) catch return error.BadFormat;
             demand = try allocator.alloc(u32, dim);
             @memset(demand, 0);
-            matrix = try allocator.alloc(u32, dim * dim);
+            matrix = try allocator.alloc(u32, cells);
             @memset(matrix, 0);
         } else if (std.mem.eql(u8, first, "CAPACITY")) {
             capacity = try std.fmt.parseInt(u32, tok.next() orelse return error.BadFormat, 10);

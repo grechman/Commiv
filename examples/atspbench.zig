@@ -172,12 +172,15 @@ fn parseAtsp(allocator: std.mem.Allocator, bytes: []const u8) !Parsed {
             break;
         }
     }
-    if (n == 0) return error.NoDim;
-    const matrix = try allocator.alloc(u32, n * n);
+    if (n == 0 or n > 100_000) return error.NoDim;
+    // Checked multiply + dimension cap: an unbounded DIMENSION could otherwise
+    // wrap n*n (silent in ReleaseFast) into an undersized buffer and OOB-write.
+    const cells = std.math.mul(usize, n, n) catch return error.NoDim;
+    const matrix = try allocator.alloc(u32, cells);
     errdefer allocator.free(matrix);
     var nums = std.mem.tokenizeAny(u8, bytes[section_off..], " \t\r\n");
     var k: usize = 0;
-    while (k < n * n) {
+    while (k < cells) {
         const tok = nums.next() orelse return error.TooFewWeights;
         const val = std.fmt.parseInt(u32, tok, 10) catch continue; // skip stray tokens (EOF, etc.)
         matrix[k] = val;

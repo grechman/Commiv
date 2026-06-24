@@ -188,8 +188,11 @@ fn parseSolomon(allocator: std.mem.Allocator, bytes: []const u8) !Owned {
         try svc.append(allocator, s * SCALE);
     }
     const dim = xs.items.len;
-    if (dim < 2) return error.BadInstance;
-    const matrix = try allocator.alloc(u32, dim * dim);
+    if (dim < 2 or dim > 100_000) return error.BadInstance;
+    // Checked multiply + cap, consistent with the other bench parsers, so a
+    // pathological instance can't wrap dim*dim into an undersized buffer.
+    const cells = std.math.mul(usize, dim, dim) catch return error.BadInstance;
+    const matrix = try allocator.alloc(u32, cells);
     errdefer allocator.free(matrix);
     for (0..dim) |i| {
         for (0..dim) |j| {

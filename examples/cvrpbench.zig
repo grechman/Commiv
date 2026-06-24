@@ -351,10 +351,13 @@ fn parseCvrplib(allocator: std.mem.Allocator, bytes: []const u8) !OwnedInstance 
             else => {},
         }
     }
-    if (dimension < 2) return error.BadInstance;
+    if (dimension < 2 or dimension > 100_000) return error.BadInstance;
 
-    // Rounded-Euclidean symmetric matrix; depot is node 1 -> index 0.
-    const matrix = try allocator.alloc(u32, dimension * dimension);
+    // Rounded-Euclidean symmetric matrix; depot is node 1 -> index 0. Checked
+    // multiply + cap so an unbounded DIMENSION can't wrap dimension*dimension
+    // (silent in ReleaseFast) into an undersized buffer and OOB-write.
+    const cells = std.math.mul(usize, dimension, dimension) catch return error.BadInstance;
+    const matrix = try allocator.alloc(u32, cells);
     errdefer allocator.free(matrix);
     for (0..dimension) |i| {
         for (0..dimension) |j| {
