@@ -40,10 +40,6 @@ pub const ExactOptions = exact.ExactOptions;
 
 pub const solve = solver.solve;
 pub const SolveOptions = solver.SolveOptions;
-pub const recombineTours = solver.recombineTours;
-pub const refineBySubproblem = solver.refineBySubproblem;
-pub const refineBySubproblemSchedule = solver.refineBySubproblemSchedule;
-pub const SubproblemRefineOptions = solver.SubproblemRefineOptions;
 pub const SolveResult = solver.SolveResult;
 pub const SolveStats = solver.SolveStats;
 pub const CandidateMode = solver.CandidateMode;
