@@ -77,8 +77,18 @@ def main():
         f.write("MOVE_TYPE = 2\nMAX_CANDIDATES = 5\n")            # cheap 2-opt moves -> more trials (best config found at n=1000)
         f.write(f"TOUR_FILE = {tour}\nSEED = 1\nTRACE_LEVEL = 1\n")
 
+    # LKH writes TOUR_FILE only on a successful run; a stale tour left by a prior
+    # run on the same instance would otherwise be parsed as this run's result.
+    if os.path.exists(tour):
+        os.remove(tour)
+
     t0 = time.time()
-    res = subprocess.run([lkh, par], capture_output=True, text=True, timeout=tlimit + 120)
+    try:
+        res = subprocess.run([lkh, par], capture_output=True, text=True, timeout=tlimit + 120)
+    except subprocess.TimeoutExpired:
+        el = time.time() - t0
+        print(f"lkh,{path},{dim},NA,NA,{el:.1f},TIMEOUT")
+        return
     el = time.time() - t0
     if not os.path.exists(tour):
         tail = (res.stdout or res.stderr)[-400:]

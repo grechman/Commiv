@@ -74,8 +74,17 @@ def main():
         f.write(f"TOUR_FILE = {tour}\nSEED = 1\nTRACE_LEVEL = 1\n")
 
     print(f"# sweep: {r} routes ({vehicles} vehicles), cost {sweep_cost}, valid={sweep_err or 'OK'}")
+    # Clear any stale tour from a prior run on this instance: LKH writes TOUR_FILE
+    # only on success, so a leftover file would be mis-parsed as this run's result.
+    if os.path.exists(tour):
+        os.remove(tour)
     t0 = time.time()
-    res = subprocess.run([lkh, par], capture_output=True, text=True, timeout=tlimit + 600)
+    try:
+        res = subprocess.run([lkh, par], capture_output=True, text=True, timeout=tlimit + 600)
+    except subprocess.TimeoutExpired:
+        el = time.time() - t0
+        print(f"lkh-warm,{path},{dim},NA,NA,{el:.1f},TIMEOUT")
+        return
     el = time.time() - t0
     with open(os.path.join(SCRATCH, base + '_warm.log'), 'w') as lf:
         lf.write(res.stdout or "")
