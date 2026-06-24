@@ -160,6 +160,11 @@ fn splitDpTw(allocator: std.mem.Allocator, inst: VrptwInstance, giant: []const u
             // and may close in time -> keep extending (do not break).
         }
     }
+    // No TW- and capacity-feasible split of this order exists (a customer whose
+    // window is unreachable even as a singleton route). Return a clean error
+    // instead of a maxInt cost over an uninitialized pred chain that
+    // rebuildFromGiant would walk into OOB / a non-terminating loop.
+    if (p[n] == INF) return error.NoFeasibleSplit;
     return .{ .cost = p[n], .pred = pred };
 }
 
@@ -317,6 +322,9 @@ const Solution = struct {
             .loc_route = try allocator.alloc(usize, inst.n + 1),
             .loc_pos = try allocator.alloc(usize, inst.n + 1),
         };
+        // rebuildFromGiant can fail (no TW-feasible split); free the just-built
+        // Solution on that path instead of leaking its buffers (ZIG-3).
+        errdefer s.deinit();
         try s.rebuildFromGiant(giant);
         return s;
     }
@@ -1747,6 +1755,33 @@ pub fn solveVrptwHgs(allocator: std.mem.Allocator, inst: VrptwInstance, options:
 }
 
 // ---- tests ----
+
+test "VRPTW returns a clean error for a TW-unreachable customer" {
+    const allocator = std.testing.allocator;
+    // Customer 2 is due at 10 but every arc into it costs 100 (from the depot AND
+    // from customer 1), so it cannot be served in time in any route position and
+    // no TW-feasible split exists. The solver must surface a clean error rather
+    // than walk an uninitialized pred chain (regression for splitDpTw, ZIG-1).
+    const m = [_]u32{
+        0,   5, 100,
+        5,   0, 100,
+        100, 5, 0,
+    };
+    const demand = [_]u32{ 0, 1, 1 };
+    const ready = [_]u32{ 0, 0, 0 };
+    const due = [_]u32{ 1000, 1000, 10 };
+    const service = [_]u32{ 0, 0, 0 };
+    const inst = VrptwInstance{
+        .n = 2,
+        .matrix = &m,
+        .demand = &demand,
+        .capacity = 10,
+        .ready = &ready,
+        .due = &due,
+        .service = &service,
+    };
+    try std.testing.expectError(error.NoFeasibleSplit, solveVrptw(allocator, inst, .{ .seed = 1 }, 5, 1, 0));
+}
 
 test "TWS concatenation feasibility matches the scheduler (oracle)" {
     const allocator = std.testing.allocator;
