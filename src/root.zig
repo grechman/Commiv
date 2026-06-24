@@ -24,7 +24,7 @@ pub const CvrpSisrParams = vrp.SisrParams;
 pub const vrptw = @import("vrptw.zig");
 pub const solveVrptw = vrptw.solveVrptw;
 pub const solveVrptwHgs = vrptw.solveVrptwHgs;
-pub const HgsParams = vrptw.HgsParams;
+pub const VrptwHgsParams = vrptw.HgsParams;
 
 pub const Coord = problem.Coord;
 pub const DistanceKind = problem.DistanceKind;
