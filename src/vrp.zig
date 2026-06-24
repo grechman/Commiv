@@ -1177,17 +1177,18 @@ const Solution = struct {
             .active = try allocator.alloc(bool, n + 1),
         };
         @memcpy(s.order, giant);
-        // boundaries from pred chain
-        var bounds: [4096]usize = undefined;
+        // boundaries from pred chain: write the descending route ends straight
+        // into route_end (sized n; route count is always <= n), then reverse the
+        // used prefix in place. No fixed-size stack buffer, so a tight-capacity
+        // instance with > n/few-per-route routes can never overrun it.
         var nb: usize = 0;
         var i = n;
         while (i > 0) {
-            bounds[nb] = i;
+            s.route_end[nb] = i;
             nb += 1;
             i = pred[i];
         }
-        // bounds are descending ends; reverse into route_end ascending
-        for (0..nb) |k| s.route_end[k] = bounds[nb - 1 - k];
+        std.mem.reverse(usize, s.route_end[0..nb]);
         s.nroutes = nb;
         s.recompute();
         return s;
@@ -2346,15 +2347,16 @@ const Solution = struct {
             splitDp(self.allocator, self.inst, self.scratch)) catch return;
         defer self.allocator.free(sp.pred);
         @memcpy(self.order, self.scratch);
-        var bounds: [4096]usize = undefined;
+        // descending route ends -> route_end (sized n, route count <= n), then
+        // reverse the used prefix in place. No fixed [4096] buffer to overrun.
         var nb: usize = 0;
         var i = n;
         while (i > 0) {
-            bounds[nb] = i;
+            self.route_end[nb] = i;
             nb += 1;
             i = sp.pred[i];
         }
-        for (0..nb) |k| self.route_end[k] = bounds[nb - 1 - k];
+        std.mem.reverse(usize, self.route_end[0..nb]);
         self.nroutes = nb;
         self.recompute();
     }
