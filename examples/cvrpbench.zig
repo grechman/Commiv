@@ -156,7 +156,7 @@ pub fn main(init: std.process.Init) !void {
             @memset(ready, 0);
             @memset(due, std.math.maxInt(u32) / 4);
             @memset(service, 0);
-            const vinst = commiv.vrptw.VrptwInstance{
+            const vinst = commiv.VrptwInstance{
                 .n = n,
                 .matrix = inst.matrix,
                 .demand = inst.demand,
@@ -174,7 +174,7 @@ pub fn main(init: std.process.Init) !void {
             defer vres.deinit();
             total_cost = vres.total_cost;
             nroutes = vres.vehicles;
-            const vchk = commiv.vrptw.validate(vinst, vres.routes);
+            const vchk = commiv.internal.vrptw.validate(vinst, vres.routes);
             feasible = vchk != null and vchk.? == vres.total_cost;
             const ms = @as(f64, @floatFromInt(nanos() - t0)) / 1e6;
             const opt = bksFor(name) orelse inst_owned.opt;
@@ -211,11 +211,11 @@ pub fn main(init: std.process.Init) !void {
                 .lambda = try std.fmt.parseInt(usize, env.get("CB_LAMBDA") orelse "0", 10),
             }, 0)
         else
-            try commiv.vrp.solveCvrpMulti(allocator, inst, solve_opts, rounds, restarts);
+            try commiv.internal.vrp.solveCvrpMulti(allocator, inst, solve_opts, rounds, restarts);
         defer res.deinit();
         const ms = @as(f64, @floatFromInt(nanos() - t0)) / 1e6;
 
-        const checked = commiv.vrp.validate(inst, res.routes);
+        const checked = commiv.internal.vrp.validate(inst, res.routes);
         feasible = checked != null and checked.? == res.total_cost;
         // Authoritative proven-optimal value (CVRPLIB Augerat A). The file COMMENT
         // values in some mirrors are wrong, so we never trust them.
@@ -266,7 +266,7 @@ const OwnedInstance = struct {
     opt: u64,
     k: usize,
 
-    fn inst(self: *const OwnedInstance) commiv.vrp.CvrpInstance {
+    fn inst(self: *const OwnedInstance) commiv.CvrpInstance {
         return .{ .n = self.n, .matrix = self.matrix, .demand = self.demand, .capacity = self.capacity };
     }
     fn deinit(self: *OwnedInstance, allocator: std.mem.Allocator) void {

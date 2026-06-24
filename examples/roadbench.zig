@@ -39,7 +39,7 @@ pub fn main(init: std.process.Init) !void {
         var road = try parseRoad(allocator, bytes);
         defer road.deinit(allocator);
         const dim = road.dim;
-        const inst = commiv.vrp.CvrpInstance{
+        const inst = commiv.CvrpInstance{
             .n = dim - 1,
             .matrix = road.matrix,
             .demand = road.demand,

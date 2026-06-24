@@ -4,7 +4,7 @@ const commiv = @import("commiv");
 const Mode = struct {
     name: []const u8,
     enable_lk: bool,
-    candidate_mode: commiv.solver.CandidateMode,
+    candidate_mode: commiv.CandidateMode,
     trials: ?usize = null,
     // 0 = fixed trial count from `trials`; k > 0 = k * dimension trials.
     dimension_trials_scale: usize = 0,
@@ -140,10 +140,10 @@ fn reportCandidateCoverage(allocator: std.mem.Allocator, io: std.Io, p: *const c
     const widths = [_]usize{ 4, 8, 12, 24 };
     for (widths) |requested_width| {
         const width = @min(requested_width, p.dimension - 1);
-        var oracle = try commiv.solver.DistanceOracle.init(allocator, p, p.dimension * p.dimension);
+        var oracle = try commiv.internal.solver.DistanceOracle.init(allocator, p, p.dimension * p.dimension);
         defer oracle.deinit();
-        var stats: commiv.solver.CandidateBuildStats = .{};
-        var candidates = try commiv.solver.buildCandidates(allocator, &oracle, width, .alpha_nearness, 32, 2, &stats);
+        var stats: commiv.internal.solver.CandidateBuildStats = .{};
+        var candidates = try commiv.internal.solver.buildCandidates(allocator, &oracle, width, .alpha_nearness, 32, 2, &stats);
         defer candidates.deinit();
         const covered = countTourEdgesInCandidates(&candidates, tour);
         const total = p.dimension;
@@ -174,7 +174,7 @@ fn parseTourFile(allocator: std.mem.Allocator, bytes: []const u8, dimension: usi
     return tour;
 }
 
-fn countTourEdgesInCandidates(candidates: *const commiv.solver.Candidates, tour: []const usize) usize {
+fn countTourEdgesInCandidates(candidates: *const commiv.internal.solver.Candidates, tour: []const usize) usize {
     var covered: usize = 0;
     for (tour, 0..) |a, idx| {
         const b = tour[(idx + 1) % tour.len];

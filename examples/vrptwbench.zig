@@ -54,7 +54,7 @@ pub fn main(init: std.process.Init) !void {
         defer res.deinit();
         const ms = @as(f64, @floatFromInt(nanos() - t0)) / 1e6;
 
-        const checked = commiv.vrptw.validate(inst, res.routes);
+        const checked = commiv.internal.vrptw.validate(inst, res.routes);
         const feasible = checked != null and checked.? == res.total_cost;
         const dist = @as(f64, @floatFromInt(res.total_cost)) / @as(f64, @floatFromInt(SCALE));
 
@@ -105,7 +105,7 @@ const Owned = struct {
     n: usize,
     capacity: u32,
 
-    fn inst(self: *const Owned) commiv.vrptw.VrptwInstance {
+    fn inst(self: *const Owned) commiv.VrptwInstance {
         return .{
             .n = self.n,
             .matrix = self.matrix,

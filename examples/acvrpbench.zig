@@ -53,7 +53,7 @@ pub fn main(init: std.process.Init) !void {
         defer res.deinit();
         const ms = @as(f64, @floatFromInt(nanos() - t0)) / 1e6;
 
-        const checked = commiv.vrp.validate(inst, res.routes);
+        const checked = commiv.internal.vrp.validate(inst, res.routes);
         const feasible = checked != null and checked.? == res.total_cost;
         const lkh = lkhFor(name) orelse 0;
         const gap = if (lkh > 0) 100.0 * (@as(f64, @floatFromInt(res.total_cost)) - @as(f64, @floatFromInt(lkh))) / @as(f64, @floatFromInt(lkh)) else 0;
@@ -97,7 +97,7 @@ const Owned = struct {
     n: usize,
     capacity: u32,
     vehicles: usize,
-    fn inst(self: *const Owned) commiv.vrp.CvrpInstance {
+    fn inst(self: *const Owned) commiv.CvrpInstance {
         return .{ .n = self.n, .matrix = self.matrix, .demand = self.demand, .capacity = self.capacity };
     }
     fn deinit(self: *Owned, allocator: std.mem.Allocator) void {
