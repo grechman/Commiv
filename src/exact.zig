@@ -1,5 +1,6 @@
 const std = @import("std");
 const problem = @import("problem.zig");
+const result_mod = @import("result.zig");
 
 pub const ExactOptions = struct {
     max_nodes: usize = 10,
@@ -13,7 +14,7 @@ pub fn bruteForce(
     allocator: std.mem.Allocator,
     p: *const problem.Problem,
     options: ExactOptions,
-) !problem.TourResult {
+) !result_mod.SolveResult {
     if (p.dimension > options.max_nodes) return ExactError.InstanceTooLarge;
 
     const perm = try allocator.alloc(usize, p.dimension - 1);
@@ -40,7 +41,7 @@ pub fn bruteForce(
         .allocator = allocator,
         .tour = best_tour,
         .length = best_len,
-        .iterations = iterations,
+        .stats = .{ .exact_permutations = iterations },
     };
 }
 

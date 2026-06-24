@@ -29,7 +29,6 @@ pub const VrptwHgsParams = vrptw.HgsParams;
 pub const Coord = problem.Coord;
 pub const DistanceKind = problem.DistanceKind;
 pub const Problem = problem.Problem;
-pub const TourResult = problem.TourResult;
 
 pub const ParseDiagnostic = tsplib.ParseDiagnostic;
 pub const ParseOptions = tsplib.ParseOptions;

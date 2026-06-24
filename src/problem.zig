@@ -23,17 +23,8 @@ pub const ProblemError = error{
     TourWrongLength,
 };
 
-pub const TourResult = struct {
-    allocator: std.mem.Allocator,
-    tour: []usize,
-    length: u64,
-    iterations: u64 = 0,
-
-    pub fn deinit(self: *TourResult) void {
-        self.allocator.free(self.tour);
-        self.* = undefined;
-    }
-};
+// The tour result type now lives in result.zig as the single canonical
+// SolveResult, shared by solve / solveAtsp* / bruteForce.
 
 pub const Problem = struct {
     allocator: std.mem.Allocator,

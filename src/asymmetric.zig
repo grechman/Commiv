@@ -35,19 +35,13 @@ const MatView = struct {
     }
 };
 
-pub const AtspResult = struct {
-    allocator: std.mem.Allocator,
-    tour: []usize, // directed city order, length n
-    length: u64, // true directed tour length
-    pub fn deinit(self: *AtspResult) void {
-        self.allocator.free(self.tour);
-        self.* = undefined;
-    }
-};
+// ATSP solvers return the canonical solver.SolveResult (tour + true directed
+// length; the search-specific stats are left at their defaults). `tour` is the
+// directed city order, length n.
 
 /// Solve an n-city ATSP given a row-major n*n directed cost matrix `asym`
 /// (asym[i*n+j] = cost of arc i->j; diagonal ignored).
-pub fn solveAtsp(allocator: std.mem.Allocator, asym: []const u32, n: usize, options: solver.SolveOptions) !AtspResult {
+pub fn solveAtsp(allocator: std.mem.Allocator, asym: []const u32, n: usize, options: solver.SolveOptions) !solver.SolveResult {
     if (n < 2 or asym.len != n * n) return error.InvalidMatrix;
 
     // Degeneracy = arcs tying their row minimum, averaged per row (~1 for a real /
@@ -188,7 +182,7 @@ fn atspWorker(slot: *AtspSlot) void {
 
 /// Run `threads` independent ATSP solves (seed + i) and return the best directed
 /// tour. threads<=1 is the plain serial path.
-pub fn solveAtspParallel(allocator: std.mem.Allocator, asym: []const u32, n: usize, options: solver.SolveOptions, threads: usize) !AtspResult {
+pub fn solveAtspParallel(allocator: std.mem.Allocator, asym: []const u32, n: usize, options: solver.SolveOptions, threads: usize) !solver.SolveResult {
     const cpus = std.Thread.getCpuCount() catch 1;
     const k = if (threads == 0) @max(@as(usize, 1), cpus -| 1) else threads;
     if (k <= 1 or n < 2) return solveAtsp(allocator, asym, n, options);
@@ -507,7 +501,7 @@ fn nativeDoubleBridge(ws: *NativeWs, rng: std.Random) void {
 
 /// Native directed ATSP solver — no 2n transform. NN seed -> Or-opt+2-opt descent ->
 /// double-bridge ILS (accept-best). budget.trials = ILS kicks.
-pub fn solveAtspNative(allocator: std.mem.Allocator, asym: []const u32, n: usize, options: solver.SolveOptions) !AtspResult {
+pub fn solveAtspNative(allocator: std.mem.Allocator, asym: []const u32, n: usize, options: solver.SolveOptions) !solver.SolveResult {
     if (n < 2 or asym.len != n * n) return error.InvalidMatrix;
     return solveAtspNativeImpl(allocator, .{ .base = asym, .stride = n, .off = 0 }, n, options);
 }
@@ -515,12 +509,12 @@ pub fn solveAtspNative(allocator: std.mem.Allocator, asym: []const u32, n: usize
 /// Native ATSP over the n-city block at (off,off) of a larger row-major matrix, read in
 /// place — no n*n copy. The CVRP giant-tour seed uses this to point straight at
 /// inst.matrix (stride=n+1, off=1) so the solve adds no matrix-sized allocation.
-pub fn solveAtspNativeView(allocator: std.mem.Allocator, base: []const u32, n: usize, stride: usize, off: usize, options: solver.SolveOptions) !AtspResult {
+pub fn solveAtspNativeView(allocator: std.mem.Allocator, base: []const u32, n: usize, stride: usize, off: usize, options: solver.SolveOptions) !solver.SolveResult {
     if (n < 2 or base.len < (n - 1 + off) * stride + (n - 1 + off) + 1) return error.InvalidMatrix;
     return solveAtspNativeImpl(allocator, .{ .base = base, .stride = stride, .off = off }, n, options);
 }
 
-fn solveAtspNativeImpl(allocator: std.mem.Allocator, mat: MatView, n: usize, options: solver.SolveOptions) !AtspResult {
+fn solveAtspNativeImpl(allocator: std.mem.Allocator, mat: MatView, n: usize, options: solver.SolveOptions) !solver.SolveResult {
     const k = @min(@as(usize, 16), n - 1);
     const cand = try buildNativeCands(allocator, mat, n, k);
     defer allocator.free(cand);
