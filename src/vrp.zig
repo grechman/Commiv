@@ -191,11 +191,15 @@ fn splitDpK(allocator: std.mem.Allocator, inst: CvrpInstance, giant: []const usi
     return .{ .cost = p[n * stride + best_k], .pred = pred };
 }
 
-/// Solve CVRP: construct a giant tour over the customers (asymmetric TSP core),
-/// then Prins-Split it, then improve the order with relocate/swap moves that are
-/// re-split each time, keeping the best. Capacity is enforced exactly by Split.
-pub fn solveCvrp(allocator: std.mem.Allocator, inst: CvrpInstance, options: solver.SolveOptions, rounds: usize) !CvrpResult {
-    return solveCvrpMulti(allocator, inst, options, rounds, 1);
+/// Solve CVRP with the default, highest-quality strategy: SISR (ruin-and-recreate
+/// + simulated annealing), which is the strongest solver here for large and/or
+/// directed (asymmetric) instances and a solid choice at every size. Reach for a
+/// specific entry point when you need it: `solveCvrpMulti` / `solveCvrpFleet` for
+/// the giant-tour ILS variants, `solveCvrpHgs` for the mid-size population method.
+/// Capacity is enforced exactly. Tune the search via `CvrpSisrParams` on
+/// `solveCvrpSisr` directly. Returns `error.NoFeasibleSplit` if no packing exists.
+pub fn solveCvrp(allocator: std.mem.Allocator, inst: CvrpInstance, options: solver.SolveOptions) !CvrpResult {
+    return solveCvrpSisr(allocator, inst, options, .{});
 }
 
 /// solveCvrpMulti, but with a hard fleet cap: at most `max_vehicles` routes (0 =
@@ -2853,12 +2857,12 @@ test "CVRP end-to-end: valid, feasible, beats one-per-route baseline" {
     for (1..dim) |i| demand[i] = rng.intRangeAtMost(u32, 1, 4);
     const inst = CvrpInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 10 };
 
-    var res = try solveCvrp(allocator, inst, .{
+    var res = try solveCvrpMulti(allocator, inst, .{
         .seed = 3,
         .budget = .{ .trials = 30, .max_passes = 40 },
         .candidates = .{ .candidate_count = 6, .candidate_mode = .alpha_nearness, .sparse_min_dimension = 0 },
         .search = .{ .enable_lk = true, .lk_max_depth = 5 },
-    }, 30);
+    }, 30, 1);
     defer res.deinit();
 
     // independently validated cost equals the reported cost
@@ -2927,12 +2931,12 @@ test "CVRP engine finds the brute-force optimum on a small instance" {
     const inst = CvrpInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 12 };
 
     const opt = try bruteForceOptimum(allocator, inst);
-    var res = try solveCvrp(allocator, inst, .{
+    var res = try solveCvrpMulti(allocator, inst, .{
         .seed = 11,
         .budget = .{ .trials = 30, .max_passes = 40 },
         .candidates = .{ .candidate_count = 6, .candidate_mode = .alpha_nearness, .sparse_min_dimension = 0 },
         .search = .{ .enable_lk = true, .lk_max_depth = 5 },
-    }, 200);
+    }, 200, 1);
     defer res.deinit();
     const checked = validate(inst, res.routes) orelse return error.Infeasible;
     try std.testing.expectEqual(res.total_cost, checked);
@@ -3109,12 +3113,12 @@ test "CVRP asymmetric local search terminates and stays feasible" {
     for (1..dim) |i| demand[i] = rng.intRangeAtMost(u32, 1, 3);
     // high capacity -> few long routes -> many adjacent-swap candidates
     const inst = CvrpInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 40 };
-    var res = try solveCvrp(allocator, inst, .{
+    var res = try solveCvrpMulti(allocator, inst, .{
         .seed = 1,
         .budget = .{ .trials = 20, .max_passes = 40 },
         .candidates = .{ .candidate_count = 6, .candidate_mode = .alpha_nearness, .sparse_min_dimension = 0 },
         .search = .{ .enable_lk = true, .lk_max_depth = 5 },
-    }, 40);
+    }, 40, 1);
     defer res.deinit();
     const checked = validate(inst, res.routes) orelse return error.Infeasible;
     try std.testing.expectEqual(res.total_cost, checked);
