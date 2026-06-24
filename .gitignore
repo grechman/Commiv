@@ -1,0 +1,16 @@
+.zig-cache/
+.zig-cache-global/
+.zig-cache-verify/
+zig-out/
+commiv-profile
+tasks/
+.grechman/
+depwire-output.json
+.codex/
+CMakeFiles/
+.agents/
+.business/
+__pycache__/
+vendor/road/moscow-5000.road
+.claude/
+.zig-cache*/
