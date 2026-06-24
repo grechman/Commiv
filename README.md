@@ -80,9 +80,7 @@ const std = @import("std");
 const commiv = @import("commiv");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const allocator = std.heap.page_allocator; // swap in your own (gpa, arena, ...)
 
     // 3 customers + depot. Directed costs (a -> b), row-major, depot = index 0.
     const n: usize = 3;
@@ -94,7 +92,7 @@ pub fn main() !void {
     };
     const demand = [_]u32{ 0, 4, 6, 5 }; // demand[0] = 0 (the depot has none)
 
-    const inst = commiv.vrp.CvrpInstance{
+    const inst = commiv.CvrpInstance{
         .n = n,
         .matrix = &matrix,
         .demand = &demand,
@@ -165,29 +163,52 @@ defer atsp.deinit();
 
 ## API reference
 
-Every solver is allocator-first, takes an options struct, and returns a result with a
-`deinit()`. The full surface lives in [`src/root.zig`](src/root.zig), and each solver has
-unit tests in its own source file.
+Every solver is allocator-first, takes an options struct, and returns a result you free with
+`deinit()`. The curated set below is the whole public API (it mirrors
+[`src/root.zig`](src/root.zig)); each solver has unit tests in its own source file.
 
 **Parsing**
-- `parseTsplib(allocator, text, opts) !Problem` parses TSPLIB and CVRPLIB instances.
+- `parseTsplib(allocator, text, ParseOptions) !Problem` parses TSPLIB / CVRPLIB text. Pass a
+  `ParseDiagnostic` in the options to capture line-level parse errors.
 
-**TSP and ATSP** (a symmetric `Problem`, or a raw `n x n` matrix for the directed case)
-- `solve(allocator, *Problem, SolveOptions) !SolveResult` is symmetric TSP (Lin-Kernighan
-  plus ILS).
-- `solveAtsp(allocator, matrix, n, SolveOptions)` is directed TSP via the 2n transform.
-- `solveAtspNative(allocator, matrix, n, SolveOptions)` is a direct directed search with no
-  transform.
-- `bruteForce(allocator, *Problem, ExactOptions)` is exact, for tiny n.
+**Problem definition** (coordinate / TSPLIB path)
+- `Problem`, built via `Problem.initCoords(...)` or `Problem.initFullMatrix(...)`, plus the
+  `Coord` and `DistanceKind` types.
 
-**CVRP and ACVRP** (a `(n+1) x (n+1)` directional matrix plus demands; asymmetric works as-is)
-- `solveCvrpSisr(allocator, inst, SolveOptions, CvrpSisrParams)` for large or directed.
-- `solveCvrpHgs(allocator, inst, SolveOptions, CvrpHgsParams)` for n up to about 500.
-- `solveCvrpSisrParallel(...)`, `solveCvrpHgsParallel(...)` are the multi-threaded variants.
-- `solveCvrp(...)` is the no-config default and runs SISR; `solveCvrpFleet(...)` is the fixed-fleet entry point.
+**Shared options and result**
+- `SolveOptions` — `seed`, `budget` (`trials`, `max_passes`), candidate and search knobs.
+- `SolveResult` — `{ tour, length, stats }`, the one type returned by `solve`, `solveAtsp*`,
+  and `bruteForce`. `SolveStats` is the per-run telemetry; `CandidateMode` picks the
+  candidate-graph metric.
 
-**VRPTW**
-- `solveVrptw(allocator, inst, SolveOptions)`, `solveVrptwHgs(...)`.
+**TSP (symmetric)**
+- `solve(allocator, *Problem, SolveOptions) !SolveResult` — Lin-Kernighan + ILS.
+- `solveParallel(allocator, *Problem, SolveOptions, ParallelOptions) !SolveResult` —
+  independent islands with optional EAX recombination, or a deterministic split-budget speed
+  mode.
+
+**ATSP (directed)** — row-major `n x n` matrix where `matrix[i*n + j]` is the cost of `i → j`
+- `solveAtsp(allocator, matrix, n, SolveOptions) !SolveResult` — 2n Jonker-Volgenant transform.
+- `solveAtspNative(allocator, matrix, n, SolveOptions) !SolveResult` — direct directed search.
+- `solveAtspParallel(allocator, matrix, n, SolveOptions, threads) !SolveResult`.
+
+**Exact (tiny n)**
+- `bruteForce(allocator, *Problem, ExactOptions) !SolveResult`.
+
+**CVRP / ACVRP** — build a `CvrpInstance { n, matrix, demand, capacity }` with a
+`(n+1) x (n+1)` directional matrix (depot = node 0); every solver returns
+`CvrpResult { routes, total_cost }`
+- `solveCvrp(allocator, inst, SolveOptions) !CvrpResult` — no-config default (runs SISR).
+- `solveCvrpSisr(allocator, inst, SolveOptions, CvrpSisrParams)` — large / directed.
+- `solveCvrpHgs(allocator, inst, SolveOptions, CvrpHgsParams, max_vehicles)` — n ≲ 500.
+- `solveCvrpFleet(allocator, inst, SolveOptions, rounds, restarts, max_vehicles)` — fixed fleet cap.
+- `solveCvrpSisrParallel(allocator, inst, SolveOptions, CvrpSisrParams, threads)`.
+- `solveCvrpHgsParallel(allocator, inst, SolveOptions, CvrpHgsParams, max_vehicles, threads)`.
+
+**VRPTW** — build a `VrptwInstance { n, matrix, demand, capacity, ready, due, service }`;
+returns `VrptwResult`
+- `solveVrptw(allocator, inst, SolveOptions, rounds, restarts, veh_penalty) !VrptwResult`.
+- `solveVrptwHgs(allocator, inst, SolveOptions, VrptwHgsParams, veh_penalty) !VrptwResult`.
 
 **Asymmetry analysis**
 - `conservativeness(allocator, matrix, dim) !Conservativeness` runs a Helmholtz-Hodge
@@ -195,6 +216,9 @@ unit tests in its own source file.
   (one-ways and turns, which change the optimal route) versus a gradient (congestion, which
   you can safely ignore). Point it at any cost matrix to decide whether you need directional
   routing at all.
+
+Everything else (`commiv.internal.*`, the raw implementation modules) is unstable detail, not
+part of this API and free to change between versions.
 
 ---
 
@@ -470,9 +494,7 @@ const std = @import("std");
 const commiv = @import("commiv");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const allocator = std.heap.page_allocator; // swap in your own (gpa, arena, ...)
 
     // 3 клиента + депо. Направленные стоимости (a -> b), строковый порядок, депо = индекс 0.
     const n: usize = 3;
@@ -484,7 +506,7 @@ pub fn main() !void {
     };
     const demand = [_]u32{ 0, 4, 6, 5 }; // demand[0] = 0 (у депо спроса нет)
 
-    const inst = commiv.vrp.CvrpInstance{
+    const inst = commiv.CvrpInstance{
         .n = n,
         .matrix = &matrix,
         .demand = &demand,
@@ -555,29 +577,51 @@ defer atsp.deinit();
 
 ## Справочник по API
 
-Каждый солвер сначала принимает аллокатор, затем структуру опций и возвращает результат с
-`deinit()`. Полная поверхность — в [`src/root.zig`](src/root.zig), и у каждого солвера есть
-модульные тесты в его собственном файле.
+Каждый солвер сначала принимает аллокатор, затем структуру опций и возвращает результат, который
+вы освобождаете через `deinit()`. Перечисленный ниже набор — это весь публичный API (он
+повторяет [`src/root.zig`](src/root.zig)); у каждого солвера есть модульные тесты в его файле.
 
 **Разбор**
-- `parseTsplib(allocator, text, opts) !Problem` разбирает инстансы TSPLIB и CVRPLIB.
+- `parseTsplib(allocator, text, ParseOptions) !Problem` разбирает текст TSPLIB / CVRPLIB.
+  Передайте `ParseDiagnostic` в опциях, чтобы поймать ошибки разбора по строкам.
 
-**TSP и ATSP** (симметричный `Problem` или сырая матрица `n x n` для направленного случая)
-- `solve(allocator, *Problem, SolveOptions) !SolveResult` — симметричная TSP (Lin-Kernighan
-  плюс ILS).
-- `solveAtsp(allocator, matrix, n, SolveOptions)` — направленная TSP через 2n-преобразование.
-- `solveAtspNative(allocator, matrix, n, SolveOptions)` — прямой направленный поиск без
-  преобразования.
-- `bruteForce(allocator, *Problem, ExactOptions)` — точное решение для крошечного n.
+**Определение задачи** (путь координат / TSPLIB)
+- `Problem`, создаётся через `Problem.initCoords(...)` или `Problem.initFullMatrix(...)`, плюс
+  типы `Coord` и `DistanceKind`.
 
-**CVRP и ACVRP** (матрица `(n+1) x (n+1)` направленная, плюс спрос; асимметрия работает как есть)
-- `solveCvrpSisr(allocator, inst, SolveOptions, CvrpSisrParams)` для больших или направленных.
-- `solveCvrpHgs(allocator, inst, SolveOptions, CvrpHgsParams)` для n примерно до 500.
-- `solveCvrpSisrParallel(...)`, `solveCvrpHgsParallel(...)` — многопоточные варианты.
-- `solveCvrp(...)` — точка входа по умолчанию без настройки (запускает SISR); `solveCvrpFleet(...)` — вход с фиксированным парком.
+**Общие опции и результат**
+- `SolveOptions` — `seed`, `budget` (`trials`, `max_passes`), настройки кандидатов и поиска.
+- `SolveResult` — `{ tour, length, stats }`, единственный тип, возвращаемый `solve`,
+  `solveAtsp*` и `bruteForce`. `SolveStats` — телеметрия прогона; `CandidateMode` выбирает
+  метрику графа кандидатов.
 
-**VRPTW**
-- `solveVrptw(allocator, inst, SolveOptions)`, `solveVrptwHgs(...)`.
+**TSP (симметричная)**
+- `solve(allocator, *Problem, SolveOptions) !SolveResult` — Lin-Kernighan + ILS.
+- `solveParallel(allocator, *Problem, SolveOptions, ParallelOptions) !SolveResult` —
+  независимые острова с опциональной рекомбинацией EAX или детерминированный режим деления
+  бюджета ради скорости.
+
+**ATSP (направленная)** — матрица `n x n` в строковом порядке, `matrix[i*n + j]` = стоимость `i → j`
+- `solveAtsp(allocator, matrix, n, SolveOptions) !SolveResult` — 2n-преобразование Йонкера-Волгенанта.
+- `solveAtspNative(allocator, matrix, n, SolveOptions) !SolveResult` — прямой направленный поиск.
+- `solveAtspParallel(allocator, matrix, n, SolveOptions, threads) !SolveResult`.
+
+**Точное решение (крошечное n)**
+- `bruteForce(allocator, *Problem, ExactOptions) !SolveResult`.
+
+**CVRP / ACVRP** — соберите `CvrpInstance { n, matrix, demand, capacity }` с направленной
+матрицей `(n+1) x (n+1)` (депо = узел 0); все солверы возвращают `CvrpResult { routes, total_cost }`
+- `solveCvrp(allocator, inst, SolveOptions) !CvrpResult` — точка входа по умолчанию (запускает SISR).
+- `solveCvrpSisr(allocator, inst, SolveOptions, CvrpSisrParams)` — большие / направленные.
+- `solveCvrpHgs(allocator, inst, SolveOptions, CvrpHgsParams, max_vehicles)` — n ≲ 500.
+- `solveCvrpFleet(allocator, inst, SolveOptions, rounds, restarts, max_vehicles)` — фиксированный парк.
+- `solveCvrpSisrParallel(allocator, inst, SolveOptions, CvrpSisrParams, threads)`.
+- `solveCvrpHgsParallel(allocator, inst, SolveOptions, CvrpHgsParams, max_vehicles, threads)`.
+
+**VRPTW** — соберите `VrptwInstance { n, matrix, demand, capacity, ready, due, service }`;
+возвращает `VrptwResult`
+- `solveVrptw(allocator, inst, SolveOptions, rounds, restarts, veh_penalty) !VrptwResult`.
+- `solveVrptwHgs(allocator, inst, SolveOptions, VrptwHgsParams, veh_penalty) !VrptwResult`.
 
 **Анализ асимметрии**
 - `conservativeness(allocator, matrix, dim) !Conservativeness` выполняет разложение
@@ -585,6 +629,9 @@ defer atsp.deinit();
   (односторонние улицы и повороты, которые меняют оптимальный маршрут), а какая — градиент
   (заторы, которые можно спокойно игнорировать). Наведите его на любую матрицу стоимостей,
   чтобы решить, нужна ли вам вообще направленная маршрутизация.
+
+Всё остальное (`commiv.internal.*`, сырые модули реализации) — нестабильные детали, не входят в
+этот API и могут меняться между версиями.
 
 ---
 
