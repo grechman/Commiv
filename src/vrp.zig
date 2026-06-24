@@ -81,6 +81,10 @@ fn splitDp(allocator: std.mem.Allocator, inst: CvrpInstance, giant: []const usiz
             }
         }
     }
+    // No contiguous capacity-feasible split of this order exists (only possible
+    // when some customer's demand exceeds capacity, i.e. an infeasible instance).
+    // Return a clean error instead of a maxInt cost + uninitialized pred chain.
+    if (p[n] == INF) return error.NoFeasibleSplit;
     return .{ .cost = p[n], .pred = pred };
 }
 
@@ -2865,6 +2869,21 @@ test "CVRP end-to-end: valid, feasible, beats one-per-route baseline" {
     var baseline: u64 = 0;
     for (1..dim) |c| baseline += inst.d(0, c) + inst.d(c, 0);
     try std.testing.expect(res.total_cost < baseline);
+}
+
+test "CVRP returns a clean error for an over-capacity customer" {
+    const allocator = std.testing.allocator;
+    // demand[2] = 6 exceeds capacity 5, so no feasible split exists. The solver
+    // must surface a clean error rather than a maxInt cost over an uninitialized
+    // pred chain (regression for the missing splitDp feasibility guard, C1).
+    const m = [_]u32{
+        0, 3, 4,
+        3, 0, 5,
+        4, 5, 0,
+    };
+    const demand = [_]u32{ 0, 1, 6 };
+    const inst = CvrpInstance{ .n = 2, .matrix = &m, .demand = &demand, .capacity = 5 };
+    try std.testing.expectError(error.NoFeasibleSplit, solveCvrpMulti(allocator, inst, .{ .seed = 1 }, 5, 1));
 }
 
 fn bruteForceOptimum(allocator: std.mem.Allocator, inst: CvrpInstance) !u64 {
