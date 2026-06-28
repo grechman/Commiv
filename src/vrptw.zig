@@ -2,6 +2,7 @@ const std = @import("std");
 const problem = @import("problem.zig");
 const solver = @import("solver.zig");
 const asymmetric = @import("asymmetric.zig");
+const hgs_core = @import("hgs_core.zig"); // shared HGS giant-tour operators (G8)
 
 // VRP with Time Windows (VRPTW), asymmetric-capable. Builds on the same giant-
 // tour + Split method as the CVRP core, but every route must also be schedulable:
@@ -168,13 +169,28 @@ fn splitDpTw(allocator: std.mem.Allocator, inst: VrptwInstance, giant: []const u
     return .{ .cost = p[n], .pred = pred };
 }
 
+/// Tuning for `solveVrptw` (giant-tour ILS). `rounds` is the perturbation steps
+/// per chain; `restarts` is the number of independent chains; `veh_penalty` is the
+/// per-route penalty added in Split to bias toward fewer vehicles (0 = pure
+/// distance). One named field per knob so the two same-typed `usize` values can't
+/// be silently transposed.
+pub const VrptwParams = struct {
+    rounds: usize = 100,
+    restarts: usize = 10,
+    veh_penalty: u64 = 0,
+};
+
 /// Solve VRPTW: giant tour over customers (asymmetric TSP core) -> TW Split ->
 /// route local search (relocate/or-opt/2-opt/swap, all TW+capacity gated) ->
 /// multi-start ILS (double-bridge on the giant order + re-Split). Minimizes total
-/// distance; reports vehicle count. `veh_penalty` biases Split toward fewer routes.
-pub fn solveVrptw(allocator: std.mem.Allocator, inst: VrptwInstance, options: solver.SolveOptions, rounds: usize, restarts: usize, veh_penalty: u64) !VrptwResult {
+/// distance; reports vehicle count. `params.veh_penalty` biases Split toward fewer routes.
+pub fn solveVrptw(allocator: std.mem.Allocator, inst: VrptwInstance, options: solver.SolveOptions, params: VrptwParams) !VrptwResult {
+    const rounds = params.rounds;
+    const restarts = params.restarts;
+    const veh_penalty = params.veh_penalty;
     const n = inst.n;
-    std.debug.assert(inst.demand.len == n + 1 and inst.matrix.len == (n + 1) * (n + 1));
+    if (inst.demand.len != n + 1 or inst.matrix.len != (std.math.mul(usize, n + 1, n + 1) catch return error.InvalidInstance)) return error.InvalidInstance;
+    if (inst.ready.len != n + 1 or inst.due.len != n + 1 or inst.service.len != n + 1) return error.InvalidInstance;
 
     // Giant tour: ATSP over the customer sub-matrix (1..n).
     const sub = try allocator.alloc(u32, n * n);
@@ -221,7 +237,10 @@ pub fn solveVrptw(allocator: std.mem.Allocator, inst: VrptwInstance, options: so
         }
         if (inc.cost < best.cost) try best.copyFrom(inc);
     }
-    return best.toResult(allocator);
+    var result = try best.toResult(allocator);
+    errdefer result.deinit();
+    if (validate(inst, result.routes) == null) return error.Infeasible;
+    return result;
 }
 
 const Route = std.ArrayList(usize);
@@ -296,6 +315,15 @@ const Solution = struct {
     sb: []Tws,
     la: []u32, // prefix loads of route A: la[i] = sum demand of A[0..i]
     lb: []u32, // prefix loads of route B
+    // reusable per-Solution move-copy scratch (sized n+2): every local-search
+    // route copy goes through these instead of fixed-size stack buffers, so an
+    // instance with a route longer than the old [512]/[4096] limits can't smash
+    // the stack. Up to four are simultaneously live (trySwapStar and the granular
+    // SWAP* block hold amu+bmv+abuf+bbuf at once).
+    mbuf0: []usize,
+    mbuf1: []usize,
+    mbuf2: []usize,
+    mbuf3: []usize,
     gran: []const usize, // shared k-nearest neighbour lists (not owned)
     gk: usize, // neighbours per customer in `gran`
     loc_route: []usize, // loc_route[c] = route index currently holding customer c
@@ -317,6 +345,10 @@ const Solution = struct {
             .sb = try allocator.alloc(Tws, inst.n + 2),
             .la = try allocator.alloc(u32, inst.n + 2),
             .lb = try allocator.alloc(u32, inst.n + 2),
+            .mbuf0 = try allocator.alloc(usize, inst.n + 2),
+            .mbuf1 = try allocator.alloc(usize, inst.n + 2),
+            .mbuf2 = try allocator.alloc(usize, inst.n + 2),
+            .mbuf3 = try allocator.alloc(usize, inst.n + 2),
             .gran = gran,
             .gk = gk,
             .loc_route = try allocator.alloc(usize, inst.n + 1),
@@ -341,6 +373,10 @@ const Solution = struct {
         self.allocator.free(self.sb);
         self.allocator.free(self.la);
         self.allocator.free(self.lb);
+        self.allocator.free(self.mbuf0);
+        self.allocator.free(self.mbuf1);
+        self.allocator.free(self.mbuf2);
+        self.allocator.free(self.mbuf3);
         self.allocator.free(self.loc_route);
         self.allocator.free(self.loc_pos);
         self.* = undefined;
@@ -440,6 +476,10 @@ const Solution = struct {
             .sb = try self.allocator.alloc(Tws, self.inst.n + 2),
             .la = try self.allocator.alloc(u32, self.inst.n + 2),
             .lb = try self.allocator.alloc(u32, self.inst.n + 2),
+            .mbuf0 = try self.allocator.alloc(usize, self.inst.n + 2),
+            .mbuf1 = try self.allocator.alloc(usize, self.inst.n + 2),
+            .mbuf2 = try self.allocator.alloc(usize, self.inst.n + 2),
+            .mbuf3 = try self.allocator.alloc(usize, self.inst.n + 2),
             .gran = self.gran,
             .gk = self.gk,
             .loc_route = try self.allocator.alloc(usize, self.inst.n + 1),
@@ -592,8 +632,7 @@ const Solution = struct {
                     const au = if (pu == 0) 0 else A[pu - 1];
                     const bu = if (pu + 1 == lenA) 0 else A[pu + 1];
                     const base_a: u64 = @intCast(@as(i64, @intCast(self.rdist.items[ri])) - (self.dd(au, u) + self.dd(u, bu) - self.dd(au, bu)));
-                    var amu: [4096]usize = undefined;
-                    const am = removeInto(&amu, A, pu);
+                    const am = removeInto(self.mbuf0, A, pu);
                     self.fillPreSuf(am, self.pa, self.sa); // A\u prefix/suffix, once per pu
                     var pv: usize = 0;
                     while (pv < lenB) : (pv += 1) {
@@ -603,18 +642,15 @@ const Solution = struct {
                         const av = if (pv == 0) 0 else B[pv - 1];
                         const bv = if (pv + 1 == lenB) 0 else B[pv + 1];
                         const base_b: u64 = @intCast(@as(i64, @intCast(self.rdist.items[rj])) - (self.dd(av, v) + self.dd(v, bv) - self.dd(av, bv)));
-                        var bmv: [4096]usize = undefined;
-                        const bm = removeInto(&bmv, B, pv);
+                        const bm = removeInto(self.mbuf1, B, pv);
                         self.fillPreSuf(bm, self.pb, self.sb); // B\v prefix/suffix
                         const ia = self.bestInsert(am, self.pa, self.sa, base_a, v) orelse continue; // v into A\u
                         const ib = self.bestInsert(bm, self.pb, self.sb, base_b, u) orelse continue; // u into B\v
                         const old = self.rdist.items[ri] + self.rdist.items[rj];
                         if (ia.dist + ib.dist < old) {
                             // materialize A' = am with v at ia.pos, B' = bm with u at ib.pos
-                            var abuf: [4096]usize = undefined;
-                            var bbuf: [4096]usize = undefined;
-                            const na = insertInto(&abuf, am, ia.pos, v);
-                            const nb = insertInto(&bbuf, bm, ib.pos, u);
+                            const na = insertInto(self.mbuf2, am, ia.pos, v);
+                            const nb = insertInto(self.mbuf3, bm, ib.pos, u);
                             try self.setRoute(ri, na);
                             try self.setRoute(rj, nb);
                             self.recompute();
@@ -677,8 +713,8 @@ const Solution = struct {
                         const pen: i64 = if (empties) -@as(i64, @intCast(self.veh_penalty)) else 0;
                         if (delta + pen < 0) {
                             // build A' = headA ++ tailB, B' = headB ++ tailA
-                            var bufA: [4096]usize = undefined;
-                            var bufB: [4096]usize = undefined;
+                            const bufA = self.mbuf0;
+                            const bufB = self.mbuf1;
                             const na = pA + (lenB - pB);
                             const nb = pB + (lenA - pA);
                             @memcpy(bufA[0..pA], A[0..pA]);
@@ -706,8 +742,7 @@ const Solution = struct {
         const nr = self.routes.items.len;
         if (nr <= 1) return false;
         // order route indices by ascending customer count (easiest to empty first)
-        var order_buf: [4096]usize = undefined;
-        const order = order_buf[0..nr];
+        const order = self.mbuf0[0..nr];
         for (0..nr) |i| order[i] = i;
         std.sort.pdq(usize, order, self, struct {
             fn lt(s: *Solution, a: usize, b: usize) bool {
@@ -733,7 +768,7 @@ const Solution = struct {
     /// feasible insertion. Mutates routes in place; returns false (leaving partial
     /// state for the caller to restore) if any customer has no feasible insertion.
     fn ejectRoute(self: *Solution, target: usize) !bool {
-        var victims: [512]usize = undefined;
+        const victims = self.mbuf1;
         const vn = self.routes.items[target].items.len;
         @memcpy(victims[0..vn], self.routes.items[target].items);
         self.routes.items[target].clearRetainingCapacity();
@@ -897,12 +932,12 @@ const Solution = struct {
         var segbuf: [3]usize = undefined;
         @memcpy(segbuf[0..len], self.routes.items[ri].items[pi .. pi + len]);
         const B = self.routes.items[rj].items;
-        var bbuf: [4096]usize = undefined;
+        const bbuf = self.mbuf0;
         @memcpy(bbuf[0..gap], B[0..gap]);
         @memcpy(bbuf[gap .. gap + len], segbuf[0..len]);
         @memcpy(bbuf[gap + len .. B.len + len], B[gap..]);
         const A = self.routes.items[ri].items;
-        var abuf: [4096]usize = undefined;
+        const abuf = self.mbuf1;
         @memcpy(abuf[0..pi], A[0..pi]);
         @memcpy(abuf[pi .. A.len - len], A[pi + len ..]);
         try self.setRoute(rj, bbuf[0 .. B.len + len]);
@@ -915,8 +950,8 @@ const Solution = struct {
         const B = self.routes.items[rj].items;
         const lenA = A.len;
         const lenB = B.len;
-        var bufA: [4096]usize = undefined;
-        var bufB: [4096]usize = undefined;
+        const bufA = self.mbuf0;
+        const bufB = self.mbuf1;
         const na = pA + (lenB - pB);
         const nb = pB + (lenA - pA);
         @memcpy(bufA[0..pA], A[0..pA]);
@@ -1054,10 +1089,8 @@ const Solution = struct {
                     totalA - self.inst.demand[u] + self.inst.demand[v] <= cap and
                     totalB - self.inst.demand[v] + self.inst.demand[u] <= cap)
                 {
-                    var amu: [4096]usize = undefined;
-                    var bmv: [4096]usize = undefined;
-                    const am = removeInto(&amu, A, pi);
-                    const bm = removeInto(&bmv, B, pj);
+                    const am = removeInto(self.mbuf0, A, pi);
+                    const bm = removeInto(self.mbuf1, B, pj);
                     const base_a: u64 = @intCast(@as(i64, @intCast(self.rdist.items[ri])) - (self.dd(au, u) + self.dd(u, cu) - self.dd(au, cu)));
                     const base_b: u64 = @intCast(@as(i64, @intCast(self.rdist.items[rj])) - (self.dd(av, v) + self.dd(v, cv) - self.dd(av, cv)));
                     // use pb/sb scratch for both bases so A's pa/sa stays valid for the next neighbour
@@ -1068,10 +1101,8 @@ const Solution = struct {
                         const ib = self.bestInsert(bm, self.pb, self.sb, base_b, u);
                         if (ib) |rib| {
                             if (ria.dist + rib.dist < self.rdist.items[ri] + self.rdist.items[rj]) {
-                                var abuf: [4096]usize = undefined;
-                                var bbuf: [4096]usize = undefined;
-                                const na = insertInto(&abuf, am, ria.pos, v);
-                                const nb = insertInto(&bbuf, bm, rib.pos, u);
+                                const na = insertInto(self.mbuf2, am, ria.pos, v);
+                                const nb = insertInto(self.mbuf3, bm, rib.pos, u);
                                 try self.setRoute(ri, na);
                                 try self.setRoute(rj, nb);
                                 self.afterMove(ri, rj, false);
@@ -1119,7 +1150,7 @@ const Solution = struct {
                 const ri_after = try self.buildCandidate(self.routes.items[ri].items, pi, 1, pi, &.{});
                 const ri_dist = scheduleSlice(self.inst, ri_after) orelse unreachable; // removal keeps feasibility
                 // need a stable copy of ri_after for two-route moves (scratch reused)
-                var ri_after_buf: [512]usize = undefined;
+                const ri_after_buf = self.mbuf0;
                 const ri_after_len = ri_after.len;
                 @memcpy(ri_after_buf[0..ri_after_len], ri_after);
                 var rj: usize = 0;
@@ -1188,7 +1219,7 @@ const Solution = struct {
                     const removal: i64 = self.dd(a, seg_first) + self.dd(seg_last, b) - self.dd(a, b);
                     const ri_after = try self.buildCandidate(self.routes.items[ri].items, pi, len, pi, &.{});
                     const ri_dist = scheduleSlice(self.inst, ri_after) orelse unreachable;
-                    var ri_after_buf: [512]usize = undefined;
+                    const ri_after_buf = self.mbuf0;
                     const ri_after_len = ri_after.len;
                     @memcpy(ri_after_buf[0..ri_after_len], ri_after);
                     var rj: usize = 0;
@@ -1405,6 +1436,7 @@ pub const HgsParams = struct {
     n_elite: usize = 12, // elites whose cost rank dominates biased fitness
     n_close: usize = 6, // neighbours averaged for the diversity contribution
     restart_gens: usize = 20, // gentle diversification (keep better half) after this many stagnant gens (0 = never)
+    veh_penalty: u64 = 0, // per-route penalty added in Split to bias toward fewer vehicles (0 = pure distance)
 };
 
 const Individual = struct {
@@ -1416,74 +1448,6 @@ const Individual = struct {
         allocator.free(self.edges);
     }
 };
-
-fn buildEdges(allocator: std.mem.Allocator, giant: []const usize, n: usize) ![]u64 {
-    const e = try allocator.alloc(u64, n);
-    const base: u64 = @intCast(n + 1);
-    for (0..n) |k| {
-        const a = giant[k];
-        const b = giant[(k + 1) % n];
-        const lo: u64 = @intCast(@min(a, b));
-        const hi: u64 = @intCast(@max(a, b));
-        e[k] = lo * base + hi;
-    }
-    std.mem.sort(u64, e, {}, std.sort.asc(u64));
-    return e;
-}
-
-fn edgeOverlap(a: []const u64, b: []const u64) usize {
-    var i: usize = 0;
-    var j: usize = 0;
-    var c: usize = 0;
-    while (i < a.len and j < b.len) {
-        if (a[i] == b[j]) {
-            c += 1;
-            i += 1;
-            j += 1;
-        } else if (a[i] < b[j]) {
-            i += 1;
-        } else {
-            j += 1;
-        }
-    }
-    return c;
-}
-
-/// Order crossover (OX): copy a random slice of p1, fill the rest with p2's cities
-/// in cyclic order (skipping those already taken). Produces a valid permutation.
-fn oxCrossover(allocator: std.mem.Allocator, p1: []const usize, p2: []const usize, n: usize, rng: std.Random) ![]usize {
-    const child = try allocator.alloc(usize, n);
-    errdefer allocator.free(child);
-    const used = try allocator.alloc(bool, n + 1);
-    defer allocator.free(used);
-    @memset(used, false);
-    var i = rng.uintLessThan(usize, n);
-    var j = rng.uintLessThan(usize, n);
-    if (i > j) {
-        const t = i;
-        i = j;
-        j = t;
-    }
-    var k = i;
-    while (k <= j) : (k += 1) {
-        child[k] = p1[k];
-        used[p1[k]] = true;
-    }
-    var pos = (j + 1) % n;
-    var idx = (j + 1) % n;
-    var remaining = n - (j - i + 1);
-    while (remaining > 0) {
-        const city = p2[idx];
-        if (!used[city]) {
-            child[pos] = city;
-            used[city] = true;
-            pos = (pos + 1) % n;
-            remaining -= 1;
-        }
-        idx = (idx + 1) % n;
-    }
-    return child;
-}
 
 fn educate(allocator: std.mem.Allocator, inst: VrptwInstance, giant: []const usize, veh_penalty: u64, gran: []const usize, gk: usize) !Solution {
     var sol = try Solution.fromGiant(allocator, inst, giant, veh_penalty, gran, gk);
@@ -1529,7 +1493,7 @@ fn computeBiased(allocator: std.mem.Allocator, pop: []const Individual, out: []f
         var is_clone = false;
         for (0..N) |jj| {
             if (jj == i) continue;
-            const dist = n - edgeOverlap(pop[i].edges, pop[jj].edges);
+            const dist = n - hgs_core.edgeOverlap(pop[i].edges, pop[jj].edges);
             dists[m] = dist;
             m += 1;
             if (dist == 0 and (pop[jj].cost < pop[i].cost or (pop[jj].cost == pop[i].cost and jj < i))) is_clone = true;
@@ -1570,7 +1534,7 @@ fn seedRandom(allocator: std.mem.Allocator, inst: VrptwInstance, veh_penalty: u6
     var sol = try educate(allocator, inst, ebuf, veh_penalty, gran, gk);
     defer sol.deinit();
     sol.flattenInto(ebuf);
-    try pop.append(allocator, .{ .giant = try allocator.dupe(usize, ebuf), .edges = try buildEdges(allocator, ebuf, n), .cost = sol.cost });
+    try pop.append(allocator, .{ .giant = try allocator.dupe(usize, ebuf), .edges = try hgs_core.buildEdges(allocator, ebuf, n), .cost = sol.cost });
     if (sol.cost < best_cost.*) {
         best_cost.* = sol.cost;
         best.deinit();
@@ -1591,10 +1555,12 @@ fn tournament(biased: []const f64, count: usize, rng: std.Random) usize {
 
 /// HGS solve: population of giant tours evolved by OX + education with biased-
 /// fitness selection and diversity-aware survivor selection. Reports the best
-/// feasible solution found. veh_penalty biases toward fewer vehicles.
-pub fn solveVrptwHgs(allocator: std.mem.Allocator, inst: VrptwInstance, options: solver.SolveOptions, params: HgsParams, veh_penalty: u64) !VrptwResult {
+/// feasible solution found. `params.veh_penalty` biases toward fewer vehicles.
+pub fn solveVrptwHgs(allocator: std.mem.Allocator, inst: VrptwInstance, options: solver.SolveOptions, params: HgsParams) !VrptwResult {
+    const veh_penalty = params.veh_penalty;
     const n = inst.n;
-    std.debug.assert(inst.demand.len == n + 1 and inst.matrix.len == (n + 1) * (n + 1));
+    if (inst.demand.len != n + 1 or inst.matrix.len != (std.math.mul(usize, n + 1, n + 1) catch return error.InvalidInstance)) return error.InvalidInstance;
+    if (inst.ready.len != n + 1 or inst.due.len != n + 1 or inst.service.len != n + 1) return error.InvalidInstance;
 
     // initial giant tour via the ATSP core (one good seed for the population)
     const sub = try allocator.alloc(u32, n * n);
@@ -1636,7 +1602,7 @@ pub fn solveVrptwHgs(allocator: std.mem.Allocator, inst: VrptwInstance, options:
         var sol = try educate(allocator, inst, seed_giant, veh_penalty, gran, gk);
         defer sol.deinit();
         sol.flattenInto(ebuf);
-        try pop.append(allocator, .{ .giant = try allocator.dupe(usize, ebuf), .edges = try buildEdges(allocator, ebuf, n), .cost = sol.cost });
+        try pop.append(allocator, .{ .giant = try allocator.dupe(usize, ebuf), .edges = try hgs_core.buildEdges(allocator, ebuf, n), .cost = sol.cost });
         best = try sol.toResult(allocator);
         have_best = true;
         best_cost = sol.cost;
@@ -1665,12 +1631,12 @@ pub fn solveVrptwHgs(allocator: std.mem.Allocator, inst: VrptwInstance, options:
         while (off < params.lambda) : (off += 1) {
             const p1 = tournament(biased[0..nparents], nparents, rng);
             const p2 = tournament(biased[0..nparents], nparents, rng);
-            const cg = try oxCrossover(allocator, pop.items[p1].giant, pop.items[p2].giant, n, rng);
+            const cg = try hgs_core.oxCrossover(allocator, pop.items[p1].giant, pop.items[p2].giant, n, rng);
             defer allocator.free(cg);
             var sol = try educate(allocator, inst, cg, veh_penalty, gran, gk);
             defer sol.deinit();
             sol.flattenInto(ebuf);
-            try pop.append(allocator, .{ .giant = try allocator.dupe(usize, ebuf), .edges = try buildEdges(allocator, ebuf, n), .cost = sol.cost });
+            try pop.append(allocator, .{ .giant = try allocator.dupe(usize, ebuf), .edges = try hgs_core.buildEdges(allocator, ebuf, n), .cost = sol.cost });
             if (sol.cost < best_cost) {
                 best_cost = sol.cost;
                 best.deinit();
@@ -1751,6 +1717,7 @@ pub fn solveVrptwHgs(allocator: std.mem.Allocator, inst: VrptwInstance, options:
             stagnation = 0;
         }
     }
+    if (validate(inst, best.routes) == null) return error.Infeasible;
     return best;
 }
 
@@ -1780,7 +1747,7 @@ test "VRPTW returns a clean error for a TW-unreachable customer" {
         .due = &due,
         .service = &service,
     };
-    try std.testing.expectError(error.NoFeasibleSplit, solveVrptw(allocator, inst, .{ .seed = 1 }, 5, 1, 0));
+    try std.testing.expectError(error.NoFeasibleSplit, solveVrptw(allocator, inst, .{ .seed = 1 }, .{ .rounds = 5, .restarts = 1, .veh_penalty = 0 }));
 }
 
 test "TWS concatenation feasibility matches the scheduler (oracle)" {
@@ -2044,7 +2011,7 @@ test "VRPTW engine reaches the brute-force optimum on a small instance" {
         .budget = .{ .trials = 30, .max_passes = 40 },
         .candidates = .{ .candidate_count = 5, .candidate_mode = .alpha_nearness, .sparse_min_dimension = 0 },
         .search = .{ .enable_lk = true, .lk_max_depth = 5 },
-    }, 80, 4, 0);
+    }, .{ .rounds = 80, .restarts = 4, .veh_penalty = 0 });
     defer res.deinit();
     const checked = validate(inst, res.routes) orelse return error.Infeasible;
     try std.testing.expectEqual(res.total_cost, checked);
@@ -2087,9 +2054,9 @@ test "VRPTW HGS: feasible and no worse than the ILS engine" {
         .candidates = .{ .candidate_count = 6, .candidate_mode = .alpha_nearness, .sparse_min_dimension = 0 },
         .search = .{ .enable_lk = true, .lk_max_depth = 5 },
     };
-    var ils = try solveVrptw(allocator, inst, opts, 40, 4, 0);
+    var ils = try solveVrptw(allocator, inst, opts, .{ .rounds = 40, .restarts = 4, .veh_penalty = 0 });
     defer ils.deinit();
-    var hgs = try solveVrptwHgs(allocator, inst, opts, .{ .mu = 10, .lambda = 15, .generations = 15 }, 0);
+    var hgs = try solveVrptwHgs(allocator, inst, opts, .{ .mu = 10, .lambda = 15, .generations = 15, .veh_penalty = 0 });
     defer hgs.deinit();
     const hchk = validate(inst, hgs.routes) orelse return error.Infeasible;
     try std.testing.expectEqual(hgs.total_cost, hchk);
@@ -2133,7 +2100,7 @@ test "VRPTW end-to-end: feasible and beats one-per-route" {
         .budget = .{ .trials = 30, .max_passes = 40 },
         .candidates = .{ .candidate_count = 6, .candidate_mode = .alpha_nearness, .sparse_min_dimension = 0 },
         .search = .{ .enable_lk = true, .lk_max_depth = 5 },
-    }, 60, 4, 0);
+    }, .{ .rounds = 60, .restarts = 4, .veh_penalty = 0 });
     defer res.deinit();
     const checked = validate(inst, res.routes) orelse return error.Infeasible;
     try std.testing.expectEqual(res.total_cost, checked);

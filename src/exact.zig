@@ -15,6 +15,19 @@ pub fn bruteForce(
     p: *const problem.Problem,
     options: ExactOptions,
 ) !result_mod.SolveResult {
+    var stats: result_mod.SolveStats = .{};
+    return bruteForceWithStats(allocator, p, options, &stats);
+}
+
+/// Opt-in telemetry variant of `bruteForce`: records the enumerated permutation
+/// count into `out.exact_permutations`. The returned `SolveResult` carries no
+/// stats (telemetry lives only in `out`).
+pub fn bruteForceWithStats(
+    allocator: std.mem.Allocator,
+    p: *const problem.Problem,
+    options: ExactOptions,
+    out: *result_mod.SolveStats,
+) !result_mod.SolveResult {
     if (p.dimension > options.max_nodes) return ExactError.InstanceTooLarge;
 
     const perm = try allocator.alloc(usize, p.dimension - 1);
@@ -37,11 +50,11 @@ pub fn bruteForce(
         if (!nextPermutation(usize, perm)) break;
     }
 
+    out.* = .{ .exact_permutations = iterations };
     return .{
         .allocator = allocator,
         .tour = best_tour,
         .length = best_len,
-        .stats = .{ .exact_permutations = iterations },
     };
 }
 

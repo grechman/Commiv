@@ -4,7 +4,6 @@ const solver = @import("solver.zig");
 
 const SolveOptions = solver.SolveOptions;
 const SolveResult = solver.SolveResult;
-const SolveStats = solver.SolveStats;
 
 // Island-model parallel solving. The trial budget is split across K independent
 // islands (trials/K each) with distinct seeds; each solve() is fully
@@ -49,7 +48,6 @@ pub fn resolveThreadCount(requested: usize) usize {
 const IslandSlot = struct {
     tour: []usize, // caller-owned buffer the worker copies its result into
     length: u64,
-    stats: SolveStats,
     ok: bool,
 };
 
@@ -66,7 +64,6 @@ fn islandWorker(p: *const problem.Problem, options: SolveOptions, slot: *IslandS
     };
     @memcpy(slot.tour, result.tour);
     slot.length = result.length;
-    slot.stats = result.stats;
     slot.ok = true;
 }
 
@@ -81,6 +78,13 @@ fn islandOptions(base: SolveOptions, idx: usize, k: usize, total_trials: usize, 
 
 /// Run the solver across `par.threads` islands and return the best result, owned
 /// by `allocator`. threads<=1 calls solve() directly (bit-identical serial).
+///
+/// Reproducibility caveat: `par.threads == 0` resolves to the host CPU count
+/// (see resolveThreadCount). The island count sets each island's seed
+/// (options.seed + island index) and the split-budget division, so on the
+/// default path the winning result depends on how many cores the machine has,
+/// and the same seed yields different routes across machines. For output
+/// reproducible across machines, pass an explicit non-zero `par.threads`.
 pub fn solveParallel(
     allocator: std.mem.Allocator,
     p: *const problem.Problem,
@@ -102,7 +106,6 @@ pub fn solveParallel(
         s.* = .{
             .tour = try allocator.alloc(usize, n),
             .length = std.math.maxInt(u64),
-            .stats = .{},
             .ok = false,
         };
         allocated += 1;
@@ -171,7 +174,6 @@ pub fn solveParallel(
         .allocator = allocator,
         .tour = slots[winner].tour,
         .length = slots[winner].length,
-        .stats = slots[winner].stats,
     };
 }
 

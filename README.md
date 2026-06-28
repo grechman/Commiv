@@ -72,7 +72,7 @@ exe.root_module.addImport("commiv", commiv.module("commiv"));
 
 ### 2. Solve a vehicle-routing problem from your own data
 
-Full working examples live in [`examples/`](examples/): `basic.zig` parses a TSPLIB instance, and `roadbench.zig` and `cvrpbench.zig` read instances from files on disk. To load a problem from a file, hand its contents to `parseTsplib` (it understands both TSPLIB and CVRPLIB). Below is the minimal in-memory version on your own data.
+Full working examples live in [`examples/`](examples/): `basic.zig` parses a TSPLIB instance with `parseTsplib`, while `roadbench.zig` and `cvrpbench.zig` read their CVRP and road instances from disk with their own parsers. `parseTsplib` reads TSPLIB symmetric TSP only — a coordinate section (`EUC_2D`, `CEIL_2D`, or `ATT`) or an `EXPLICIT` `FULL_MATRIX` — so CVRP, ACVRP, and ATSP instances do not load through it. Below is the minimal in-memory version on your own data.
 
 You bring a row-major `(n+1) x (n+1)` cost matrix (node 0 is the depot, customers are
 `1..n`), a `demand` array, and a vehicle `capacity`. The matrix is directional:
@@ -155,8 +155,11 @@ defer atsp.deinit();
 
 - `SolveOptions.seed` is the RNG seed. For the single-threaded solvers the same seed gives
   byte-identical output, so runs are reproducible. The `*Parallel` variants also depend on
-  the thread count, so pin both the seed and the thread count if you need to reproduce a
-  parallel run exactly.
+  the thread count: their default `threads = 0` resolves to the host CPU count, which sets
+  the island/chain count and therefore the per-island seeds, so the same seed yields
+  different routes on machines with different core counts. For output reproducible across
+  machines, pass an explicit non-zero `threads` (`ParallelOptions.threads` for `solveParallel`)
+  and pin both the seed and that thread count.
 - `SolveOptions.budget.trials` and `.max_passes` control how hard the search works. Larger
   means closer to optimal and more time. The budget is iteration-based, not a wall-clock
   deadline, so size it against your latency target empirically.
@@ -172,7 +175,8 @@ Every solver is allocator-first, takes an options struct, and returns a result y
 [`src/root.zig`](src/root.zig)); each solver has unit tests in its own source file.
 
 **Parsing**
-- `parseTsplib(allocator, text, ParseOptions) !Problem` parses TSPLIB / CVRPLIB text. Pass a
+- `parseTsplib(allocator, text, ParseOptions) !Problem` parses TSPLIB symmetric TSP only — a
+  coordinate section (`EUC_2D`, `CEIL_2D`, or `ATT`) or an `EXPLICIT` `FULL_MATRIX`. Pass a
   `ParseDiagnostic` in the options to capture line-level parse errors.
 
 **Problem definition** (coordinate / TSPLIB path)
@@ -189,12 +193,16 @@ Every solver is allocator-first, takes an options struct, and returns a result y
 - `solve(allocator, *Problem, SolveOptions) !SolveResult` — Lin-Kernighan + ILS.
 - `solveParallel(allocator, *Problem, SolveOptions, ParallelOptions) !SolveResult` —
   independent islands with optional EAX recombination, or a deterministic split-budget speed
-  mode.
+  mode. `ParallelOptions.threads == 0` resolves to the host CPU count, which changes the
+  island seeding and therefore the result; pass an explicit non-zero `threads` for output
+  reproducible across machines.
 
 **ATSP (directed)** — row-major `n x n` matrix where `matrix[i*n + j]` is the cost of `i → j`
 - `solveAtsp(allocator, matrix, n, SolveOptions) !SolveResult` — 2n Jonker-Volgenant transform.
 - `solveAtspNative(allocator, matrix, n, SolveOptions) !SolveResult` — direct directed search.
-- `solveAtspParallel(allocator, matrix, n, SolveOptions, threads) !SolveResult`.
+- `solveAtspParallel(allocator, matrix, n, SolveOptions, threads) !SolveResult` — `threads == 0`
+  resolves to the host CPU count, changing the result; pass a non-zero `threads` for
+  cross-machine reproducibility.
 
 **Exact (tiny n)**
 - `bruteForce(allocator, *Problem, ExactOptions) !SolveResult`.
@@ -205,14 +213,17 @@ Every solver is allocator-first, takes an options struct, and returns a result y
 - `solveCvrp(allocator, inst, SolveOptions) !CvrpResult` — no-config default (runs SISR).
 - `solveCvrpSisr(allocator, inst, SolveOptions, CvrpSisrParams)` — large / directed.
 - `solveCvrpHgs(allocator, inst, SolveOptions, CvrpHgsParams, max_vehicles)` — n ≲ 500.
-- `solveCvrpFleet(allocator, inst, SolveOptions, rounds, restarts, max_vehicles)` — fixed fleet cap.
-- `solveCvrpSisrParallel(allocator, inst, SolveOptions, CvrpSisrParams, threads)`.
-- `solveCvrpHgsParallel(allocator, inst, SolveOptions, CvrpHgsParams, max_vehicles, threads)`.
+- `solveCvrpFleet(allocator, inst, SolveOptions, CvrpFleetParams)` — fixed fleet cap.
+- `solveCvrpSisrParallel(allocator, inst, SolveOptions, CvrpSisrParams, threads)` — `threads == 0`
+  resolves to the host CPU count, changing the result; pass a non-zero `threads` for
+  cross-machine reproducibility.
+- `solveCvrpHgsParallel(allocator, inst, SolveOptions, CvrpHgsParams, max_vehicles, threads)` —
+  same `threads == 0` caveat as above.
 
 **VRPTW** — build a `VrptwInstance { n, matrix, demand, capacity, ready, due, service }`;
 returns `VrptwResult`
-- `solveVrptw(allocator, inst, SolveOptions, rounds, restarts, veh_penalty) !VrptwResult`.
-- `solveVrptwHgs(allocator, inst, SolveOptions, VrptwHgsParams, veh_penalty) !VrptwResult`.
+- `solveVrptw(allocator, inst, SolveOptions, VrptwParams) !VrptwResult`.
+- `solveVrptwHgs(allocator, inst, SolveOptions, VrptwHgsParams) !VrptwResult`.
 
 **Asymmetry analysis**
 - `conservativeness(allocator, matrix, dim) !Conservativeness` runs a Helmholtz-Hodge
@@ -477,7 +488,7 @@ exe.root_module.addImport("commiv", commiv.module("commiv"));
 
 ### 2. Решить задачу маршрутизации на своих данных
 
-Полные рабочие примеры лежат в каталоге [`examples/`](examples/): `basic.zig` разбирает инстанс TSPLIB, а `roadbench.zig` и `cvrpbench.zig` читают инстансы из файлов на диске. Чтобы загрузить задачу из файла, передайте его содержимое в `parseTsplib` (понимает и TSPLIB, и CVRPLIB). Ниже — минимальный встроенный вариант на своих данных.
+Полные рабочие примеры лежат в каталоге [`examples/`](examples/): `basic.zig` разбирает инстанс TSPLIB через `parseTsplib`, а `roadbench.zig` и `cvrpbench.zig` читают свои инстансы CVRP и дорожных матриц с диска собственными парсерами. `parseTsplib` читает только симметричную TSP в формате TSPLIB — секцию координат (`EUC_2D`, `CEIL_2D` или `ATT`) либо `EXPLICIT` `FULL_MATRIX`, — поэтому инстансы CVRP, ACVRP и ATSP через него не загружаются. Ниже — минимальный встроенный вариант на своих данных.
 
 Вы передаёте матрицу стоимостей `(n+1) x (n+1)` в строковом порядке (узел 0 — это депо,
 клиенты — `1..n`), массив `demand` и вместимость `capacity`. Матрица направленная:
@@ -559,8 +570,12 @@ defer atsp.deinit();
 ### Важные настройки
 
 - `SolveOptions.seed` — сид генератора случайных чисел. Для однопоточных солверов один и тот же сид даёт побайтово идентичный результат, так что прогоны воспроизводимы. Варианты
-  `*Parallel` зависят ещё и от числа потоков, так что для точного воспроизведения
-  параллельного прогона фиксируйте и сид, и число потоков.
+  `*Parallel` зависят ещё и от числа потоков: их значение по умолчанию `threads = 0`
+  разрешается в число ядер хоста, которое задаёт число островов/цепочек и, значит, посевы
+  (seed) каждого острова, поэтому один и тот же сид даёт разные маршруты на машинах с разным
+  числом ядер. Для воспроизводимого между машинами результата передавайте явное ненулевое
+  `threads` (`ParallelOptions.threads` для `solveParallel`) и фиксируйте и сид, и это число
+  потоков.
 - `SolveOptions.budget.trials` и `.max_passes` определяют, насколько усердно работает поиск.
   Больше — ближе к оптимуму и дольше по времени. Бюджет считается в итерациях, а не по часам,
   так что подбирайте его под свою цель по задержке эмпирически.
@@ -576,7 +591,8 @@ defer atsp.deinit();
 повторяет [`src/root.zig`](src/root.zig)); у каждого солвера есть модульные тесты в его файле.
 
 **Разбор**
-- `parseTsplib(allocator, text, ParseOptions) !Problem` разбирает текст TSPLIB / CVRPLIB.
+- `parseTsplib(allocator, text, ParseOptions) !Problem` разбирает текст симметричной TSP в
+  формате TSPLIB — секцию координат (`EUC_2D`, `CEIL_2D` или `ATT`) либо `EXPLICIT` `FULL_MATRIX`.
   Передайте `ParseDiagnostic` в опциях, чтобы поймать ошибки разбора по строкам.
 
 **Определение задачи** (путь координат / TSPLIB)
@@ -593,12 +609,16 @@ defer atsp.deinit();
 - `solve(allocator, *Problem, SolveOptions) !SolveResult` — Lin-Kernighan + ILS.
 - `solveParallel(allocator, *Problem, SolveOptions, ParallelOptions) !SolveResult` —
   независимые острова с опциональной рекомбинацией EAX или детерминированный режим деления
-  бюджета ради скорости.
+  бюджета ради скорости. `ParallelOptions.threads == 0` разрешается в число ядер хоста, что
+  меняет посев островов и, значит, результат; для воспроизводимого между машинами результата
+  передавайте явное ненулевое `threads`.
 
 **ATSP (направленная)** — матрица `n x n` в строковом порядке, `matrix[i*n + j]` = стоимость `i → j`
 - `solveAtsp(allocator, matrix, n, SolveOptions) !SolveResult` — 2n-преобразование Йонкера-Волгенанта.
 - `solveAtspNative(allocator, matrix, n, SolveOptions) !SolveResult` — прямой направленный поиск.
-- `solveAtspParallel(allocator, matrix, n, SolveOptions, threads) !SolveResult`.
+- `solveAtspParallel(allocator, matrix, n, SolveOptions, threads) !SolveResult` — `threads == 0`
+  разрешается в число ядер хоста, меняя результат; передавайте ненулевое `threads` для
+  воспроизводимости между машинами.
 
 **Точное решение (крошечное n)**
 - `bruteForce(allocator, *Problem, ExactOptions) !SolveResult`.
@@ -608,14 +628,17 @@ defer atsp.deinit();
 - `solveCvrp(allocator, inst, SolveOptions) !CvrpResult` — точка входа по умолчанию (запускает SISR).
 - `solveCvrpSisr(allocator, inst, SolveOptions, CvrpSisrParams)` — большие / направленные.
 - `solveCvrpHgs(allocator, inst, SolveOptions, CvrpHgsParams, max_vehicles)` — n ≲ 500.
-- `solveCvrpFleet(allocator, inst, SolveOptions, rounds, restarts, max_vehicles)` — фиксированный парк.
-- `solveCvrpSisrParallel(allocator, inst, SolveOptions, CvrpSisrParams, threads)`.
-- `solveCvrpHgsParallel(allocator, inst, SolveOptions, CvrpHgsParams, max_vehicles, threads)`.
+- `solveCvrpFleet(allocator, inst, SolveOptions, CvrpFleetParams)` — фиксированный парк.
+- `solveCvrpSisrParallel(allocator, inst, SolveOptions, CvrpSisrParams, threads)` — `threads == 0`
+  разрешается в число ядер хоста, меняя результат; передавайте ненулевое `threads` для
+  воспроизводимости между машинами.
+- `solveCvrpHgsParallel(allocator, inst, SolveOptions, CvrpHgsParams, max_vehicles, threads)` —
+  та же оговорка про `threads == 0`, что и выше.
 
 **VRPTW** — соберите `VrptwInstance { n, matrix, demand, capacity, ready, due, service }`;
 возвращает `VrptwResult`
-- `solveVrptw(allocator, inst, SolveOptions, rounds, restarts, veh_penalty) !VrptwResult`.
-- `solveVrptwHgs(allocator, inst, SolveOptions, VrptwHgsParams, veh_penalty) !VrptwResult`.
+- `solveVrptw(allocator, inst, SolveOptions, VrptwParams) !VrptwResult`.
+- `solveVrptwHgs(allocator, inst, SolveOptions, VrptwHgsParams) !VrptwResult`.
 
 **Анализ асимметрии**
 - `conservativeness(allocator, matrix, dim) !Conservativeness` выполняет разложение

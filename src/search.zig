@@ -15,22 +15,6 @@ const sameUndirectedEdge = tour_mod.sameUndirectedEdge;
 const SolveStats = solver.SolveStats;
 const SolverWorkspace = solver.SolverWorkspace;
 
-/// Caller-owned hard constraint: edges the local search must never break. The
-/// legitimate, non-heuristic successor to the deleted edge-freeze voting
-/// subsystem — the caller owns the constraint outright, no votes, no staleness.
-/// Type-erased for the future VRP layer. Dormant: `LocalSearch.pinned_edges`
-/// defaults null and no move consults it yet; the move-apply integration lands
-/// with the VRP work, at which point edge-removal sites gate on
-/// `if (pinned_edges) |pe| if (pe.isPinned(a, b)) continue;`.
-pub const PinnedEdges = struct {
-    ctx: *const anyopaque,
-    isPinnedFn: *const fn (ctx: *const anyopaque, a: usize, b: usize) bool,
-
-    pub fn isPinned(self: *const PinnedEdges, a: usize, b: usize) bool {
-        return self.isPinnedFn(self.ctx, a, b);
-    }
-};
-
 pub const LocalSearch = struct {
     dist: *DistanceOracle,
     // Trial-loop cost counters (roadmap item 1) accumulate here directly:
@@ -64,9 +48,6 @@ pub const LocalSearch = struct {
     // "richer LK moves" lever — commiv otherwise reports nonseq=0 above 512).
     nonseq_min_dimension: usize = 256,
     nonseq_max_dimension: usize = 512,
-    // Dormant pinned-edge seam (item 8): caller-owned edges the search must not
-    // break. Null in the whole current solve path, so all moves are unchanged.
-    pinned_edges: ?*const PinnedEdges = null,
     lk_nodes_this_pass: usize = 0,
     lk_active_head: usize = 0,
     lk_active_count: usize = 0,

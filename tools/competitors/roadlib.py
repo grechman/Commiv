@@ -35,6 +35,7 @@ def parse_road(path):
                 demand[idx] = int(t[3])
             elif mode == 'matrix':
                 b = row * dim
+                assert len(t) == dim, f"bad matrix row {row}: {len(t)} != {dim}"
                 for j, v in enumerate(t):
                     M[b + j] = int(v)
                 row += 1

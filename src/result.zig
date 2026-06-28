@@ -6,9 +6,11 @@ const std = @import("std");
 // return it without importing the heuristic core (which imports the exact
 // solver) — i.e. without a circular import.
 
-/// Telemetry counters filled in during a solve. Most fields are meaningful only
-/// for the heuristic `solve` path; `solveAtsp*` leave the search-specific
-/// counters at zero, and `bruteForce` records its work in `exact_permutations`.
+/// Telemetry counters for a solve. No longer embedded in `SolveResult`;
+/// populated through the opt-in `solveWithStats` / `bruteForceWithStats`
+/// channel (the stats-free `solve` / `solveAtsp*` / `bruteForce` discard them).
+/// Most fields are meaningful only for the heuristic search path; the
+/// brute-force path records its work in `exact_permutations`.
 pub const SolveStats = struct {
     trials: usize = 0,
     warmup_moves: u64 = 0,
@@ -82,7 +84,6 @@ pub const SolveResult = struct {
     allocator: std.mem.Allocator,
     tour: []usize, // node visit order, length = dimension (directed order for ATSP)
     length: u64, // tour length (true directed length for ATSP)
-    stats: SolveStats = .{},
 
     pub fn deinit(self: *SolveResult) void {
         self.allocator.free(self.tour);

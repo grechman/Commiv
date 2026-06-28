@@ -5,20 +5,6 @@ pub const SolverError = error{
     DistanceCacheTooLarge,
 };
 
-/// Caller-owned additive edge penalty (guided local search, forbidden edges).
-/// Type-erased so the future VRP layer can supply any context. Penalties are
-/// non-negative and saturate into the u32 distance; the LKH pi-transformation
-/// (which can be negative) is out of scope for this dormant seam. Default-off:
-/// `DistanceOracle.penalty_source` is null and `distance()` is bit-identical.
-pub const PenaltySource = struct {
-    ctx: *const anyopaque,
-    penaltyFn: *const fn (ctx: *const anyopaque, a: usize, b: usize) u32,
-
-    pub fn penalty(self: *const PenaltySource, a: usize, b: usize) u32 {
-        return self.penaltyFn(self.ctx, a, b);
-    }
-};
-
 pub const DistanceOracle = struct {
     allocator: std.mem.Allocator,
     p: *const problem.Problem,
@@ -27,10 +13,6 @@ pub const DistanceOracle = struct {
     uncached_coordinate_distances: u64 = 0,
     lookups: u64 = 0,
     length_scans: u64 = 0,
-    // Optional caller-owned penalty applied on top of the base distance. Null
-    // by default (the whole solve path leaves it null), so distance() and
-    // tourLengthUnchecked() are bit-identical until the VRP layer installs one.
-    penalty_source: ?*const PenaltySource = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -103,7 +85,6 @@ pub const DistanceOracle = struct {
             if (self.p.distance_kind != .explicit_full_matrix) self.uncached_coordinate_distances += 1;
             break :base_blk self.p.distanceUnchecked(a, b);
         };
-        if (self.penalty_source) |pen| return base +| pen.penalty(a, b);
         return base;
     }
 

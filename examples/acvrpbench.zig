@@ -49,7 +49,7 @@ pub fn main(init: std.process.Init) !void {
         var res = if (use_hgs)
             try commiv.solveCvrpHgsParallel(allocator, inst, opts, .{ .generations = gens }, owned.vehicles, kb_threads)
         else
-            try commiv.solveCvrpFleet(allocator, inst, opts, rounds, restarts, owned.vehicles);
+            try commiv.solveCvrpFleet(allocator, inst, opts, .{ .rounds = rounds, .restarts = restarts, .max_vehicles = owned.vehicles });
         defer res.deinit();
         const ms = @as(f64, @floatFromInt(nanos() - t0)) / 1e6;
 
@@ -131,7 +131,8 @@ fn parseAcvrp(allocator: std.mem.Allocator, bytes: []const u8) !Owned {
         if (line.len == 0) continue;
         if (std.mem.startsWith(u8, line, "DIMENSION")) {
             dim = try trailingInt(usize, line);
-            m = try allocator.alloc(u32, dim * dim);
+            if (dim < 2 or dim > 100_000) return error.BadInstance;
+            m = try allocator.alloc(u32, std.math.mul(usize, dim, dim) catch return error.BadInstance);
             dem_by_node = try allocator.alloc(u32, dim + 1);
             continue;
         }
@@ -183,7 +184,7 @@ fn parseAcvrp(allocator: std.mem.Allocator, bytes: []const u8) !Owned {
             .none => {},
         }
     }
-    if (dim < 2 or depot == 0) return error.BadInstance;
+    if (dim < 2 or depot == 0 or depot > dim) return error.BadInstance;
     const n = dim - 1;
     // remap: depot -> 0, others -> 1..n in node order
     const remap = try allocator.alloc(usize, dim + 1);

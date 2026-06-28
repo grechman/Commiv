@@ -170,7 +170,8 @@ pub fn main(init: std.process.Init) !void {
                 .mu = try std.fmt.parseInt(usize, env.get("CB_MU") orelse "25", 10),
                 .lambda = try std.fmt.parseInt(usize, env.get("CB_LAMBDA") orelse "40", 10),
                 .generations = try std.fmt.parseInt(usize, env.get("CB_GENS") orelse "30", 10),
-            }, 0) else try commiv.solveVrptw(allocator, vinst, solve_opts, rounds, restarts, 0);
+                .veh_penalty = 0,
+            }) else try commiv.solveVrptw(allocator, vinst, solve_opts, .{ .rounds = rounds, .restarts = restarts, .veh_penalty = 0 });
             defer vres.deinit();
             total_cost = vres.total_cost;
             nroutes = vres.vehicles;
@@ -211,7 +212,7 @@ pub fn main(init: std.process.Init) !void {
                 .lambda = try std.fmt.parseInt(usize, env.get("CB_LAMBDA") orelse "0", 10),
             }, 0)
         else
-            try commiv.internal.vrp.solveCvrpMulti(allocator, inst, solve_opts, rounds, restarts);
+            try commiv.internal.vrp.solveCvrpMulti(allocator, inst, solve_opts, .{ .rounds = rounds, .restarts = restarts });
         defer res.deinit();
         const ms = @as(f64, @floatFromInt(nanos() - t0)) / 1e6;
 

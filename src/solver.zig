@@ -12,11 +12,6 @@ const result_mod = @import("result.zig");
 
 const SolverError = distance.SolverError;
 const LocalSearch = search_mod.LocalSearch;
-// Dormant VRP seams (L4): caller-owned additive penalty + caller-owned pinned
-// edges. Both default off and are unused by solve(); re-exported so the future
-// VRP layer can install them without reaching into the submodules.
-pub const PenaltySource = distance.PenaltySource;
-pub const PinnedEdges = search_mod.PinnedEdges;
 const IptScratch = recombine.IptScratch;
 const IptOutcome = recombine.IptOutcome;
 const iptMergeTours = recombine.iptMergeTours;
@@ -28,7 +23,6 @@ pub const DistanceOracle = distance.DistanceOracle;
 const nearestNeighborTour = construct.nearestNeighborTour;
 const farthestInsertionTour = construct.farthestInsertionTour;
 const segmentExchangeKick = construct.segmentExchangeKick;
-const segmentExchangeKickTargeted = construct.segmentExchangeKickTargeted;
 const plateauKick = construct.plateauKick;
 const guidedBackboneTour = construct.guidedBackboneTour;
 pub const CandidateMode = candidates_mod.CandidateMode;
@@ -56,21 +50,6 @@ pub const SolveOptions = struct {
     // transform, whose candidate ranking must come from the ORIGINAL asymmetric
     // costs, not the BIG-offset transformed matrix the oracle exposes.
     injected_candidates: ?*Candidates = null,
-
-    // Experiment (default off): after the trial loop, run ONE pass of a stronger
-    // search (exhaustive backtracking + Gain23 bridges enabled) over the final
-    // best tour. The large-n trial loop converges under a deliberately light
-    // search (backtrack depth 2, bridges gated off above n=512); the converged
-    // tour is only a local optimum w.r.t. that weaker neighborhood. This polish
-    // accepts improving moves only, so it can lower the length but never raise
-    // it — testing whether the converged tour has headroom the light search
-    // structurally cannot see. 0 = off. 1 = one polish of the best tour. >1 adds
-    // (rounds-1) kick+strong-descend iterations (a strong-search ILS phase),
-    // each adopting only on strict improvement, so the phase is monotone-safe.
-    final_polish_rounds: usize = 0,
-    // Backtrack depth inside the polish (0 = default @min(n-1, 12)). Higher = a
-    // stronger one-shot polish (still monotone-safe), bounded by lk_backtrack_limit.
-    final_polish_backtrack_depth: usize = 0,
 
     // Resource limits: how much work and how much memory the run may spend.
     pub const Budget = struct {
@@ -127,25 +106,6 @@ pub const SolveOptions = struct {
         // depth 2 at or above.
         lk_backtrack_depth: ?usize = null,
         lk_nonseq_branch_limit: usize = 2,
-        // Plateau walk (2026-06-17, large-n diversification). null = OFF =
-        // bit-identical best-accept ILS (every kick perturbs the global best,
-        // only strict improvements are kept). When set AND n >= eax_min_dimension,
-        // the kick path perturbs a drifting `current` incumbent and accepts a
-        // kicked+descended tour as the new current when its length is within
-        // `plateau_walk_ppm` parts-per-million of the current's length, while the
-        // global best is tracked separately. This lets the search traverse the
-        // broad plateau of near-cost-equal local optima (the measured large-n
-        // accuracy limiter: ~85% of missed optimal edges are candidate-reachable
-        // but the best-accept search never realizes them) instead of bouncing off
-        // the single incumbent. 0 = sideways-only (accept equal-cost drift).
-        plateau_walk_ppm: ?u64 = null,
-        // Targeted kick (2026-06-17, large-n diversification). 0 = OFF =
-        // bit-identical uniform-random segment-exchange kick. When > 0 AND
-        // n >= eax_min_dimension, each kick cut position is chosen by a tournament
-        // of this many random draws, keeping the longest tour edge — biasing the
-        // perturbation toward the long (likely-wrong) edges while staying
-        // stochastic. See segmentExchangeKickTargeted.
-        targeted_kick_tournament: usize = 0,
         // Upper bound (exclusive) of the size band where the non-sequential
         // Gain23 bridge fallback fires. 512 = bit-identical (the historical
         // 256<=n<512 gate); raise it to enable the richer non-sequential moves at
@@ -340,20 +300,35 @@ pub fn solve(
     p: *const problem.Problem,
     options: SolveOptions,
 ) !SolveResult {
+    var stats: SolveStats = .{};
+    return solveWithStats(allocator, p, options, &stats);
+}
+
+/// Opt-in telemetry variant of `solve`: runs the identical search and writes the
+/// full per-run `SolveStats` into `out.*`. The returned `SolveResult` carries no
+/// telemetry; `solve` is a thin wrapper that discards the stats into a local.
+/// The hot search loop is unchanged — only the final result packaging differs.
+pub fn solveWithStats(
+    allocator: std.mem.Allocator,
+    p: *const problem.Problem,
+    options: SolveOptions,
+    out: *SolveStats,
+) !SolveResult {
     const n = p.dimension;
     if (n <= 10) {
-        const exact_result = exact.bruteForce(allocator, p, .{ .max_nodes = 10 }) catch |err| switch (err) {
+        var exact_stats: SolveStats = .{};
+        const exact_result = exact.bruteForceWithStats(allocator, p, .{ .max_nodes = 10 }, &exact_stats) catch |err| switch (err) {
             error.InstanceTooLarge => unreachable,
             else => |e| return e,
+        };
+        out.* = .{
+            .trials = 1,
+            .exact_permutations = exact_stats.exact_permutations,
         };
         return .{
             .allocator = allocator,
             .tour = exact_result.tour,
             .length = exact_result.length,
-            .stats = .{
-                .trials = 1,
-                .exact_permutations = exact_result.stats.exact_permutations,
-            },
         };
     }
 
@@ -471,17 +446,6 @@ pub fn solve(
     // construction (LKH's InNextBestTour). The contested sections between it
     // and the current best are exactly where constructions should explore.
     var prev_best_len: u64 = std.math.maxInt(u64);
-    // Plateau walk state (gated, large-n only). cur_tour is the drifting
-    // incumbent the kick path perturbs; the global best is tracked separately so
-    // walk excursions never lose ground. Allocated only when enabled.
-    const plateau_walk_enabled = options.search.plateau_walk_ppm != null and n >= eax_min_dimension;
-    const walk_ppm: u64 = options.search.plateau_walk_ppm orelse 0;
-    var cur_tour: []usize = &.{};
-    if (plateau_walk_enabled) cur_tour = try allocator.alloc(usize, n);
-    defer if (plateau_walk_enabled) allocator.free(cur_tour);
-    var cur_len: u64 = std.math.maxInt(u64);
-    // Targeted-kick tournament size (gated large-n; 0 = uniform kick).
-    const targeted_kick_tk: usize = if (n >= eax_min_dimension) options.search.targeted_kick_tournament else 0;
     const max_trials = if (options.budget.trial_extension_factor > 1)
         std.math.mul(usize, trials, options.budget.trial_extension_factor) catch trials
     else
@@ -513,15 +477,10 @@ pub fn solve(
             best_len != std.math.maxInt(u64) and stale_kicks < restart_limit;
         var guided_trial = false;
         if (kick_trial) {
-            // Walk mode kicks the drifting current (re-anchored to best on every
-            // new global best and at each restart reset); default kicks the best.
-            @memcpy(workspace.tour, if (plateau_walk_enabled) cur_tour else workspace.best_tour);
+            @memcpy(workspace.tour, workspace.best_tour);
             kick_count = @min(1 + stale_kicks / 4, kick_touched.len);
             for (0..kick_count) |ki| {
-                if (targeted_kick_tk > 0)
-                    segmentExchangeKickTargeted(&oracle, &candidates, workspace.tour, &random, &kick_touched[ki], targeted_kick_tk)
-                else
-                    segmentExchangeKick(workspace.tour, &random, &kick_touched[ki]);
+                segmentExchangeKick(workspace.tour, &random, &kick_touched[ki]);
             }
             // Extension-phase kicks add plateau drift: the base budget has
             // stalled, so the remaining gap is most likely hiding behind
@@ -539,12 +498,6 @@ pub fn solve(
             if (trial > 0 and stale_kicks >= restart_limit) {
                 if (!guided_available) restart_threshold *= 2;
                 stale_kicks = 0;
-                // Walk got stuck: re-anchor it on the global best before the
-                // restart so excursions always relaunch from the best basin.
-                if (plateau_walk_enabled and best_len != std.math.maxInt(u64)) {
-                    cur_len = best_len;
-                    @memcpy(cur_tour, workspace.best_tour);
-                }
             }
             if (guided_available) {
                 // Restarts are LKH-style guided constructions seeded by the
@@ -803,27 +756,13 @@ pub fn solve(
             last_improvement_trial = trial;
             @memcpy(workspace.best_tour, workspace.tour);
             stale_kicks = 0;
-            // New global best re-anchors the walk (it is the best basin found).
-            if (plateau_walk_enabled) {
-                cur_len = len;
-                @memcpy(cur_tour, workspace.tour);
-            }
             if (n >= eax_min_dimension and options.search.enable_lk) elitePoolOffer(&elite, &eax, workspace.tour, len);
             const gap = trial - last_progress_trial;
             stats.eax_worst_gap_ratio_x100 = @max(stats.eax_worst_gap_ratio_x100, gap * 100 / @max(max_progress_gap, 32));
             max_progress_gap = @max(max_progress_gap, gap);
             last_progress_trial = trial;
         } else if (kick_trial) {
-            // Walk acceptance: drift onto a not-much-worse local optimum (within
-            // walk_ppm of the current) to traverse the plateau; otherwise the
-            // kick is stale. Best-accept (walk disabled) only ever increments.
-            if (plateau_walk_enabled and len <= cur_len + cur_len * walk_ppm / 1_000_000) {
-                cur_len = len;
-                @memcpy(cur_tour, workspace.tour);
-                stale_kicks = 0;
-            } else {
-                stale_kicks += 1;
-            }
+            stale_kicks += 1;
         }
     }
     stats.trials = trial;
@@ -835,50 +774,16 @@ pub fn solve(
         @memcpy(workspace.best_tour, if (n < eax_min_dimension) ipt.merged else eax.merged);
     }
 
-    if (options.final_polish_rounds > 0 and options.search.enable_lk and n >= 8) {
-        var polish = LocalSearch{
-            .dist = &oracle,
-            .stats = &stats,
-            .candidates = &candidates,
-            .tour = workspace.tour,
-            .ws = &workspace,
-            .max_passes = @max(options.budget.max_passes, 200),
-            .enable_or_opt = true,
-            .enable_bounded_three_opt_cleanup = true,
-            .lk_completion_patch_min_gain = options.search.lk_completion_patch_min_gain,
-            .max_lk_depth = max_lk_depth,
-            .lk_backtrack_limit = options.search.lk_backtrack_limit,
-            .lk_backtrack_depth = if (options.final_polish_backtrack_depth != 0) @min(n - 1, options.final_polish_backtrack_depth) else @min(n - 1, 12),
-            .lk_nonseq_branch_limit = @max(options.search.lk_nonseq_branch_limit, 5),
-            .nonseq_max_dimension = std.math.maxInt(usize), // Gain23 bridges on
-        };
-        for (0..options.final_polish_rounds) |round| {
-            @memcpy(workspace.tour, workspace.best_tour);
-            if (round > 0) {
-                // Strong-search ILS: perturb the best, strong-descend, keep best.
-                const kicks = 1 + round % 4;
-                for (0..kicks) |ki| segmentExchangeKick(workspace.tour, &random, &kick_touched[ki % kick_touched.len]);
-            }
-            polish.rebuildState();
-            try polish.syncLength();
-            _ = try polish.improveLK(&stats, true, true);
-            if (polish.current_length < best_len) {
-                best_len = polish.current_length;
-                @memcpy(workspace.best_tour, workspace.tour);
-            }
-        }
-    }
-
     const result_tour = try allocator.dupe(usize, workspace.best_tour);
     errdefer allocator.free(result_tour);
     stats.uncached_coordinate_distances = oracle.uncached_coordinate_distances;
     stats.distance_lookups = oracle.lookups;
     stats.tour_length_scans = oracle.length_scans;
+    out.* = stats;
     return .{
         .allocator = allocator,
         .tour = result_tour,
         .length = best_len,
-        .stats = stats,
     };
 }
 
@@ -997,7 +902,6 @@ pub fn recombineTours(
         .allocator = allocator,
         .tour = best_tour,
         .length = best_len,
-        .stats = stats,
     };
 }
 
@@ -1156,14 +1060,15 @@ test "solver is deterministic and finds square optimum through exact path" {
     var p = try problem.Problem.initCoords(allocator, "square", .euc_2d, &coords);
     defer p.deinit();
 
-    var a = try solve(allocator, &p, .{ .seed = 7 });
+    var a_stats: SolveStats = .{};
+    var a = try solveWithStats(allocator, &p, .{ .seed = 7 }, &a_stats);
     defer a.deinit();
     var b = try solve(allocator, &p, .{ .seed = 7 });
     defer b.deinit();
     try std.testing.expectEqual(@as(u64, 4), a.length);
     try std.testing.expectEqual(a.length, b.length);
     try std.testing.expectEqualSlices(usize, a.tour, b.tour);
-    try std.testing.expectEqual(@as(u64, 6), a.stats.exact_permutations);
+    try std.testing.expectEqual(@as(u64, 6), a_stats.exact_permutations);
 }
 
 test "heuristic improves a non-trivial ring-like instance" {
@@ -1184,17 +1089,18 @@ test "heuristic improves a non-trivial ring-like instance" {
     var p = try problem.Problem.initCoords(allocator, "ring", .euc_2d, &coords);
     defer p.deinit();
 
-    var result = try solve(allocator, &p, .{
+    var result_stats: SolveStats = .{};
+    var result = try solveWithStats(allocator, &p, .{
         .seed = 42,
         .budget = .{ .trials = 8, .max_passes = 40 },
         .candidates = .{ .candidate_count = 6 },
-    });
+    }, &result_stats);
     defer result.deinit();
     try p.validateTour(result.tour);
     try std.testing.expectEqual(result.length, try p.tourLength(result.tour));
-    try std.testing.expectEqual(@as(usize, 8), result.stats.trials);
-    try std.testing.expect(result.stats.improving_moves >= result.stats.lk_moves);
-    try std.testing.expect(result.stats.lk_attempts > 0);
+    try std.testing.expectEqual(@as(usize, 8), result_stats.trials);
+    try std.testing.expect(result_stats.improving_moves >= result_stats.lk_moves);
+    try std.testing.expect(result_stats.lk_attempts > 0);
     try std.testing.expect(result.length <= 25);
 }
 
@@ -1245,15 +1151,16 @@ test "heuristic scratch uses solve allocator instead of problem allocator" {
         _ = problem_allocator.alloc(u8, 1) catch break;
     }
 
-    var result = try solve(solve_allocator, &p, .{
+    var result_stats: SolveStats = .{};
+    var result = try solveWithStats(solve_allocator, &p, .{
         .seed = 1,
         .budget = .{ .trials = 2, .max_passes = 8 },
         .candidates = .{ .candidate_count = 4 },
-    });
+    }, &result_stats);
     defer result.deinit();
 
     try problem.validateTourWithAllocator(solve_allocator, p.dimension, result.tour);
-    try std.testing.expectEqual(@as(usize, 2), result.stats.trials);
+    try std.testing.expectEqual(@as(usize, 2), result_stats.trials);
 }
 
 test "heuristic reaches known convex perimeter optimum" {
@@ -1385,13 +1292,15 @@ test "fixed seed heuristic path is deterministic above brute force cutoff" {
         .budget = .{ .trials = 10, .max_passes = 30 },
         .candidates = .{ .candidate_count = 8 },
     };
-    var a = try solve(allocator, &p, options);
+    var a_stats: SolveStats = .{};
+    var a = try solveWithStats(allocator, &p, options, &a_stats);
     defer a.deinit();
-    var b = try solve(allocator, &p, options);
+    var b_stats: SolveStats = .{};
+    var b = try solveWithStats(allocator, &p, options, &b_stats);
     defer b.deinit();
     try std.testing.expectEqual(a.length, b.length);
     try std.testing.expectEqualSlices(usize, a.tour, b.tour);
-    try std.testing.expectEqual(a.stats.lk_moves, b.stats.lk_moves);
+    try std.testing.expectEqual(a_stats.lk_moves, b_stats.lk_moves);
 }
 
 test "cached coordinate heuristic path records no uncached coordinate distances" {
@@ -1413,14 +1322,15 @@ test "cached coordinate heuristic path records no uncached coordinate distances"
     var p = try problem.Problem.initCoords(allocator, "cached12", .euc_2d, &coords);
     defer p.deinit();
 
-    var result = try solve(allocator, &p, .{
+    var result_stats: SolveStats = .{};
+    var result = try solveWithStats(allocator, &p, .{
         .seed = 11,
         .budget = .{ .trials = 4, .max_passes = 20, .max_distance_cache_bytes = coords.len * coords.len * @sizeOf(u32) },
         .candidates = .{ .candidate_count = 4 },
-    });
+    }, &result_stats);
     defer result.deinit();
-    try std.testing.expectEqual(@as(usize, coords.len), result.stats.distance_cache_nodes);
-    try std.testing.expectEqual(@as(u64, 0), result.stats.uncached_coordinate_distances);
+    try std.testing.expectEqual(@as(usize, coords.len), result_stats.distance_cache_nodes);
+    try std.testing.expectEqual(@as(u64, 0), result_stats.uncached_coordinate_distances);
     try p.validateTour(result.tour);
 }
 
@@ -1508,35 +1418,37 @@ test "alpha-nearness mode is not worse than nearest mode on deterministic regres
     var p = try problem.Problem.initCoords(allocator, "alpha-regression", .euc_2d, coords);
     defer p.deinit();
 
-    var nearest = try solve(allocator, &p, .{
+    var nearest_stats: SolveStats = .{};
+    var nearest = try solveWithStats(allocator, &p, .{
         .seed = 12345,
         .budget = .{ .trials = 32, .max_passes = 80, .max_distance_cache_bytes = n * n * @sizeOf(u32) },
         .candidates = .{ .candidate_count = 4, .candidate_mode = .nearest_distance },
         .search = .{ .lk_max_depth = 5, .lk_backtrack_limit = 80_000 },
-    });
+    }, &nearest_stats);
     defer nearest.deinit();
-    var alpha = try solve(allocator, &p, .{
+    var alpha_stats: SolveStats = .{};
+    var alpha = try solveWithStats(allocator, &p, .{
         .seed = 12345,
         .budget = .{ .trials = 32, .max_passes = 80, .max_distance_cache_bytes = n * n * @sizeOf(u32) },
         .candidates = .{ .candidate_count = 4, .candidate_mode = .alpha_nearness },
         .search = .{ .lk_max_depth = 5, .lk_backtrack_limit = 80_000 },
-    });
+    }, &alpha_stats);
     defer alpha.deinit();
 
     try p.validateTour(nearest.tour);
     try p.validateTour(alpha.tour);
-    try std.testing.expect(alpha.stats.alpha_ascent_iterations > 0);
-    try std.testing.expect(alpha.stats.alpha_ascent_best_lower_bound > 0);
-    try std.testing.expect(nearest.stats.candidate_nearest_edges > 0);
-    try std.testing.expectEqual(@as(u64, 0), nearest.stats.candidate_alpha_edges);
-    try std.testing.expect(alpha.stats.candidate_alpha_edges > 0);
-    try std.testing.expectEqual(@as(u64, 0), alpha.stats.candidate_geometric_edges);
+    try std.testing.expect(alpha_stats.alpha_ascent_iterations > 0);
+    try std.testing.expect(alpha_stats.alpha_ascent_best_lower_bound > 0);
+    try std.testing.expect(nearest_stats.candidate_nearest_edges > 0);
+    try std.testing.expectEqual(@as(u64, 0), nearest_stats.candidate_alpha_edges);
+    try std.testing.expect(alpha_stats.candidate_alpha_edges > 0);
+    try std.testing.expectEqual(@as(u64, 0), alpha_stats.candidate_geometric_edges);
     // Alpha candidates must not be meaningfully worse than plain nearest
     // candidates. Iterated-kick and guided-restart trials make per-seed
     // outcomes a coin flip within ~1 percent, so this guards against broken
     // alpha generation (which shows up as several percent), not basin luck.
     try std.testing.expect(alpha.length * 100 <= nearest.length * 102);
-    try std.testing.expect(alpha.stats.bounded_three_opt_cleanup_attempts > 0);
+    try std.testing.expect(alpha_stats.bounded_three_opt_cleanup_attempts > 0);
 }
 
 fn makeClusteredRegressionCoords(coords: []problem.Coord) void {
@@ -1587,17 +1499,18 @@ test "LK path improves over warmup-only on regression instance" {
         .search = .{ .enable_lk = false },
     });
     defer warmup.deinit();
-    var lk = try solve(allocator, &p, .{
+    var lk_stats: SolveStats = .{};
+    var lk = try solveWithStats(allocator, &p, .{
         .seed = 77,
         .budget = .{ .trials = 1, .max_passes = 20 },
         .candidates = .{ .candidate_count = 8, .candidate_mode = .nearest_distance },
         .search = .{ .enable_lk = true, .lk_max_depth = 5 },
-    });
+    }, &lk_stats);
     defer lk.deinit();
     try p.validateTour(warmup.tour);
     try p.validateTour(lk.tour);
     try std.testing.expect(lk.length <= warmup.length);
-    try std.testing.expect(lk.stats.lk_attempts > 0);
+    try std.testing.expect(lk_stats.lk_attempts > 0);
 }
 
 test "heuristic reaches TSPLIB gr17 hardcoded regression target" {
@@ -1915,59 +1828,4 @@ test "IPT merge returns null for tours sharing every edge" {
         @as(?IptOutcome, null),
         iptMergeTours(&oracle, &tour_a, len, &tour_b, len, &scratch),
     );
-}
-
-test "distance oracle applies caller-owned penalty and saturates" {
-    const allocator = std.testing.allocator;
-    var matrix = [_]u32{
-        0,  10, 20,
-        10, 0,  30,
-        20, 30, 0,
-    };
-    var p = try problem.Problem.initFullMatrix(allocator, "penalty3", 3, &matrix);
-    defer p.deinit();
-    var oracle = try DistanceOracle.init(allocator, &p, 0);
-    defer oracle.deinit();
-
-    // Null source (the default the whole solve path uses): base distances.
-    try std.testing.expectEqual(@as(u32, 10), oracle.distance(0, 1));
-    try std.testing.expectEqual(@as(u32, 30), oracle.distance(1, 2));
-
-    // Type-erased context carries the additive penalty added on top of base.
-    const Ctx = struct { amount: u32 };
-    const Pen = struct {
-        fn pen(ctx: *const anyopaque, _: usize, _: usize) u32 {
-            const c: *const Ctx = @ptrCast(@alignCast(ctx));
-            return c.amount;
-        }
-    };
-    var ctx = Ctx{ .amount = 7 };
-    var source = PenaltySource{ .ctx = &ctx, .penaltyFn = Pen.pen };
-    oracle.penalty_source = &source;
-    try std.testing.expectEqual(@as(u32, 17), oracle.distance(0, 1));
-    try std.testing.expectEqual(@as(u32, 37), oracle.distance(1, 2));
-
-    // Penalties saturate into u32 rather than wrapping past the max.
-    ctx.amount = std.math.maxInt(u32);
-    try std.testing.expectEqual(@as(u32, std.math.maxInt(u32)), oracle.distance(0, 1));
-
-    // Clearing the source restores the bit-identical base path.
-    oracle.penalty_source = null;
-    try std.testing.expectEqual(@as(u32, 10), oracle.distance(0, 1));
-}
-
-test "pinned-edge seam evaluates caller predicate undirected" {
-    const Ctx = struct { a: usize, b: usize };
-    const Pred = struct {
-        fn isPinned(ctx: *const anyopaque, a: usize, b: usize) bool {
-            const c: *const Ctx = @ptrCast(@alignCast(ctx));
-            return (a == c.a and b == c.b) or (a == c.b and b == c.a);
-        }
-    };
-    var ctx = Ctx{ .a = 2, .b = 5 };
-    const pinned = PinnedEdges{ .ctx = &ctx, .isPinnedFn = Pred.isPinned };
-    try std.testing.expect(pinned.isPinned(2, 5));
-    try std.testing.expect(pinned.isPinned(5, 2));
-    try std.testing.expect(!pinned.isPinned(2, 3));
-    try std.testing.expect(!pinned.isPinned(0, 1));
 }

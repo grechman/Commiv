@@ -228,7 +228,8 @@ fn runMode(allocator: std.mem.Allocator, p: *const commiv.Problem, optimum: ?u64
     // hairline improvements; factor 2 buys the same quality as 4 there at
     // half the extension cost.
     const trial_extension_factor: usize = if (!mode.extend_trials or fixed_trials != null) 0 else if (n >= 1000) 2 else 4;
-    var result = try commiv.solve(allocator, p, .{
+    var solve_stats: commiv.SolveStats = .{};
+    var result = try commiv.solveWithStats(allocator, p, .{
         .seed = seed,
         .budget = .{
             .trials = trials,
@@ -251,7 +252,7 @@ fn runMode(allocator: std.mem.Allocator, p: *const commiv.Problem, optimum: ?u64
             .lk_max_depth = mode.lk_max_depth,
             .lk_backtrack_limit = lk_backtrack_limit,
         },
-    });
+    }, &solve_stats);
     defer result.deinit();
     const elapsed_ns = monotonicNanos() - start_ns;
     try p.validateTour(result.tour);
@@ -266,52 +267,52 @@ fn runMode(allocator: std.mem.Allocator, p: *const commiv.Problem, optimum: ?u64
         n,
         mode.name,
         seed,
-        result.stats.trials,
-        result.stats.candidate_count,
+        solve_stats.trials,
+        solve_stats.candidate_count,
         result.length,
         opt,
         gap_percent,
         @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0,
-        result.stats.lk_moves,
-        result.stats.bounded_three_opt_cleanup_moves,
-        result.stats.bounded_three_opt_cleanup_attempts,
-        result.stats.lk_search_nodes,
-        result.stats.max_depth_reached,
-        result.stats.lk_nonseq_attempts,
-        result.stats.lk_nonseq_accepted,
-        result.stats.lk_nonseq_rejected,
-        result.stats.lk_nonseq_deepest_accepted_depth,
+        solve_stats.lk_moves,
+        solve_stats.bounded_three_opt_cleanup_moves,
+        solve_stats.bounded_three_opt_cleanup_attempts,
+        solve_stats.lk_search_nodes,
+        solve_stats.max_depth_reached,
+        solve_stats.lk_nonseq_attempts,
+        solve_stats.lk_nonseq_accepted,
+        solve_stats.lk_nonseq_rejected,
+        solve_stats.lk_nonseq_deepest_accepted_depth,
     });
     std.debug.print(",{},{},{},{},{},{}", .{
-        result.stats.lk_completion_attempts,
-        result.stats.lk_completion_accepted,
-        result.stats.lk_completion_2opt_hits,
-        result.stats.lk_completion_3opt_hits,
-        result.stats.lk_completion_patch_hits,
-        result.stats.lk_completion_rejected,
+        solve_stats.lk_completion_attempts,
+        solve_stats.lk_completion_accepted,
+        solve_stats.lk_completion_2opt_hits,
+        solve_stats.lk_completion_3opt_hits,
+        solve_stats.lk_completion_patch_hits,
+        solve_stats.lk_completion_rejected,
     });
     std.debug.print(",{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n", .{
-        result.stats.candidate_nearest_edges,
-        result.stats.candidate_alpha_edges,
-        result.stats.candidate_geometric_edges,
-        result.stats.candidate_patch_edges,
-        result.stats.move_plan_attempts,
-        result.stats.move_plan_direct_applies,
-        result.stats.move_plan_invalid_fallbacks,
-        result.stats.move_plan_multi_component_fallbacks,
-        result.stats.move_plan_apply_fallbacks,
-        result.stats.move_plan_fallback_successes,
-        result.stats.move_plan_patch_attempts,
-        result.stats.move_plan_patch_hits,
-        result.stats.move_plan_patch_rejected,
-        result.stats.eax_merge_attempts,
-        result.stats.eax_merge_cycles,
-        result.stats.eax_merge_wins,
-        result.stats.guided_trials,
-        result.stats.guided_polishes,
-        result.stats.best_trial,
-        result.stats.guided_search_nodes,
-        result.stats.merge_search_nodes,
+        solve_stats.candidate_nearest_edges,
+        solve_stats.candidate_alpha_edges,
+        solve_stats.candidate_geometric_edges,
+        solve_stats.candidate_patch_edges,
+        solve_stats.move_plan_attempts,
+        solve_stats.move_plan_direct_applies,
+        solve_stats.move_plan_invalid_fallbacks,
+        solve_stats.move_plan_multi_component_fallbacks,
+        solve_stats.move_plan_apply_fallbacks,
+        solve_stats.move_plan_fallback_successes,
+        solve_stats.move_plan_patch_attempts,
+        solve_stats.move_plan_patch_hits,
+        solve_stats.move_plan_patch_rejected,
+        solve_stats.eax_merge_attempts,
+        solve_stats.eax_merge_cycles,
+        solve_stats.eax_merge_wins,
+        solve_stats.guided_trials,
+        solve_stats.guided_polishes,
+        solve_stats.best_trial,
+        solve_stats.guided_search_nodes,
+        solve_stats.merge_search_nodes,
     });
 }
 

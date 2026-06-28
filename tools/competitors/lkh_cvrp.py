@@ -3,10 +3,10 @@ Usage: lkh_cvrp.py <road> <time_s> <lkh_binary>"""
 import sys
 import os
 import time
+import shutil
+import tempfile
 import subprocess
 import roadlib
-
-SCRATCH = os.path.dirname(os.path.abspath(__file__))
 
 
 def write_vrp(path, dim, cap, demand, M):
@@ -63,42 +63,46 @@ def main():
     lkh = sys.argv[3]
     dim, cap, demand, M, coords = roadlib.parse_road(path)
     base = os.path.splitext(os.path.basename(path))[0]
-    vrp = os.path.join(SCRATCH, base + '.vrp')
-    par = os.path.join(SCRATCH, base + '.par')
-    tour = os.path.join(SCRATCH, base + '.tour')
-
-    write_vrp(vrp, dim, cap, demand, M)
-    lb = -(-sum(demand) // cap)            # ceil(total_demand / capacity) = min fleet
-    vehicles = lb + 2                      # +2 slack so the bin-packing is feasible
-    with open(par, 'w') as f:
-        f.write(f"PROBLEM_FILE = {vrp}\nTIME_LIMIT = {tlimit}\nRUNS = 1\n")
-        f.write(f"VEHICLES = {vehicles}\nMTSP_MIN_SIZE = 0\n")   # allow empty routes (fleet <= vehicles)
-        f.write("INITIAL_PERIOD = 100\n")                        # cut the alpha-nearness ascent (was ~n) so trials actually run
-        f.write("MOVE_TYPE = 2\nMAX_CANDIDATES = 5\n")            # cheap 2-opt moves -> more trials (best config found at n=1000)
-        f.write(f"TOUR_FILE = {tour}\nSEED = 1\nTRACE_LEVEL = 1\n")
-
-    # LKH writes TOUR_FILE only on a successful run; a stale tour left by a prior
-    # run on the same instance would otherwise be parsed as this run's result.
-    if os.path.exists(tour):
-        os.remove(tour)
-
-    t0 = time.time()
+    d = tempfile.mkdtemp(prefix="lkh_")
     try:
-        res = subprocess.run([lkh, par], capture_output=True, text=True, timeout=tlimit + 120)
-    except subprocess.TimeoutExpired:
-        el = time.time() - t0
-        print(f"lkh,{path},{dim},NA,NA,{el:.1f},TIMEOUT")
-        return
-    el = time.time() - t0
-    if not os.path.exists(tour):
-        tail = (res.stdout or res.stderr)[-400:]
-        print(f"lkh,{path},{dim},NA,NA,{el:.1f},NO_TOUR: {tail}")
-        return
+        vrp = os.path.join(d, base + '.vrp')
+        par = os.path.join(d, base + '.par')
+        tour = os.path.join(d, base + '.tour')
 
-    routes = parse_tour(tour, dim)
-    cost = roadlib.score(M, dim, routes)
-    err = roadlib.validate(dim, cap, demand, routes)
-    print(f"lkh,{path},{dim},{cost},{len(routes)},{el:.1f},{'OK' if not err else err}")
+        write_vrp(vrp, dim, cap, demand, M)
+        lb = -(-sum(demand) // cap)            # ceil(total_demand / capacity) = min fleet
+        vehicles = lb + 2                      # +2 slack so the bin-packing is feasible
+        with open(par, 'w') as f:
+            f.write(f"PROBLEM_FILE = {vrp}\nTIME_LIMIT = {tlimit}\nRUNS = 1\n")
+            f.write(f"VEHICLES = {vehicles}\nMTSP_MIN_SIZE = 0\n")   # allow empty routes (fleet <= vehicles)
+            f.write("INITIAL_PERIOD = 100\n")                        # cut the alpha-nearness ascent (was ~n) so trials actually run
+            f.write("MOVE_TYPE = 2\nMAX_CANDIDATES = 5\n")            # cheap 2-opt moves -> more trials (best config found at n=1000)
+            f.write(f"TOUR_FILE = {tour}\nSEED = 1\nTRACE_LEVEL = 1\n")
+
+        # LKH writes TOUR_FILE only on a successful run; a stale tour left by a prior
+        # run on the same instance would otherwise be parsed as this run's result.
+        if os.path.exists(tour):
+            os.remove(tour)
+
+        t0 = time.time()
+        try:
+            res = subprocess.run([lkh, par], capture_output=True, text=True, timeout=tlimit + 120)
+        except subprocess.TimeoutExpired:
+            el = time.time() - t0
+            print(f"lkh,{path},{dim},NA,NA,{el:.1f},TIMEOUT")
+            return
+        el = time.time() - t0
+        if not os.path.exists(tour):
+            tail = (res.stdout or res.stderr)[-400:]
+            print(f"lkh,{path},{dim},NA,NA,{el:.1f},NO_TOUR: {tail}")
+            return
+
+        routes = parse_tour(tour, dim)
+        cost = roadlib.score(M, dim, routes)
+        err = roadlib.validate(dim, cap, demand, routes)
+        print(f"lkh,{path},{dim},{cost},{len(routes)},{el:.1f},{'OK' if not err else err}")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 if __name__ == '__main__':

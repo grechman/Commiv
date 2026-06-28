@@ -36,8 +36,7 @@ const MatView = struct {
 };
 
 // ATSP solvers return the canonical solver.SolveResult (tour + true directed
-// length; the search-specific stats are left at their defaults). `tour` is the
-// directed city order, length n.
+// length). `tour` is the directed city order, length n.
 
 /// Solve an n-city ATSP given a row-major n*n directed cost matrix `asym`
 /// (asym[i*n+j] = cost of arc i->j; diagonal ignored).
@@ -182,6 +181,12 @@ fn atspWorker(slot: *AtspSlot) void {
 
 /// Run `threads` independent ATSP solves (seed + i) and return the best directed
 /// tour. threads<=1 is the plain serial path.
+///
+/// Reproducibility caveat: `threads == 0` resolves to the host CPU count, which
+/// sets the solve count and therefore each solve's seed (options.seed + i), so
+/// the winning result depends on the machine's core count, and the same seed
+/// yields different tours across machines. For output reproducible across
+/// machines, pass an explicit non-zero `threads`.
 pub fn solveAtspParallel(allocator: std.mem.Allocator, asym: []const u32, n: usize, options: solver.SolveOptions, threads: usize) !solver.SolveResult {
     const cpus = std.Thread.getCpuCount() catch 1;
     const k = if (threads == 0) @max(@as(usize, 1), cpus -| 1) else threads;
@@ -721,7 +726,7 @@ pub fn conservativeness(
     matrix: []const u32,
     dim: usize,
 ) !Conservativeness {
-    std.debug.assert(matrix.len >= dim * dim);
+    if (matrix.len < (std.math.mul(usize, dim, dim) catch return error.InvalidMatrix)) return error.InvalidMatrix;
     const phi = try allocator.alloc(f64, dim);
     defer allocator.free(phi);
 

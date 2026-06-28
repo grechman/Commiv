@@ -31,9 +31,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("instance,dim,asym_mag,curl_frac,mean_ratio,native_cost,sym_cost,ignore_dir_penalty_pct,routes,ms\n", .{});
     var it = std.mem.tokenizeScalar(u8, files, ',');
     while (it.next()) |name| {
-        var path_buf: [512]u8 = undefined;
-        const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}.road", .{ dir, name });
-        const bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, path, allocator, .limited(512 << 20));
+        const bytes = try readRoadBytes(init.io, allocator, dir, name);
         defer allocator.free(bytes);
 
         var road = try parseRoad(allocator, bytes);
@@ -111,6 +109,40 @@ const Road = struct {
         self.* = undefined;
     }
 };
+
+/// Load the raw bytes of `<dir>/<name>.road`. The moscow-5000 matrix is committed
+/// only as `moscow-5000.road.gz` (the plain `.road` is gitignored), so on a fresh
+/// checkout the uncompressed file is absent. When the `.road` read fails with
+/// FileNotFound, fall back to a sibling `<name>.road.gz` and gzip-inflate it
+/// in-process, so `zig build roadbench` works with no manual `gunzip` step. The
+/// default (moscow-100) ships a plain `.road`, so it takes the direct path and the
+/// inflate branch is never touched. Caller owns the returned slice.
+fn readRoadBytes(io: std.Io, allocator: std.mem.Allocator, dir: []const u8, name: []const u8) ![]u8 {
+    const cap = std.Io.Limit.limited(512 << 20);
+    var path_buf: [512]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}.road", .{ dir, name });
+    if (std.Io.Dir.cwd().readFileAlloc(io, path, allocator, cap)) |bytes| {
+        return bytes;
+    } else |err| switch (err) {
+        error.FileNotFound => {}, // .road absent: try the committed .road.gz below
+        else => return err,
+    }
+
+    var gz_path_buf: [512]u8 = undefined;
+    const gz_path = try std.fmt.bufPrint(&gz_path_buf, "{s}/{s}.road.gz", .{ dir, name });
+    // If neither <name>.road nor <name>.road.gz exists this propagates FileNotFound,
+    // which is the genuine "no such instance" case (not the gzip-only case G18 targets).
+    const gz_bytes = try std.Io.Dir.cwd().readFileAlloc(io, gz_path, allocator, cap);
+    defer allocator.free(gz_bytes);
+
+    // Inflate the gzip stream in-process (Zig 0.16 std.compress.flate).
+    const flate = std.compress.flate;
+    var input = std.Io.Reader.fixed(gz_bytes);
+    const window = try allocator.alloc(u8, flate.max_window_len);
+    defer allocator.free(window);
+    var dec = flate.Decompress.init(&input, .gzip, window);
+    return dec.reader.allocRemaining(allocator, cap);
+}
 
 /// Parse the line-based .road format written by tools/fetch_road_matrix.py.
 fn parseRoad(allocator: std.mem.Allocator, bytes: []const u8) !Road {
