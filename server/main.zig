@@ -216,7 +216,7 @@ fn solveAtsp(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []co
 
 fn parseBody(comptime T: type, arena: std.mem.Allocator, req: *std.http.Server.Request, body: []const u8) ?T {
     return std.json.parseFromSliceLeaky(T, arena, body, .{ .ignore_unknown_fields = true }) catch {
-        respondError(req, .bad_request, "invalid JSON body; see docs/rest.md for the schema") catch {};
+        respondError(req, .bad_request, "invalid JSON body: matrix/demand/window entries must be non-negative integers < 2^32 (scale floats to e.g. whole seconds); see docs/rest.md") catch {};
         return null;
     };
 }
@@ -236,7 +236,7 @@ fn flattenSquare(arena: std.mem.Allocator, rows: []const []const u32) ?[]u32 {
 fn respondSolverError(req: *std.http.Server.Request, err: anyerror) !void {
     return switch (err) {
         error.Infeasible, error.NoFeasibleSplit => respondError(req, .unprocessable_entity, "instance is infeasible (capacity or time windows cannot be satisfied)"),
-        error.InvalidInstance, error.InvalidMatrix => respondError(req, .unprocessable_entity, "instance shape is invalid"),
+        error.InvalidInstance, error.InvalidMatrix => respondError(req, .unprocessable_entity, "instance is invalid: check array lengths and that the depot slots (demand[0], ready[0], service[0]) are 0"),
         error.OutOfMemory => respondError(req, .internal_server_error, "out of memory"),
         else => respondError(req, .internal_server_error, "solver failed"),
     };

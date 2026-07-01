@@ -39,3 +39,17 @@ Each prints a CSV row: `solver,instance,dim,cost,routes,seconds,valid`.
 - **Cap memory** so a runaway never takes down the box (n=5000 holds a 25M-entry matrix):
   `systemd-run --user --scope -p MemoryMax=3G -p MemorySwapMax=0 -p CPUQuota=300% -- <cmd>`.
 - `lkh_cvrp.py` is the plain (no-warmstart) LKH adapter, kept to show the failure mode.
+
+## Directed VRPTW benchmark (Moscow + time windows)
+
+`vrptw_moscow.py` overlays deterministic courier time slots on a `moscow-*.road`
+instance (60% of customers get a 2 h slot, 300 s service, 9 h horizon; seed 42) and
+scores every solver through the same independent schedule validator — no solver's
+own accounting is trusted.
+
+```sh
+# commiv (via commiv-serve; start it first: COMMIV_PORT=18090 zig-out/bin/commiv-serve)
+./venv/bin/python3 vrptw_moscow.py $ROAD/moscow-1000.road commiv 18090 [rounds,restarts]
+./venv/bin/python3 vrptw_moscow.py $ROAD/moscow-1000.road ortools 60     # arg = seconds
+./venv/bin/python3 vrptw_moscow.py $ROAD/moscow-1000.road vroom 5        # arg = exploration level
+```

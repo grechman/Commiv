@@ -150,6 +150,7 @@ fn cvrpInsert(allocator: std.mem.Allocator, inst: CvrpInstance, max_vehicles: us
 pub fn solveCvrpHgs(allocator: std.mem.Allocator, inst: CvrpInstance, options: solver.SolveOptions, params: HgsParams, max_vehicles: usize) !CvrpResult {
     const n = inst.n;
     if (inst.demand.len != n + 1 or inst.matrix.len != (std.math.mul(usize, n + 1, n + 1) catch return error.InvalidInstance)) return error.InvalidInstance;
+    if (inst.demand[0] != 0) return error.InvalidInstance; // depot demand must be 0: a nonzero value is a caller data-mapping bug, not something to silently ignore
     if (n <= 2) return solveCvrpImpl(allocator, inst, options, 10, 1, max_vehicles);
 
     // Population size is n-adaptive (0 = auto): large instances cannot afford enough

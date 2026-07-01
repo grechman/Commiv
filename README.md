@@ -360,6 +360,41 @@ about 180x at n=2000. LKH-3 needs a feasible warmstart just to run on explicit d
 matrices and falls apart past n=1000. There is no published optimum here, but VROOM landing
 independently within 0.5% is strong evidence the solutions are near-optimal.
 
+Robustness checks on the n=1000 instance (so the single-number table above is not hiding
+anything): commiv across seeds {1, 7, 42, 99, 777} lands in 206,815–208,355 — the published
+seed sits mid-range, and even the worst seed beats every competitor. VROOM's full
+exploration-level sweep (its own speed/quality knob, 3 threads) gives 213,406 @ 10 s
+(level 0), 213,406 @ 22 s (level 1), 209,669 @ 112 s (level 3), 208,687 @ 315 s (level 5):
+commiv's 207,406 @ 2 s dominates that entire frontier. OR-Tools given a 600 s budget (10x
+the table) reaches 218,230, still +5.2%. commiv's routes are re-scored and
+capacity-validated by the competitor harness's own Python checker, not by the solver's
+internal accounting.
+
+### Directed + time windows (Moscow VRPTW)
+
+The same directed matrices with a courier-slot overlay: 60% of customers get one 2 h
+delivery slot out of four in an 8 h shift, the rest are flexible; 300 s service per stop;
+9 h depot horizon. Deterministic generator and independent schedule validator (every
+solution below is checked by the same Python code): [`tools/competitors/vrptw_moscow.py`](tools/competitors/vrptw_moscow.py).
+Two budget points per solver, cost @ wall (vehicles).
+
+| n | commiv fast / thorough | VROOM level 1 / 5 | OR-Tools 60 s |
+|---|---|---|---|
+| 100  | 46,563 @ 2 s (11) | **46,486 @ 1.7 s** (11) | 47,538 @ 60 s (11) |
+| 1000 | 245,547 @ 35 s / **238,829** @ 988 s (51) | 246,573 @ 22 s / 239,977 @ 341 s (50) | 267,897 @ 60 s (53) |
+
+<sub>commiv budgets: `rounds,restarts` = 10,1 (fast) and 100,10 (default). Cores: commiv 1
+(the VRPTW engine is single-threaded), VROOM 3, OR-Tools 1.</sub>
+
+This is the one table commiv does not clearly win, and you should know it. Both solvers
+beat OR-Tools by ~10%, but against VROOM it is a wash: VROOM is slightly better at n=100,
+slightly worse at equal-ish quality points at n=1000, and commiv's best cost needs 3x
+VROOM's wall to edge it by 0.5%. The reason is architectural, not fundamental: the VRPTW
+engine predates SISR — its local search re-schedules whole candidate routes per move
+instead of using O(1) time-slack delta evaluation, and it runs on one core. The CVRP
+numbers above show what the machinery does once it gets that treatment; porting it
+(slack structures, SISR-with-windows, parallel chains) is the current roadmap head.
+
 ---
 
 ## How commiv compares, honestly
@@ -377,6 +412,10 @@ independently within 0.5% is strong evidence the solutions are near-optimal.
 
 **Where the competition wins, and you should know it**
 
+- **Time windows at scale, today.** VROOM ties or slightly beats commiv on the Moscow
+  VRPTW benchmark (see above): the TW engine here predates SISR and is single-threaded.
+  This is the roadmap head, not a law of nature — but as of now VROOM is the safer pick
+  for heavily time-windowed directed instances above a few hundred stops.
 - **Absolute accuracy at huge budgets.** LKH-3, HGS-CVRP, and SISR (the paper) reach lower
   gaps (about 0.16% to 0.39% on Uchoa X) when given far more time. commiv trades that last
   fraction of a percent for a large speed advantage. It is not state-of-the-art on accuracy
@@ -838,6 +877,42 @@ commiv быстрее и дешевле на каждом размере. Бли
 оптимума здесь нет, но то, что VROOM независимо попадает в пределах 0.5%, — сильное
 свидетельство того, что решения близки к оптимальным.
 
+Проверки устойчивости на инстансе n=1000 (чтобы единственное число в таблице ничего не
+прятало): commiv на сидах {1, 7, 42, 99, 777} даёт 206 815–208 355 — опубликованный сид
+лежит в середине, и даже худший сид бьёт каждого конкурента. Полный проход VROOM по его
+уровням исследования (его собственная ручка скорость/качество, 3 потока): 213 406 @ 10 с
+(уровень 0), 213 406 @ 22 с (уровень 1), 209 669 @ 112 с (уровень 3), 208 687 @ 315 с
+(уровень 5) — 207 406 @ 2 с commiv доминирует весь этот фронт. OR-Tools с бюджетом 600 с
+(10x от таблицы) достигает 218 230, всё ещё +5.2%. Маршруты commiv пересчитаны и проверены
+на вместимость Python-чекером харнесса конкурентов, а не внутренней бухгалтерией солвера.
+
+### Направленные дороги + временные окна (Москва, VRPTW)
+
+Те же направленные матрицы с курьерскими слотами: 60% клиентов получают один 2-часовой слот
+из четырёх в 8-часовой смене, остальные гибкие; 300 с обслуживания на точку; горизонт депо
+9 ч. Детерминированный генератор и независимый валидатор расписаний (каждое решение ниже
+проверено одним и тем же Python-кодом):
+[`tools/competitors/vrptw_moscow.py`](tools/competitors/vrptw_moscow.py).
+Две точки бюджета на солвер, стоимость @ время (машины).
+
+| n | commiv быстрый / тщательный | VROOM уровень 1 / 5 | OR-Tools 60 с |
+|---|---|---|---|
+| 100  | 46 563 @ 2 с (11) | **46 486 @ 1.7 с** (11) | 47 538 @ 60 с (11) |
+| 1000 | 245 547 @ 35 с / **238 829** @ 988 с (51) | 246 573 @ 22 с / 239 977 @ 341 с (50) | 267 897 @ 60 с (53) |
+
+<sub>Бюджеты commiv: `rounds,restarts` = 10,1 (быстрый) и 100,10 (по умолчанию). Ядра:
+commiv 1 (движок VRPTW однопоточный), VROOM 3, OR-Tools 1.</sub>
+
+Это единственная таблица, которую commiv не выигрывает однозначно, и это стоит знать. Оба
+солвера бьют OR-Tools на ~10%, но против VROOM — ничья: VROOM чуть лучше при n=100, чуть
+хуже в сопоставимых по качеству точках при n=1000, а лучшая стоимость commiv требует в 3
+раза больше времени, чтобы обойти VROOM на 0.5%. Причина архитектурная, а не
+фундаментальная: движок VRPTW старше SISR — его локальный поиск перепланирует целые
+маршруты-кандидаты на каждый ход вместо O(1)-оценки дельты через запасы времени, и работает
+на одном ядре. Числа CVRP выше показывают, что делает эта машинерия, когда получает такую
+обработку; перенос (структуры запасов времени, SISR с окнами, параллельные цепочки) — глава
+текущего роадмапа.
+
 ---
 
 ## commiv против остальных
@@ -856,6 +931,10 @@ commiv быстрее и дешевле на каждом размере. Бли
 
 **Где выигрывают остальные, и это стоит знать**
 
+- **Временные окна на масштабе, сегодня.** VROOM на московском VRPTW-бенчмарке идёт вровень
+  или чуть впереди commiv (см. выше): здешний движок окон старше SISR и однопоточный. Это
+  голова роадмапа, а не закон природы — но прямо сейчас для сильно оконных направленных
+  задач больше нескольких сотен точек VROOM — более безопасный выбор.
 - **Абсолютная точность при огромных бюджетах.** LKH-3, HGS-CVRP и SISR (статья) достигают
   меньших разрывов (примерно 0.16–0.39% на Uchoa X), когда им дают намного больше времени.
   commiv меняет эту последнюю долю процента на большое преимущество в скорости. По точности на

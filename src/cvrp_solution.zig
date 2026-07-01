@@ -15,6 +15,7 @@ const capExcess = cvrp_split.capExcess;
 pub fn solveCvrpImpl(allocator: std.mem.Allocator, inst: CvrpInstance, options: solver.SolveOptions, rounds: usize, restarts: usize, max_vehicles: usize) !CvrpResult {
     const n = inst.n;
     if (inst.demand.len != n + 1 or inst.matrix.len != (std.math.mul(usize, n + 1, n + 1) catch return error.InvalidInstance)) return error.InvalidInstance;
+    if (inst.demand[0] != 0) return error.InvalidInstance; // depot demand must be 0: a nonzero value is a caller data-mapping bug, not something to silently ignore
 
     // Trivial fleets: the giant-tour seed routes through asymmetric.solveAtsp,
     // which rejects n < 2, so handle the degenerate sizes directly. n == 0: no

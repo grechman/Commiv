@@ -54,6 +54,7 @@ pub const SisrParams = struct {
 pub fn solveCvrpSisr(allocator: std.mem.Allocator, inst: CvrpInstance, options: solver.SolveOptions, params: SisrParams) !CvrpResult {
     const n = inst.n;
     if (inst.demand.len != n + 1 or inst.matrix.len != (std.math.mul(usize, n + 1, n + 1) catch return error.InvalidInstance)) return error.InvalidInstance;
+    if (inst.demand[0] != 0) return error.InvalidInstance; // depot demand must be 0: a nonzero value is a caller data-mapping bug, not something to silently ignore
     if (n <= 2) return solveCvrpImpl(allocator, inst, options, 10, 1, 0);
 
     const gk: usize = @min(@as(usize, 20), n - 1);

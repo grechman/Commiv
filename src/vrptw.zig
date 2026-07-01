@@ -191,6 +191,7 @@ pub fn solveVrptw(allocator: std.mem.Allocator, inst: VrptwInstance, options: so
     const n = inst.n;
     if (inst.demand.len != n + 1 or inst.matrix.len != (std.math.mul(usize, n + 1, n + 1) catch return error.InvalidInstance)) return error.InvalidInstance;
     if (inst.ready.len != n + 1 or inst.due.len != n + 1 or inst.service.len != n + 1) return error.InvalidInstance;
+    if (inst.demand[0] != 0 or inst.ready[0] != 0 or inst.service[0] != 0) return error.InvalidInstance; // depot row must be zeroed (demand/ready/service); nonzero = caller data-mapping bug
 
     // Giant tour: ATSP over the customer sub-matrix (1..n).
     const sub = try allocator.alloc(u32, n * n);
@@ -1561,6 +1562,7 @@ pub fn solveVrptwHgs(allocator: std.mem.Allocator, inst: VrptwInstance, options:
     const n = inst.n;
     if (inst.demand.len != n + 1 or inst.matrix.len != (std.math.mul(usize, n + 1, n + 1) catch return error.InvalidInstance)) return error.InvalidInstance;
     if (inst.ready.len != n + 1 or inst.due.len != n + 1 or inst.service.len != n + 1) return error.InvalidInstance;
+    if (inst.demand[0] != 0 or inst.ready[0] != 0 or inst.service[0] != 0) return error.InvalidInstance; // depot row must be zeroed (demand/ready/service); nonzero = caller data-mapping bug
 
     // initial giant tour via the ATSP core (one good seed for the population)
     const sub = try allocator.alloc(u32, n * n);
@@ -1971,6 +1973,22 @@ fn permRecTw(allocator: std.mem.Allocator, inst: VrptwInstance, perm: []usize, k
         try permRecTw(allocator, inst, perm, k + 1, best);
         std.mem.swap(usize, &perm[k], &perm[i]);
     }
+}
+
+test "VRPTW rejects a nonzero depot row (demand/ready/service)" {
+    const allocator = std.testing.allocator;
+    const m = [_]u32{
+        0, 3, 4,
+        3, 0, 5,
+        4, 5, 0,
+    };
+    const ready = [_]u32{ 0, 0, 0 };
+    const due = [_]u32{ 1000, 500, 500 };
+    const service = [_]u32{ 0, 5, 5 };
+    const bad_demand = [_]u32{ 2, 1, 1 }; // depot slot holds a customer demand: data-mapping bug
+    const inst = VrptwInstance{ .n = 2, .matrix = &m, .demand = &bad_demand, .capacity = 5, .ready = &ready, .due = &due, .service = &service };
+    try std.testing.expectError(error.InvalidInstance, solveVrptw(allocator, inst, .{ .seed = 1 }, .{ .rounds = 2, .restarts = 1 }));
+    try std.testing.expectError(error.InvalidInstance, solveVrptwHgs(allocator, inst, .{ .seed = 1 }, .{}));
 }
 
 test "VRPTW engine reaches the brute-force optimum on a small instance" {

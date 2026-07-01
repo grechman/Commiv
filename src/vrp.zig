@@ -134,6 +134,23 @@ test "CVRP returns a clean error for an over-capacity customer" {
     try std.testing.expectError(error.NoFeasibleSplit, solveCvrpMulti(allocator, inst, .{ .seed = 1 }, .{ .rounds = 5, .restarts = 1 }));
 }
 
+test "CVRP rejects nonzero depot demand instead of silently ignoring it" {
+    const allocator = std.testing.allocator;
+    // demand[0] != 0 is almost always an off-by-one in the caller's data mapping
+    // (customer demands shifted into the depot slot). Solving it as if demand[0]
+    // were 0 returns plausible routes computed against the wrong demands.
+    const m = [_]u32{
+        0, 3, 4,
+        3, 0, 5,
+        4, 5, 0,
+    };
+    const demand = [_]u32{ 2, 1, 1 };
+    const inst = CvrpInstance{ .n = 2, .matrix = &m, .demand = &demand, .capacity = 5 };
+    try std.testing.expectError(error.InvalidInstance, solveCvrp(allocator, inst, .{ .seed = 1 }));
+    try std.testing.expectError(error.InvalidInstance, solveCvrpSisr(allocator, inst, .{ .seed = 1 }, .{}));
+    try std.testing.expectError(error.InvalidInstance, solveCvrpHgs(allocator, inst, .{ .seed = 1 }, .{}, 0));
+}
+
 test "CVRP single-customer instance returns the trivial route" {
     const allocator = std.testing.allocator;
     // n=1: depot + one customer, directed costs d(0,1)=7, d(1,0)=9. The giant-tour
