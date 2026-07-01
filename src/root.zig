@@ -113,4 +113,5 @@ test {
     _ = @import("asymmetric.zig");
     _ = @import("vrp.zig");
     _ = @import("vrptw.zig");
+    _ = @import("capi.zig");
 }

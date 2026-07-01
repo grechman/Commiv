@@ -10,6 +10,37 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // C ABI libraries (`zig build lib`): libcommiv.{a,so} + commiv.h, the FFI
+    // surface every non-Zig consumer (Python binding, C/C++/Go/Rust) links.
+    const capi_mod = b.createModule(.{
+        .root_source_file = b.path("src/capi.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const lib_step = b.step("lib", "Build the C ABI libraries (static + shared) and install commiv.h");
+    inline for ([_]std.builtin.LinkMode{ .static, .dynamic }) |linkage| {
+        const artifact = b.addLibrary(.{
+            .name = "commiv",
+            .root_module = capi_mod,
+            .linkage = linkage,
+        });
+        artifact.installHeader(b.path("include/commiv.h"), "commiv.h");
+        lib_step.dependOn(&b.addInstallArtifact(artifact, .{}).step);
+    }
+
+    // REST server (`zig build serve` installs zig-out/bin/commiv-serve).
+    const serve = b.addExecutable(.{
+        .name = "commiv-serve",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("server/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "commiv", .module = commiv }},
+        }),
+    });
+    const serve_step = b.step("serve", "Build the commiv-serve REST API server");
+    serve_step.dependOn(&b.addInstallArtifact(serve, .{}).step);
+
     // Library tests.
     const lib_tests = b.addTest(.{ .root_module = commiv });
     const run_lib_tests = b.addRunArtifact(lib_tests);
