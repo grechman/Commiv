@@ -34,12 +34,16 @@ ask for your trust.
 
 ```sh
 zig build                                  # build the library
-zig build test                             # run the 70 unit tests
+zig build test                             # run the unit tests
 zig build example                          # run the embedded solver example
+zig build serve -Doptimize=ReleaseFast     # REST API server (JSON over HTTP)
+zig build lib   -Doptimize=ReleaseFast     # C ABI: libcommiv.{a,so} + commiv.h
 ```
 
 - **Near-optimal, fast.** 0.02% off proven optima on standard CVRP, about 0.45% on the
   hard Uchoa X set, in seconds to a minute on a laptop.
+- **Callable from any language.** A REST server, a C ABI, and a Python binding ship in
+  this repo. Zig is the engine underneath; you never have to write it.
 - **Asymmetric-native.** Directed travel-time matrices are first-class, not bolted on. On
   real Moscow OSRM data commiv beats OR-Tools, LKH-3, and VROOM on both cost and wall-clock.
 - **Zero dependencies, deterministic.** One Zig module, no system libraries, no build-time
@@ -52,9 +56,53 @@ zig build example                          # run the embedded solver example
 ## Integrate commiv into your codebase
 
 The real entry point is not a TSPLIB file. It is your own stops, a cost matrix, and
-per-stop demands. Here is the whole integration, start to finish.
+per-stop demands. Zig is the engine underneath, but you pick the door that matches your
+stack — none of them require writing Zig:
 
-### 1. Add the dependency
+| Your stack | Door | Where |
+|---|---|---|
+| Any language | REST server: one static binary, JSON over HTTP | [`docs/rest.md`](docs/rest.md) |
+| Python | Native binding (ctypes over the C ABI, numpy-friendly) | [`bindings/python/`](bindings/python/) |
+| C, C++, Go, Rust, ... | C ABI: `libcommiv.{a,so}` + [`include/commiv.h`](include/commiv.h) | `zig build lib` |
+| Zig | The module itself | this section |
+
+### REST, from anywhere
+
+```sh
+zig build serve -Doptimize=ReleaseFast && ./zig-out/bin/commiv-serve
+```
+
+```sh
+curl -X POST http://127.0.0.1:8080/solve/cvrp -d '{
+  "matrix": [[0,10,14,12],[11,0,9,20],[15,8,0,7],[13,18,6,0]],
+  "demand": [0,4,6,5],
+  "capacity": 10
+}'
+# {"total_cost":58,"vehicles":2,"routes":[[2,1],[3]]}
+```
+
+That is the whole integration: a directed cost matrix (row `a`, column `b` = cost of
+`a -> b`, depot = node 0), demands, a capacity. `/solve/vrptw` adds time windows,
+`/solve/atsp` does pure directed ordering. Full schema and Python/JS/Go client snippets
+in [`docs/rest.md`](docs/rest.md).
+
+### Python, natively
+
+```python
+import commiv  # pip install -e bindings/python; needs zig build lib once
+
+sol = commiv.solve_cvrp(matrix, demand=[0, 4, 6, 5], capacity=10, seed=1)
+print(sol.total_cost, sol.routes)  # 58 [[2, 1], [3]]
+```
+
+numpy matrices take a fast path; infeasible instances raise instead of returning
+garbage. Details in [`bindings/python/README.md`](bindings/python/README.md).
+
+### Zig, embedded
+
+The rest of this section is the full Zig walkthrough.
+
+#### 1. Add the dependency
 
 ```sh
 zig fetch --save "git+https://github.com/grechman/Commiv"
@@ -70,7 +118,7 @@ const commiv = b.dependency("commiv", .{
 exe.root_module.addImport("commiv", commiv.module("commiv"));
 ```
 
-### 2. Solve a vehicle-routing problem from your own data
+#### 2. Solve a vehicle-routing problem from your own data
 
 Full working examples live in [`examples/`](examples/): `basic.zig` parses a TSPLIB instance with `parseTsplib`, while `roadbench.zig` and `cvrpbench.zig` read their CVRP and road instances from disk with their own parsers. `parseTsplib` reads TSPLIB symmetric TSP only — a coordinate section (`EUC_2D`, `CEIL_2D`, or `ATT`) or an `EXPLICIT` `FULL_MATRIX` — so CVRP, ACVRP, and ATSP instances do not load through it. Below is the minimal in-memory version on your own data.
 
@@ -116,7 +164,7 @@ pub fn main() !void {
 }
 ```
 
-### 3. Read the result
+#### 3. Read the result
 
 `CvrpResult` owns its memory, so call `deinit()` when you are done.
 
@@ -124,7 +172,7 @@ pub fn main() !void {
 - `result.routes` is one slice per vehicle. Each slice lists the customer indices in visit
   order, with the depot implied at both ends.
 
-### 4. Pick the solver for your size
+#### 4. Pick the solver for your size
 
 | Entry point | Use it when |
 |---|---|
@@ -133,7 +181,7 @@ pub fn main() !void {
 | `solveCvrpSisrParallel` / `solveCvrpHgsParallel` | The same, spread across cores. |
 | `solveCvrp` | The no-config default. Runs SISR with default params. |
 
-### 5. Plain TSP and ATSP
+#### 5. Plain TSP and ATSP
 
 For a pure ordering problem with no capacity, use the TSP entry points. A directed matrix
 takes the ATSP path; it is the same shape of call.
@@ -151,7 +199,7 @@ var atsp = try commiv.solveAtsp(allocator, &cost_matrix, n, .{ .seed = 1 });
 defer atsp.deinit();
 ```
 
-### Knobs that matter
+#### Knobs that matter
 
 - `SolveOptions.seed` is the RNG seed. For the single-threaded solvers the same seed gives
   byte-identical output, so runs are reproducible. The `*Parallel` variants also depend on
@@ -461,12 +509,16 @@ ACVRP, VRPTW) с точностью до доли процента от опти
 
 ```sh
 zig build                                  # собрать библиотеку
-zig build test                             # запустить 70 модульных тестов
+zig build test                             # запустить модульные тесты
 zig build example                          # запустить пример встроенного солвера
+zig build serve -Doptimize=ReleaseFast     # REST API сервер (JSON поверх HTTP)
+zig build lib   -Doptimize=ReleaseFast     # C ABI: libcommiv.{a,so} + commiv.h
 ```
 
 - **Приближено к оптимуму.** 0.02% от доказанных оптимумов на стандартной CVRP, около
   0.45% на тяжёлом наборе Uchoa X, за секунды на ноутбуке.
+- **Вызывается из любого языка.** REST-сервер, C ABI и биндинг для Python лежат прямо в
+  репозитории. Zig — это движок под капотом; писать на нём не нужно.
 - **Нативная асимметрия.** Ориентированные матрицы времени в пути нативно поддерживаются. На реальных данных Moscow OSRM commiv обходит OR-Tools, LKH-3 и VROOM и
   по стоимости, и по времени.
 - **Ноль зависимостей** Один модуль на Zig, без системных библиотек, без
@@ -478,7 +530,53 @@ zig build example                          # запустить пример в�
 
 ## Работа с commiv
 
-### 1. Добавить зависимость
+Zig — движок под капотом, но входную дверь вы выбираете под свой стек, и ни одна из них
+не требует писать на Zig:
+
+| Ваш стек | Дверь | Где |
+|---|---|---|
+| Любой язык | REST-сервер: один статический бинарник, JSON поверх HTTP | [`docs/rest.md`](docs/rest.md) |
+| Python | Нативный биндинг (ctypes поверх C ABI, дружит с numpy) | [`bindings/python/`](bindings/python/) |
+| C, C++, Go, Rust, ... | C ABI: `libcommiv.{a,so}` + [`include/commiv.h`](include/commiv.h) | `zig build lib` |
+| Zig | Сам модуль | этот раздел |
+
+### REST — из чего угодно
+
+```sh
+zig build serve -Doptimize=ReleaseFast && ./zig-out/bin/commiv-serve
+```
+
+```sh
+curl -X POST http://127.0.0.1:8080/solve/cvrp -d '{
+  "matrix": [[0,10,14,12],[11,0,9,20],[15,8,0,7],[13,18,6,0]],
+  "demand": [0,4,6,5],
+  "capacity": 10
+}'
+# {"total_cost":58,"vehicles":2,"routes":[[2,1],[3]]}
+```
+
+Это вся интеграция: направленная матрица стоимостей (строка `a`, столбец `b` = стоимость
+`a -> b`, депо = узел 0), спрос, вместимость. `/solve/vrptw` добавляет временные окна,
+`/solve/atsp` — чистое направленное упорядочивание. Полная схема и примеры клиентов на
+Python/JS/Go — в [`docs/rest.md`](docs/rest.md).
+
+### Python — нативно
+
+```python
+import commiv  # pip install -e bindings/python; один раз zig build lib
+
+sol = commiv.solve_cvrp(matrix, demand=[0, 4, 6, 5], capacity=10, seed=1)
+print(sol.total_cost, sol.routes)  # 58 [[2, 1], [3]]
+```
+
+Матрицы numpy идут по быстрому пути; недопустимая задача поднимает исключение, а не
+возвращает мусор. Подробности — в [`bindings/python/README.md`](bindings/python/README.md).
+
+### Zig — встраивание
+
+Дальше — полное руководство по встраиванию на Zig.
+
+#### 1. Добавить зависимость
 
 ```sh
 zig fetch --save "git+https://github.com/grechman/Commiv"
@@ -494,7 +592,7 @@ const commiv = b.dependency("commiv", .{
 exe.root_module.addImport("commiv", commiv.module("commiv"));
 ```
 
-### 2. Решить задачу маршрутизации на своих данных
+#### 2. Решить задачу маршрутизации на своих данных
 
 Полные рабочие примеры лежат в каталоге [`examples/`](examples/): `basic.zig` разбирает инстанс TSPLIB через `parseTsplib`, а `roadbench.zig` и `cvrpbench.zig` читают свои инстансы CVRP и дорожных матриц с диска собственными парсерами. `parseTsplib` читает только симметричную TSP в формате TSPLIB — секцию координат (`EUC_2D`, `CEIL_2D` или `ATT`) либо `EXPLICIT` `FULL_MATRIX`, — поэтому инстансы CVRP, ACVRP и ATSP через него не загружаются. Ниже — минимальный встроенный вариант на своих данных.
 
@@ -540,7 +638,7 @@ pub fn main() !void {
 }
 ```
 
-### 3. Прочитать результат
+#### 3. Прочитать результат
 
 `CvrpResult` владеет своей памятью, так что вызовите `deinit()`, когда закончите.
 
@@ -548,7 +646,7 @@ pub fn main() !void {
 - `result.routes` — по одному срезу на машину. Каждый срез перечисляет индексы клиентов в
   порядке посещения, депо подразумевается на обоих концах.
 
-### 4. Выбрать солвер под размер задачи
+#### 4. Выбрать солвер под размер задачи
 
 | Точка входа | Когда использовать |
 |---|---|
@@ -557,7 +655,7 @@ pub fn main() !void {
 | `solveCvrpSisrParallel` / `solveCvrpHgsParallel` | То же самое, но по нескольким ядрам. |
 | `solveCvrp` | Точка входа по умолчанию без настройки. Запускает SISR. |
 
-### 5. Обычные TSP и ATSP
+#### 5. Обычные TSP и ATSP
 
 Для чистой задачи упорядочивания без вместимости используйте точки входа TSP. Направленная
 матрица идёт по пути ATSP; форма вызова та же.
@@ -575,7 +673,7 @@ var atsp = try commiv.solveAtsp(allocator, &cost_matrix, n, .{ .seed = 1 });
 defer atsp.deinit();
 ```
 
-### Важные настройки
+#### Важные настройки
 
 - `SolveOptions.seed` — сид генератора случайных чисел. Для однопоточных солверов один и тот же сид даёт побайтово идентичный результат, так что прогоны воспроизводимы. Варианты
   `*Parallel` зависят ещё и от числа потоков: их значение по умолчанию `threads = 0`

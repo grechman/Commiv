@@ -14,5 +14,19 @@ jobs:
           version: 0.16.0
       - name: Run library tests
         run: zig build test
+      - name: Run library tests (ReleaseFast)
+        run: zig build test -Doptimize=ReleaseFast
       - name: Build examples and benchmarks
         run: zig build example cvrpbench acvrpbench atspbench vrptwbench roadbench
+      - name: Build C ABI libraries and REST server
+        run: zig build lib serve -Doptimize=ReleaseFast
+      - name: Python binding smoke test
+        run: PYTHONPATH=bindings/python COMMIV_LIBRARY=$PWD/zig-out/lib/libcommiv.so python3 bindings/python/test_smoke.py
+      - name: REST server round-trip
+        run: |
+          ./zig-out/bin/commiv-serve &
+          SERVER_PID=$!
+          sleep 1
+          curl -sf http://127.0.0.1:8080/health
+          curl -sf -X POST http://127.0.0.1:8080/solve/cvrp -d '{"matrix":[[0,10,14,12],[11,0,9,20],[15,8,0,7],[13,18,6,0]],"demand":[0,4,6,5],"capacity":10}' | grep '"total_cost":58'
+          kill "$SERVER_PID"

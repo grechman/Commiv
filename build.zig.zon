@@ -1,12 +1,16 @@
 .{
     .name = .commiv,
-    .version = "0.1.0",
+    .version = "0.2.0",
     .minimum_zig_version = "0.16.0",
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
         "examples",
+        "include",
+        "server",
+        "bindings",
+        "docs",
         "README.md",
         "LICENSE",
     },
