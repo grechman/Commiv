@@ -14,3 +14,4 @@ __pycache__/
 vendor/road/moscow-5000.road
 .claude/
 .zig-cache*/
+.kiro/

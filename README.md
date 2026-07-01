@@ -191,6 +191,7 @@ Every solver is allocator-first, takes an options struct, and returns a result y
 
 **TSP (symmetric)**
 - `solve(allocator, *Problem, SolveOptions) !SolveResult` — Lin-Kernighan + ILS.
+- `solveWithStats(...)` — same as `solve`, also fills `SolveStats` telemetry.
 - `solveParallel(allocator, *Problem, SolveOptions, ParallelOptions) !SolveResult` —
   independent islands with optional EAX recombination, or a deterministic split-budget speed
   mode. `ParallelOptions.threads == 0` resolves to the host CPU count, which changes the
@@ -219,11 +220,17 @@ Every solver is allocator-first, takes an options struct, and returns a result y
   cross-machine reproducibility.
 - `solveCvrpHgsParallel(allocator, inst, SolveOptions, CvrpHgsParams, max_vehicles, threads)` —
   same `threads == 0` caveat as above.
+- `solveCvrpMulti(allocator, inst, SolveOptions, CvrpMultiParams)` — uncapped giant-tour ILS
+  variant (legacy; SISR usually dominates it).
+- `validateCvrp(inst, routes) ?u64` — independent feasibility check of a solution; returns
+  the recomputed true cost, or null if any route is infeasible or a customer is missed.
 
 **VRPTW** — build a `VrptwInstance { n, matrix, demand, capacity, ready, due, service }`;
 returns `VrptwResult`
 - `solveVrptw(allocator, inst, SolveOptions, VrptwParams) !VrptwResult`.
 - `solveVrptwHgs(allocator, inst, SolveOptions, VrptwHgsParams) !VrptwResult`.
+- `validateVrptw(inst, routes) ?u64` — independent capacity + time-window feasibility check;
+  returns the recomputed cost, or null if infeasible.
 
 **Asymmetry analysis**
 - `conservativeness(allocator, matrix, dim) !Conservativeness` runs a Helmholtz-Hodge
@@ -294,9 +301,10 @@ The harness is in [`tools/competitors/`](tools/competitors/).
 | 2000 | **366,996** @ 9 s   | 423,800 @ 60 s | 523,233 @ 909 s¹ | 368,373 @ 1607 s |
 | 5000 | **779,161** @ 109 s | 868,583 @ 420 s | infeasible²     | did not finish³ |
 
-<sub>Cores: commiv 3, the rest effectively 1. ¹ one unfinished LK trial. ² LKH could not
-reach a feasible packing even warmstarted. ³ VROOM did not finish n=5000 within an hour.
-VROOM n≤2000 runs at exploration level 5; n=5000 at level 3.</sub>
+<sub>Cores: commiv 3, VROOM 3 (`nb_threads=3`), OR-Tools and LKH-3 run their serial
+search on 1. ¹ one unfinished LK trial. ² LKH could not reach a feasible packing even
+warmstarted. ³ VROOM did not finish n=5000 within an hour. VROOM n≤2000 runs at
+exploration level 5 (its highest-quality setting; lower levels are faster and worse).</sub>
 
 commiv is fastest and cheapest at every size. The nearest competitor on cost is VROOM
 (within about 0.4% to 0.6%), but its wall-clock blows up with scale: 20x slower at n=1000,
@@ -607,6 +615,7 @@ defer atsp.deinit();
 
 **TSP (симметричная)**
 - `solve(allocator, *Problem, SolveOptions) !SolveResult` — Lin-Kernighan + ILS.
+- `solveWithStats(...)` — то же, что `solve`, дополнительно заполняет телеметрию `SolveStats`.
 - `solveParallel(allocator, *Problem, SolveOptions, ParallelOptions) !SolveResult` —
   независимые острова с опциональной рекомбинацией EAX или детерминированный режим деления
   бюджета ради скорости. `ParallelOptions.threads == 0` разрешается в число ядер хоста, что
@@ -634,11 +643,17 @@ defer atsp.deinit();
   воспроизводимости между машинами.
 - `solveCvrpHgsParallel(allocator, inst, SolveOptions, CvrpHgsParams, max_vehicles, threads)` —
   та же оговорка про `threads == 0`, что и выше.
+- `solveCvrpMulti(allocator, inst, SolveOptions, CvrpMultiParams)` — вариант ILS по гигантскому
+  туру без ограничения парка (устаревший; SISR обычно его превосходит).
+- `validateCvrp(inst, routes) ?u64` — независимая проверка допустимости решения; возвращает
+  пересчитанную стоимость либо null, если маршрут недопустим или клиент пропущен.
 
 **VRPTW** — соберите `VrptwInstance { n, matrix, demand, capacity, ready, due, service }`;
 возвращает `VrptwResult`
 - `solveVrptw(allocator, inst, SolveOptions, VrptwParams) !VrptwResult`.
 - `solveVrptwHgs(allocator, inst, SolveOptions, VrptwHgsParams) !VrptwResult`.
+- `validateVrptw(inst, routes) ?u64` — независимая проверка вместимости и временных окон;
+  возвращает пересчитанную стоимость либо null, если решение недопустимо.
 
 **Анализ асимметрии**
 - `conservativeness(allocator, matrix, dim) !Conservativeness` выполняет разложение
@@ -713,9 +728,10 @@ X-n303 0.902%, X-n502 **0.087%**, X-n1001 1.034%. Два тяжёлых инст
 | 2000 | **366 996** @ 9 с   | 423 800 @ 60 с | 523 233 @ 909 с¹ | 368 373 @ 1607 с |
 | 5000 | **779 161** @ 109 с | 868 583 @ 420 с | недопустимо²     | не завершил³ |
 
-<sub>Ядра: commiv 3, остальные фактически 1. ¹ один незавершённый прогон LK. ² LKH не смог
-получить допустимую упаковку даже с тёплым стартом. ³ VROOM не завершил n=5000 в пределах
-часа. VROOM при n≤2000 идёт на уровне исследования 5; при n=5000 — на уровне 3.</sub>
+<sub>Ядра: commiv 3, VROOM 3 (`nb_threads=3`), OR-Tools и LKH-3 ведут последовательный
+поиск на 1. ¹ один незавершённый прогон LK. ² LKH не смог получить допустимую упаковку даже
+с тёплым стартом. ³ VROOM не завершил n=5000 в пределах часа. VROOM при n≤2000 идёт на
+уровне исследования 5 (его самый качественный и медленный режим); при n=5000 — на уровне 3.</sub>
 
 commiv быстрее и дешевле на каждом размере. Ближайший конкурент по стоимости — VROOM (в
 пределах примерно 0.4–0.6%), но его настенное время взрывается с масштабом: в 20 раз медленнее
