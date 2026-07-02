@@ -493,6 +493,13 @@ WORSE with time windows on (Moscow n=1000: +0.8%), so it defaults off for VRPTW.
 
 ---
 
+## Complexity ledger
+
+Every stage of every solver, with time and memory costs (constants kept — `O(2kn)` and
+`O(kn/2)` are different numbers here), a defense of why each step is at its floor or an
+explicit lever `{target O, target memO, estimated gain}` where it is not, and a ranked
+table of what to attack next: [`docs/complexity.md`](docs/complexity.md).
+
 ## GPU acceleration (designed, not built)
 
 commiv is CPU-only today. The single largest untapped speedup is a GPU. SISR's hot loop
