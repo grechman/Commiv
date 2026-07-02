@@ -275,7 +275,12 @@ Every solver is allocator-first, takes an options struct, and returns a result y
 
 **VRPTW** — build a `VrptwInstance { n, matrix, demand, capacity, ready, due, service }`;
 returns `VrptwResult`
-- `solveVrptw(allocator, inst, SolveOptions, VrptwParams) !VrptwResult`.
+- `solveVrptwSisr(allocator, inst, SolveOptions, VrptwSisrParams)` — the default engine:
+  SISR with time windows. Use this one.
+- `solveVrptwSisrParallel(allocator, inst, SolveOptions, VrptwSisrParams, threads)` —
+  best-of-K chains; same `threads == 0` caveat as the CVRP variant.
+- `solveVrptw(allocator, inst, SolveOptions, VrptwParams) !VrptwResult` — legacy giant-tour
+  ILS (kept for reproducibility; SISR matches or beats it at equal wall).
 - `solveVrptwHgs(allocator, inst, SolveOptions, VrptwHgsParams) !VrptwResult`.
 - `validateVrptw(inst, routes) ?u64` — independent capacity + time-window feasibility check;
   returns the recomputed cost, or null if infeasible.
@@ -378,22 +383,25 @@ delivery slot out of four in an 8 h shift, the rest are flexible; 300 s service 
 solution below is checked by the same Python code): [`tools/competitors/vrptw_moscow.py`](tools/competitors/vrptw_moscow.py).
 Two budget points per solver, cost @ wall (vehicles).
 
-| n | commiv fast / thorough | VROOM level 1 / 5 | OR-Tools 60 s |
+| n | commiv (SISR-TW) | VROOM level 1 / 5 | OR-Tools 60 s |
 |---|---|---|---|
-| 100  | 46,563 @ 2 s (11) | **46,486 @ 1.7 s** (11) | 47,538 @ 60 s (11) |
-| 1000 | 245,547 @ 35 s / **238,829** @ 988 s (51) | 246,573 @ 22 s / 239,977 @ 341 s (50) | 267,897 @ 60 s (53) |
+| 100  | **46,040 @ 2.6 s (10 veh)** | 46,486 @ 1.7 s (11) | 47,538 @ 60 s (11) |
+| 1000 | **231,299 @ 4 s** (51); 229,831 @ 35 s at 3M iters | 246,573 @ 22 s / 239,977 @ 341 s (50) | 267,897 @ 60 s (53) |
 
-<sub>commiv budgets: `rounds,restarts` = 10,1 (fast) and 100,10 (default). Cores: commiv 1
-(the VRPTW engine is single-threaded), VROOM 3, OR-Tools 1.</sub>
+<sub>commiv: `solveVrptwSisr`, default 300k iterations; n=100 row is best-of-3 parallel
+chains on 3 cores (single-threaded: 46,325 @ 1.9 s, 11 veh). VROOM 3 cores, OR-Tools 1.
+Seeds {7, 42, 12345} at n=1000 span 231,299–232,701. Objective is pure distance
+(`veh_penalty = 0`); VROOM's n=1000 solution uses one vehicle fewer at 3.6% more distance.</sub>
 
-This is the one table commiv does not clearly win, and you should know it. Both solvers
-beat OR-Tools by ~10%, but against VROOM it is a wash: VROOM is slightly better at n=100,
-slightly worse at equal-ish quality points at n=1000, and commiv's best cost needs 3x
-VROOM's wall to edge it by 0.5%. The reason is architectural, not fundamental: the VRPTW
-engine predates SISR — its local search re-schedules whole candidate routes per move
-instead of using O(1) time-slack delta evaluation, and it runs on one core. The CVRP
-numbers above show what the machinery does once it gets that treatment; porting it
-(slack structures, SISR-with-windows, parallel chains) is the current roadmap head.
+The history of this table is worth telling straight. The first published version was the
+one benchmark commiv did not win: the original VRPTW engine (a giant-tour ILS predating
+SISR) needed 988 s to reach 238,829 at n=1000 — a wash with VROOM at 3x the wall. The fix
+was to port the flagship CVRP engine: SISR with time windows wired into recreate through
+O(1) time-slack (Tws) feasibility evaluation. That engine (`solveVrptwSisr`, now the
+default everywhere) produces the numbers above: better cost than every competitor point at
+every size, in seconds, plus a vehicle saved at n=100. The old ILS remains available as
+`solveVrptw` and reproduces the Solomon table; on Solomon, SISR matches or beats it at
+equal wall (e.g. rc201 0.576% vs 0.760%) and is ~3x faster at its default budget.
 
 ---
 
@@ -412,10 +420,6 @@ numbers above show what the machinery does once it gets that treatment; porting 
 
 **Where the competition wins, and you should know it**
 
-- **Time windows at scale, today.** VROOM ties or slightly beats commiv on the Moscow
-  VRPTW benchmark (see above): the TW engine here predates SISR and is single-threaded.
-  This is the roadmap head, not a law of nature — but as of now VROOM is the safer pick
-  for heavily time-windowed directed instances above a few hundred stops.
 - **Absolute accuracy at huge budgets.** LKH-3, HGS-CVRP, and SISR (the paper) reach lower
   gaps (about 0.16% to 0.39% on Uchoa X) when given far more time. commiv trades that last
   fraction of a percent for a large speed advantage. It is not state-of-the-art on accuracy
@@ -433,10 +437,13 @@ numbers above show what the machinery does once it gets that treatment; porting 
 
 ### What we settled on, and why
 
-- **SISR (Slack Induction by String Removals) for large and asymmetric CVRP.** Ruin a few
-  spatially-adjacent strings, greedily re-insert with random blinks, accept under a
-  threshold or SA. The bet: millions of `O(removed)` moves beat thousands of `O(n)` ones.
-  This is what cracks the large-n and directed regimes.
+- **SISR (Slack Induction by String Removals) for large and asymmetric CVRP — and VRPTW.**
+  Ruin a few spatially-adjacent strings, greedily re-insert with random blinks, accept
+  under a threshold or SA. The bet: millions of `O(removed)` moves beat thousands of
+  `O(n)` ones. This is what cracks the large-n and directed regimes. For time windows the
+  same loop runs with per-route prefix/suffix time-slack (Tws) structures, so "is this
+  insertion feasible and what does it cost" is O(1) per candidate gap — that one change
+  took Moscow n=1000 VRPTW from 988 s (ILS) to 4 s at better cost.
 - **HGS (population plus Prins Split DP) for mid-size CVRP, n up to about 500.** A genetic
   population of giant tours with optimal capacity splitting and local-search education gives
   the best quality at that scale (the 0.02% to 0.45% numbers above).
@@ -787,7 +794,12 @@ defer atsp.deinit();
 
 **VRPTW** — соберите `VrptwInstance { n, matrix, demand, capacity, ready, due, service }`;
 возвращает `VrptwResult`
-- `solveVrptw(allocator, inst, SolveOptions, VrptwParams) !VrptwResult`.
+- `solveVrptwSisr(allocator, inst, SolveOptions, VrptwSisrParams)` — движок по умолчанию:
+  SISR с временными окнами. Используйте его.
+- `solveVrptwSisrParallel(allocator, inst, SolveOptions, VrptwSisrParams, threads)` —
+  лучшее из K цепочек; та же оговорка про `threads == 0`, что и у CVRP-варианта.
+- `solveVrptw(allocator, inst, SolveOptions, VrptwParams) !VrptwResult` — старый ILS по
+  гигантскому туру (оставлен для воспроизводимости; SISR равен или лучше при равном времени).
 - `solveVrptwHgs(allocator, inst, SolveOptions, VrptwHgsParams) !VrptwResult`.
 - `validateVrptw(inst, routes) ?u64` — независимая проверка вместимости и временных окон;
   возвращает пересчитанную стоимость либо null, если решение недопустимо.
@@ -895,23 +907,27 @@ commiv быстрее и дешевле на каждом размере. Бли
 [`tools/competitors/vrptw_moscow.py`](tools/competitors/vrptw_moscow.py).
 Две точки бюджета на солвер, стоимость @ время (машины).
 
-| n | commiv быстрый / тщательный | VROOM уровень 1 / 5 | OR-Tools 60 с |
+| n | commiv (SISR-TW) | VROOM уровень 1 / 5 | OR-Tools 60 с |
 |---|---|---|---|
-| 100  | 46 563 @ 2 с (11) | **46 486 @ 1.7 с** (11) | 47 538 @ 60 с (11) |
-| 1000 | 245 547 @ 35 с / **238 829** @ 988 с (51) | 246 573 @ 22 с / 239 977 @ 341 с (50) | 267 897 @ 60 с (53) |
+| 100  | **46 040 @ 2.6 с (10 машин)** | 46 486 @ 1.7 с (11) | 47 538 @ 60 с (11) |
+| 1000 | **231 299 @ 4 с** (51); 229 831 @ 35 с при 3M итераций | 246 573 @ 22 с / 239 977 @ 341 с (50) | 267 897 @ 60 с (53) |
 
-<sub>Бюджеты commiv: `rounds,restarts` = 10,1 (быстрый) и 100,10 (по умолчанию). Ядра:
-commiv 1 (движок VRPTW однопоточный), VROOM 3, OR-Tools 1.</sub>
+<sub>commiv: `solveVrptwSisr`, 300k итераций по умолчанию; строка n=100 — лучшее из 3
+параллельных цепочек на 3 ядрах (однопоточно: 46 325 @ 1.9 с, 11 машин). VROOM 3 ядра,
+OR-Tools 1. Сиды {7, 42, 12345} при n=1000 дают 231 299–232 701. Целевая функция — чистое
+расстояние (`veh_penalty = 0`); решение VROOM при n=1000 использует на одну машину меньше
+ценой +3.6% расстояния.</sub>
 
-Это единственная таблица, которую commiv не выигрывает однозначно, и это стоит знать. Оба
-солвера бьют OR-Tools на ~10%, но против VROOM — ничья: VROOM чуть лучше при n=100, чуть
-хуже в сопоставимых по качеству точках при n=1000, а лучшая стоимость commiv требует в 3
-раза больше времени, чтобы обойти VROOM на 0.5%. Причина архитектурная, а не
-фундаментальная: движок VRPTW старше SISR — его локальный поиск перепланирует целые
-маршруты-кандидаты на каждый ход вместо O(1)-оценки дельты через запасы времени, и работает
-на одном ядре. Числа CVRP выше показывают, что делает эта машинерия, когда получает такую
-обработку; перенос (структуры запасов времени, SISR с окнами, параллельные цепочки) — глава
-текущего роадмапа.
+Историю этой таблицы стоит рассказать честно. В первой опубликованной версии это был
+единственный бенчмарк, который commiv не выигрывал: старый движок VRPTW (ILS по гигантскому
+туру, старше SISR) тратил 988 с на 238 829 при n=1000 — ничья с VROOM при тройном времени.
+Исправлением стал перенос флагманского движка CVRP: SISR с временными окнами, встроенными в
+recreate через O(1)-проверку допустимости по запасам времени (Tws). Этот движок
+(`solveVrptwSisr`, теперь по умолчанию везде) даёт числа выше: стоимость лучше каждой точки
+каждого конкурента на каждом размере, за секунды, плюс сэкономленная машина при n=100.
+Старый ILS остаётся доступным как `solveVrptw` и воспроизводит таблицу Solomon; на Solomon
+SISR равен ему или лучше при равном времени (например, rc201: 0.576% против 0.760%) и
+примерно в 3 раза быстрее на бюджете по умолчанию.
 
 ---
 
@@ -931,10 +947,6 @@ commiv 1 (движок VRPTW однопоточный), VROOM 3, OR-Tools 1.</su
 
 **Где выигрывают остальные, и это стоит знать**
 
-- **Временные окна на масштабе, сегодня.** VROOM на московском VRPTW-бенчмарке идёт вровень
-  или чуть впереди commiv (см. выше): здешний движок окон старше SISR и однопоточный. Это
-  голова роадмапа, а не закон природы — но прямо сейчас для сильно оконных направленных
-  задач больше нескольких сотен точек VROOM — более безопасный выбор.
 - **Абсолютная точность при огромных бюджетах.** LKH-3, HGS-CVRP и SISR (статья) достигают
   меньших разрывов (примерно 0.16–0.39% на Uchoa X), когда им дают намного больше времени.
   commiv меняет эту последнюю долю процента на большое преимущество в скорости. По точности на
@@ -952,10 +964,13 @@ commiv 1 (движок VRPTW однопоточный), VROOM 3, OR-Tools 1.</su
 
 ### На чём остановились и почему
 
-- **SISR (Slack Induction by String Removals) для большой и асимметричной CVRP.** Разрушить
-  несколько пространственно соседних строк, жадно вставить обратно со случайными «миганиями»,
-  принять по порогу или SA. Ставка: миллионы ходов `O(1)` бьют тысячи ходов `O(n)`.
-  Именно это вскрывает режимы большого n и направленности.
+- **SISR (Slack Induction by String Removals) для большой и асимметричной CVRP — и VRPTW.**
+  Разрушить несколько пространственно соседних строк, жадно вставить обратно со случайными
+  «миганиями», принять по порогу или SA. Ставка: миллионы ходов `O(removed)` бьют тысячи
+  ходов `O(n)`. Именно это вскрывает режимы большого n и направленности. Для временных окон
+  тот же цикл работает со структурами префиксных/суффиксных запасов времени (Tws) на
+  маршрут, так что «допустима ли эта вставка и сколько она стоит» — O(1) на кандидата; одно
+  это изменение сократило московскую VRPTW n=1000 с 988 с (ILS) до 4 с при лучшей стоимости.
 - **HGS (популяция плюс Prins Split DP) для средней CVRP, n примерно до 500.** Генетическая
   популяция гигантских туров с оптимальным разбиением по вместимости и обучением локальным
   поиском даёт лучшее качество на этом масштабе (числа 0.02–0.45% выше).

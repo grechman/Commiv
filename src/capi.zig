@@ -33,13 +33,13 @@ pub const COMMIV_ERR_INTERNAL: c_int = -4;
 /// so callers can `memset(&opts, 0, sizeof opts)` (or pass NULL) and get the
 /// documented defaults. Field meanings:
 ///   seed            RNG seed; 0 -> 1. Same seed + threads<=1 = identical output.
-///   sisr_iters      CVRP ruin&recreate iterations; 0 -> 300k default.
+///   sisr_iters      SISR ruin&recreate iterations (CVRP and VRPTW); 0 -> 300k.
 ///   trials          ATSP trial budget; 0 -> solver default.
-///   vrptw_rounds    VRPTW ILS perturbations per chain; 0 -> default.
-///   vrptw_restarts  VRPTW independent chains; 0 -> default.
+///   vrptw_rounds    Setting either of these selects the legacy VRPTW ILS engine
+///   vrptw_restarts  instead of the default SISR; 0/0 -> SISR.
 ///   veh_penalty     VRPTW per-route penalty biasing toward fewer vehicles.
 ///   threads         0 or 1 = single-threaded (deterministic); >1 = parallel
-///                   SISR islands (CVRP only; result depends on the count).
+///                   SISR chains (CVRP and VRPTW; result depends on the count).
 pub const CommivOptions = extern struct {
     seed: u64 = 0,
     sisr_iters: u64 = 0,
@@ -196,11 +196,22 @@ export fn commiv_solve_vrptw(
         .due = du[0..dim],
         .service = srv[0..dim],
     };
-    var params: vrptw.VrptwParams = .{ .veh_penalty = o.veh_penalty };
-    if (o.vrptw_rounds != 0) params.rounds = @intCast(o.vrptw_rounds);
-    if (o.vrptw_restarts != 0) params.restarts = @intCast(o.vrptw_restarts);
-
-    var result = vrptw.solveVrptw(gpa, inst, .{ .seed = o.seed }, params) catch |err| return mapError(err);
+    // SISR (the flagship engine) is the default. Setting the legacy ILS budget
+    // knobs (vrptw_rounds / vrptw_restarts) selects the giant-tour ILS instead.
+    var result = blk: {
+        if (o.vrptw_rounds != 0 or o.vrptw_restarts != 0) {
+            var params: vrptw.VrptwParams = .{ .veh_penalty = o.veh_penalty };
+            if (o.vrptw_rounds != 0) params.rounds = @intCast(o.vrptw_rounds);
+            if (o.vrptw_restarts != 0) params.restarts = @intCast(o.vrptw_restarts);
+            break :blk vrptw.solveVrptw(gpa, inst, .{ .seed = o.seed }, params) catch |err| return mapError(err);
+        }
+        var params: vrptw.VrptwSisrParams = .{ .veh_penalty = o.veh_penalty };
+        if (o.sisr_iters != 0) params.iters = @intCast(o.sisr_iters);
+        if (o.threads > 1) {
+            break :blk vrptw.solveVrptwSisrParallel(gpa, inst, .{ .seed = o.seed }, params, o.threads) catch |err| return mapError(err);
+        }
+        break :blk vrptw.solveVrptwSisr(gpa, inst, .{ .seed = o.seed }, params) catch |err| return mapError(err);
+    };
     defer result.deinit();
 
     out_p.* = makeRoutes(result.routes, result.total_cost) catch |err| return mapError(err);

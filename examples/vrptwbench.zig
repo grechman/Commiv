@@ -45,13 +45,18 @@ pub fn main(init: std.process.Init) !void {
             .candidates = .{ .candidate_count = @min(@as(usize, 10), n - 1), .candidate_mode = .alpha_nearness, .sparse_min_dimension = 0 },
             .search = .{ .enable_lk = true, .lk_max_depth = 5 },
         };
+        const use_sisr = std.mem.eql(u8, env.get("VT_ENGINE") orelse "ils", "sisr");
+        const sisr_iters = try std.fmt.parseInt(usize, env.get("VT_ITERS") orelse "300000", 10);
         const t0 = nanos();
         var res = if (use_hgs) try commiv.solveVrptwHgs(allocator, inst, solve_opts, .{
             .mu = try std.fmt.parseInt(usize, env.get("VT_MU") orelse "25", 10),
             .lambda = try std.fmt.parseInt(usize, env.get("VT_LAMBDA") orelse "40", 10),
             .generations = try std.fmt.parseInt(usize, env.get("VT_GENS") orelse "30", 10),
             .veh_penalty = veh_penalty,
-        }) else try commiv.solveVrptw(allocator, inst, solve_opts, .{ .rounds = rounds, .restarts = restarts, .veh_penalty = veh_penalty });
+        }) else if (use_sisr)
+            try commiv.solveVrptwSisr(allocator, inst, solve_opts, .{ .iters = sisr_iters, .veh_penalty = veh_penalty })
+        else
+            try commiv.solveVrptw(allocator, inst, solve_opts, .{ .rounds = rounds, .restarts = restarts, .veh_penalty = veh_penalty });
         defer res.deinit();
         const ms = @as(f64, @floatFromInt(nanos() - t0)) / 1e6;
 

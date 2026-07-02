@@ -154,8 +154,11 @@ const VrptwRequest = struct {
     due: []const u32, // latest service start, due[0] = depot horizon
     service: []const u32, // service durations, service[0] = 0
     seed: u64 = 1,
-    rounds: u64 = 0,
-    restarts: u64 = 0,
+    engine: []const u8 = "sisr", // "sisr" (default) or "ils"
+    iters: u64 = 0, // SISR iterations; 0 = default
+    threads: u32 = 1, // SISR: >1 = best-of-K parallel chains
+    rounds: u64 = 0, // ILS engine only
+    restarts: u64 = 0, // ILS engine only
     veh_penalty: u64 = 0,
 };
 
@@ -176,12 +179,25 @@ fn solveVrptw(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []c
         .due = r.due,
         .service = r.service,
     };
-    var params: commiv.VrptwParams = .{ .veh_penalty = r.veh_penalty };
-    if (r.rounds != 0) params.rounds = @intCast(r.rounds);
-    if (r.restarts != 0) params.restarts = @intCast(r.restarts);
-
-    const result = commiv.solveVrptw(arena, inst, .{ .seed = r.seed }, params) catch |err|
-        return respondSolverError(req, err);
+    // SISR (the flagship engine) is the default; explicit engine=ils or the ILS
+    // budget knobs (rounds/restarts) select the legacy giant-tour ILS.
+    const use_ils = std.mem.eql(u8, r.engine, "ils") or r.rounds != 0 or r.restarts != 0;
+    const result = blk: {
+        if (use_ils) {
+            var params: commiv.VrptwParams = .{ .veh_penalty = r.veh_penalty };
+            if (r.rounds != 0) params.rounds = @intCast(r.rounds);
+            if (r.restarts != 0) params.restarts = @intCast(r.restarts);
+            break :blk commiv.solveVrptw(arena, inst, .{ .seed = r.seed }, params) catch |err|
+                return respondSolverError(req, err);
+        }
+        var params: commiv.VrptwSisrParams = .{ .veh_penalty = r.veh_penalty };
+        if (r.iters != 0) params.iters = @intCast(r.iters);
+        if (r.threads > 1)
+            break :blk commiv.solveVrptwSisrParallel(arena, inst, .{ .seed = r.seed }, params, r.threads) catch |err|
+                return respondSolverError(req, err);
+        break :blk commiv.solveVrptwSisr(arena, inst, .{ .seed = r.seed }, params) catch |err|
+            return respondSolverError(req, err);
+    };
 
     return respondJson(arena, req, .{
         .total_cost = result.total_cost,

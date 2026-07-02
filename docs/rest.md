@@ -74,8 +74,10 @@ at the stop, and must be back at the depot by `due[0]` (the horizon).
 | `ready` | `int[n+1]` | earliest service start, `ready[0] = 0` |
 | `due` | `int[n+1]` | latest service start, `due[0]` = depot horizon |
 | `service` | `int[n+1]` | service duration, `service[0] = 0` |
-| `rounds`, `restarts` | int | ILS budget (0 = defaults) |
+| `iters` | int | SISR iterations (0 = 300000 default) |
+| `threads` | int | >1 = best-of-K parallel SISR chains |
 | `veh_penalty` | int | per-route penalty; > 0 biases toward fewer vehicles |
+| `engine` | string | `"sisr"` (default) or `"ils"` (legacy; uses `rounds`/`restarts`) |
 
 ```sh
 curl -X POST http://127.0.0.1:8080/solve/vrptw -d '{

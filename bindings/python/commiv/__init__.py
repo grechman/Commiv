@@ -263,14 +263,19 @@ def solve_vrptw(
     service: Sequence[int],
     *,
     seed: int = 1,
+    iters: int = 0,
+    threads: int = 1,
     rounds: int = 0,
     restarts: int = 0,
     veh_penalty: int = 0,
 ) -> CvrpSolution:
-    """Solve a directed VRPTW. ready/due bound the START of service per node
-    (due[0] is the depot horizon); service is the per-node service duration.
-    Waiting before a window opens is free. veh_penalty > 0 biases the solver
-    toward fewer vehicles at some distance cost."""
+    """Solve a directed VRPTW with SISR (the flagship engine). ready/due bound
+    the START of service per node (due[0] is the depot horizon); service is the
+    per-node service duration. Waiting before a window opens is free.
+
+    iters=0 means the default budget (300k); threads>1 runs best-of-K parallel
+    chains. veh_penalty > 0 biases toward fewer vehicles at some distance cost.
+    Setting rounds/restarts selects the legacy ILS engine instead of SISR."""
     dim = _matrix_dim(matrix)
     n = dim - 1
     m = _as_u32_array(matrix, dim * dim, "matrix")
@@ -278,7 +283,8 @@ def solve_vrptw(
     rd = _as_u32_array(ready, dim, "ready")
     du = _as_u32_array(due, dim, "due")
     sv = _as_u32_array(service, dim, "service")
-    opts = _Options(seed=seed, vrptw_rounds=rounds, vrptw_restarts=restarts, veh_penalty=veh_penalty)
+    opts = _Options(seed=seed, sisr_iters=iters, threads=threads,
+                    vrptw_rounds=rounds, vrptw_restarts=restarts, veh_penalty=veh_penalty)
     out = ctypes.c_void_p()
     rc = _lib.commiv_solve_vrptw(m, n, d, capacity, rd, du, sv, ctypes.byref(opts), ctypes.byref(out))
     if rc != _OK:

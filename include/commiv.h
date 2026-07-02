@@ -34,13 +34,13 @@ typedef struct commiv_routes commiv_routes;
 
 /* Zero value = default for every field.
  *   seed            RNG seed; 0 means 1. Same seed + threads<=1 = same output.
- *   sisr_iters      CVRP ruin-and-recreate iterations; 0 = 300000.
+ *   sisr_iters      SISR ruin-and-recreate iterations (CVRP and VRPTW); 0 = 300000.
  *   trials          ATSP trial budget; 0 = solver default.
- *   vrptw_rounds    VRPTW ILS perturbations per chain; 0 = default.
- *   vrptw_restarts  VRPTW independent chains; 0 = default.
+ *   vrptw_rounds    Setting either selects the legacy VRPTW ILS engine instead
+ *   vrptw_restarts  of the default SISR; both 0 = SISR (recommended).
  *   veh_penalty     VRPTW per-route penalty biasing toward fewer vehicles.
  *   threads         0 or 1 = single-threaded deterministic; >1 = parallel
- *                   SISR islands (CVRP only; the result depends on the count).
+ *                   SISR chains (CVRP and VRPTW; the result depends on the count).
  *   reserved        Must be zero.
  */
 typedef struct commiv_options {
