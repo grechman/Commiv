@@ -385,13 +385,16 @@ Two budget points per solver, cost @ wall (vehicles).
 
 | n | commiv (SISR-TW) | VROOM level 1 / 5 | OR-Tools 60 s |
 |---|---|---|---|
-| 100  | **46,040 @ 2.6 s (10 veh)** | 46,486 @ 1.7 s (11) | 47,538 @ 60 s (11) |
-| 1000 | **231,299 @ 4 s** (51); 229,831 @ 35 s at 3M iters | 246,573 @ 22 s / 239,977 @ 341 s (50) | 267,897 @ 60 s (53) |
+| 100  | **45,993 @ 1.7 s (10 veh)** | 46,486 @ 1.7 s (11) | 47,538 @ 60 s (11) |
+| 1000 | **232,544 @ 3.5 s** (51); 229,909 @ 30 s at 3M iters | 246,573 @ 22 s / 239,977 @ 341 s (50) | 267,897 @ 60 s (53) |
+| 2000 | **412,602 @ 10 s, 3 threads** (102) | not run¹ | not run¹ |
 
-<sub>commiv: `solveVrptwSisr`, default 300k iterations; n=100 row is best-of-3 parallel
-chains on 3 cores (single-threaded: 46,325 @ 1.9 s, 11 veh). VROOM 3 cores, OR-Tools 1.
-Seeds {7, 42, 12345} at n=1000 span 231,299–232,701. Objective is pure distance
-(`veh_penalty = 0`); VROOM's n=1000 solution uses one vehicle fewer at 3.6% more distance.</sub>
+<sub>commiv: `solveVrptwSisr`, default 300k iterations, single-threaded except n=2000
+(best-of-3 chains). VROOM 3 cores, OR-Tools 1. Seeds {7, 42, 12345} at n=1000 span
+231,417–232,544; best-of-3 parallel: 231,892 @ 4.9 s. Objective is pure distance
+(`veh_penalty = 0`); VROOM's n=1000 solution uses one vehicle fewer at 3.2% more distance.
+¹ n=2000 competitor runs were skipped: VROOM level 5 already needs 1607 s on the same
+matrix without windows.</sub>
 
 The history of this table is worth telling straight. The first published version was the
 one benchmark commiv did not win: the original VRPTW engine (a giant-tour ILS predating
@@ -400,8 +403,12 @@ was to port the flagship CVRP engine: SISR with time windows wired into recreate
 O(1) time-slack (Tws) feasibility evaluation. That engine (`solveVrptwSisr`, now the
 default everywhere) produces the numbers above: better cost than every competitor point at
 every size, in seconds, plus a vehicle saved at n=100. The old ILS remains available as
-`solveVrptw` and reproduces the Solomon table; on Solomon, SISR matches or beats it at
-equal wall (e.g. rc201 0.576% vs 0.760%) and is ~3x faster at its default budget.
+`solveVrptw` and reproduces the Solomon table; on Solomon, SISR beats it at its default
+budget (0.135% vs 0.182% vehicle-matched mean, ~3x faster) and matches the vehicle counts
+given budget — including the notoriously tight rc101 at 14 vehicles (2M iterations, 12 s)
+via the fleet-minimization ruin that empties the smallest route when `veh_penalty` is set.
+One negative result, kept honest: the CVRP split-string ("slack induction") ruin measured
+WORSE with time windows on (Moscow n=1000: +0.8%), so it defaults off for VRPTW.
 
 ---
 
@@ -909,14 +916,16 @@ commiv быстрее и дешевле на каждом размере. Бли
 
 | n | commiv (SISR-TW) | VROOM уровень 1 / 5 | OR-Tools 60 с |
 |---|---|---|---|
-| 100  | **46 040 @ 2.6 с (10 машин)** | 46 486 @ 1.7 с (11) | 47 538 @ 60 с (11) |
-| 1000 | **231 299 @ 4 с** (51); 229 831 @ 35 с при 3M итераций | 246 573 @ 22 с / 239 977 @ 341 с (50) | 267 897 @ 60 с (53) |
+| 100  | **45 993 @ 1.7 с (10 машин)** | 46 486 @ 1.7 с (11) | 47 538 @ 60 с (11) |
+| 1000 | **232 544 @ 3.5 с** (51); 229 909 @ 30 с при 3M итераций | 246 573 @ 22 с / 239 977 @ 341 с (50) | 267 897 @ 60 с (53) |
+| 2000 | **412 602 @ 10 с, 3 потока** (102) | не запускался¹ | не запускался¹ |
 
-<sub>commiv: `solveVrptwSisr`, 300k итераций по умолчанию; строка n=100 — лучшее из 3
-параллельных цепочек на 3 ядрах (однопоточно: 46 325 @ 1.9 с, 11 машин). VROOM 3 ядра,
-OR-Tools 1. Сиды {7, 42, 12345} при n=1000 дают 231 299–232 701. Целевая функция — чистое
+<sub>commiv: `solveVrptwSisr`, 300k итераций по умолчанию, однопоточно, кроме n=2000
+(лучшее из 3 цепочек). VROOM 3 ядра, OR-Tools 1. Сиды {7, 42, 12345} при n=1000 дают
+231 417–232 544; лучшее из 3 параллельно: 231 892 @ 4.9 с. Целевая функция — чистое
 расстояние (`veh_penalty = 0`); решение VROOM при n=1000 использует на одну машину меньше
-ценой +3.6% расстояния.</sub>
+ценой +3.2% расстояния. ¹ Конкуренты при n=2000 не запускались: VROOM уровня 5 тратит
+1607 с на той же матрице даже без окон.</sub>
 
 Историю этой таблицы стоит рассказать честно. В первой опубликованной версии это был
 единственный бенчмарк, который commiv не выигрывал: старый движок VRPTW (ILS по гигантскому
@@ -926,8 +935,12 @@ recreate через O(1)-проверку допустимости по запа
 (`solveVrptwSisr`, теперь по умолчанию везде) даёт числа выше: стоимость лучше каждой точки
 каждого конкурента на каждом размере, за секунды, плюс сэкономленная машина при n=100.
 Старый ILS остаётся доступным как `solveVrptw` и воспроизводит таблицу Solomon; на Solomon
-SISR равен ему или лучше при равном времени (например, rc201: 0.576% против 0.760%) и
-примерно в 3 раза быстрее на бюджете по умолчанию.
+SISR лучше него уже на бюджете по умолчанию (0.135% против 0.182% при совпадении машин,
+~3x быстрее) и добирает число машин при увеличении бюджета — включая знаменитый rc101 с
+14 машинами (2M итераций, 12 с) благодаря fleet-min разрушению, которое опустошает
+наименьший маршрут при заданном `veh_penalty`. Один отрицательный результат, честно:
+разрушение split-string («индукция запаса») из CVRP с окнами измеримо ХУЖЕ (Москва n=1000:
++0.8%), поэтому для VRPTW оно выключено по умолчанию.
 
 ---
 

@@ -2004,6 +2004,18 @@ pub const VrptwSisrParams = struct {
     t0_factor: f64 = 1.0, // initial acceptance threshold = t0 * (dist0 / n)
     tf_factor: f64 = 0.01, // final threshold
     veh_penalty: u64 = 0, // per-route penalty (0 = pure distance)
+    // Fleet-minimization ruin: probability an iteration empties the smallest
+    // route (its customers then reinsert elsewhere or reopen it, and the
+    // veh_penalty term decides in acceptance). Only active when veh_penalty > 0
+    // — with a pure-distance objective emptying a route is aimless churn.
+    fleet_ruin_rate: f64 = 0.1,
+    // Split-string ruin ("slack induction"): probability a removed string
+    // preserves a middle block, biting two shorter pieces out of the route
+    // instead of one long one. MEASURED OFF by default: the CVRP n>=250 gate
+    // does NOT transfer to time windows (Moscow n=1000: 233,106 with 0.5 vs
+    // 231,299 without — windows already fragment routes, so extra slack
+    // induction is churn). Kept as an explicit knob; 0 = off.
+    split_rate: f64 = 0.0,
 };
 
 const SisrTwRoute = struct {
@@ -2247,16 +2259,44 @@ const SisrTw = struct {
     }
 
     /// SISR ruin: remove strings of spatially-adjacent customers around a random
-    /// seed customer. Fills s.removed.
+    /// seed customer. Fills s.removed. With veh_penalty active, a fraction of
+    /// iterations instead empties the smallest route (fleet minimization); a
+    /// fraction of strings preserve a middle block (split-string / "slack
+    /// induction"), freeing two short gaps instead of one long one.
     fn ruin(s: *SisrTw, params: VrptwSisrParams, rng: std.Random) !void {
         const n = s.inst.n;
         s.removed.clearRetainingCapacity();
-        const avg_len = @max(@as(usize, 1), n / @max(@as(usize, 1), s.nonempty));
+        s.generation += 1;
+
+        var seed_c = 1 + rng.uintLessThan(usize, n);
+        if (params.veh_penalty > 0 and s.nonempty > 1 and rng.float(f64) < params.fleet_ruin_rate) {
+            // Fleet-min ruin: empty the smallest route outright. Its customers
+            // reinsert into the slack the normal strings below open up around
+            // them — or reopen a route, and veh_penalty settles it in acceptance.
+            var smallest: usize = NO_ROUTE;
+            var slen: usize = std.math.maxInt(usize);
+            for (s.routes.items, 0..) |r, i| {
+                const len = r.items.items.len;
+                if (len > 0 and len < slen) {
+                    smallest = i;
+                    slen = len;
+                }
+            }
+            if (smallest != NO_ROUTE) {
+                seed_c = s.routes.items[smallest].items.items[rng.uintLessThan(usize, slen)];
+                s.ruin_mark[smallest] = s.generation;
+                try s.removeString(smallest, 0, slen);
+            }
+        }
+
+        const avg_len = @max(@as(usize, 1), n / @max(@as(usize, 1), @max(s.nonempty, 1)));
         const ls_max = @min(params.l_max, avg_len);
         const ks_max = @max(@as(usize, 1), @as(usize, @intFromFloat((4.0 * params.cbar) / (1.0 + @as(f64, @floatFromInt(ls_max))))));
         const ks = 1 + rng.uintLessThan(usize, ks_max);
-        const seed_c = 1 + rng.uintLessThan(usize, n);
-        s.generation += 1;
+        // Split-string is opt-in for TW (default 0 — see VrptwSisrParams: the
+        // CVRP n>=250 auto-gate measured WORSE here). <0 kept as alias for the
+        // CVRP-style gate for experiments.
+        const eff_split: f64 = if (params.split_rate < 0) (if (n >= 250) @as(f64, 0.5) else 0.0) else params.split_rate;
 
         var strings: usize = 0;
         var t: usize = 0;
@@ -2270,10 +2310,25 @@ const SisrTw = struct {
             const rlen = s.routes.items[ri].items.items.len;
             const l = 1 + rng.uintLessThan(usize, @min(ls_max, rlen));
             const p = s.loc_pos[c];
-            const lo = if (p + 1 >= l) p + 1 - l else 0;
-            const hi = @min(p, rlen - l);
-            const start = lo + rng.uintLessThan(usize, hi - lo + 1);
-            try s.removeString(ri, start, l);
+            if (eff_split > 0 and rlen >= l + 1 and rng.float(f64) < eff_split) {
+                // preserved middle block m (geometric growth, alpha = 0.5)
+                var m: usize = 1;
+                while (l + m < rlen and rng.float(f64) < 0.5) m += 1;
+                const w = l + m; // removal window: l removed around m preserved
+                const lo = if (p + 1 >= w) p + 1 - w else 0;
+                const hi = @min(p, rlen - w);
+                const start = lo + rng.uintLessThan(usize, hi - lo + 1);
+                const l1 = rng.uintLessThan(usize, l + 1); // left piece 0..l
+                const l2 = l - l1;
+                // right piece first so the left piece's indices stay valid
+                if (l2 > 0) try s.removeString(ri, start + l1 + m, l2);
+                if (l1 > 0) try s.removeString(ri, start, l1);
+            } else {
+                const lo = if (p + 1 >= l) p + 1 - l else 0;
+                const hi = @min(p, rlen - l);
+                const start = lo + rng.uintLessThan(usize, hi - lo + 1);
+                try s.removeString(ri, start, l);
+            }
             strings += 1;
         }
     }
