@@ -477,8 +477,11 @@ WORSE with time windows on (Moscow n=1000: +0.8%), so it defaults off for VRPTW.
 - **Static Move Descriptors (SMD).** Our don't-look-queue is 4x to 5x faster at identical
   quality; the DLQ already captures the locality SMD buys. Dead end.
 - **Two-level doubly-linked tour list.** After fixing a fallback that was firing on provably
-  doomed rebuilds, tour rebuilds dropped about 10x and the remaining cost was under 5% of
-  wall-clock. The rewrite's complexity was not worth it.
+  doomed rebuilds, tour rebuilds dropped about 10x. Re-measured 2026-07: the entire remaining
+  target (`applyEdges`, the O(n) retrace + rebuild per accepted move) is 2.5–2.8% of
+  wall-clock at n=575–1577 and 5.6% at n=11849 — the rewrite's ceiling, before paying the
+  per-query segment indirection that every `next`/`prev` read in the LK inner loop would eat.
+  Closed.
 - **Cooperative and best-of parallelism.** High variance and lock contention made it slower
   than independent islands. Removed.
 - **Decomposition for large n.** A subproblem-resolve win on converged TSP tours did not
@@ -490,6 +493,15 @@ WORSE with time windows on (Moscow n=1000: +0.8%), so it defaults off for VRPTW.
   Structural.
 - **Assignment-bound early stop.** The AP lower bound is too loose for capacity-tight CVRP to
   certify near-optimality (19% to 52% on Moscow). Useless as a stopping rule here.
+- **Route-pool recombination across parallel SISR chains.** Adaptive-memory offspring
+  (cheapest disjoint routes from every island, clash-stripped with a TW re-check, leftovers
+  as singletons, short SISR polish) never beat plain best-of-K on Moscow VRPTW at n=100 or
+  n=1000 — even with a perfect repair the offspring starts ~46% above the best island, and
+  spending the polish wall on extra best-of-K iterations wins instead. The TSP recombination
+  gain does not transfer: SISR's threshold schedule makes the seed nearly irrelevant (measured
+  before — swapping the seed tour changes nothing), so there is no incumbent-trajectory
+  memory for an offspring to inject. LK islands have exactly that memory, which is why EAX
+  recombination pays there and not here.
 
 ---
 

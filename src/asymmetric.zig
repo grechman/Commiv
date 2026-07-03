@@ -17,9 +17,11 @@ const solver = @import("solver.zig");
 // the tails in tour order are the directed cycle. Directed length = symmetric
 // length - n*BIG.
 
-// Above this transformed-matrix size, solveAtsp routes to the native directed search
-// instead of building the (2n)^2 transform matrix. 32M cells * 4B = 128MB; the doubled
-// Problem copy would be another 128MB. Triggers at n > ~2828 (e.g. the n=5000 CVRP seed).
+// Above this transformed-graph size, solveAtsp routes to the native directed
+// search instead of running the doubled-graph LK. Triggers at n > ~2828 (e.g.
+// the n=5000 CVRP seed). Historically this also capped the transform matrix's
+// 32n^2 B materialization; that memory is gone (jv_transform view), but the
+// routing is kept as-is — it's a measured regime decision, not a memory one.
 const ATSP_TRANSFORM_MAX_CELLS: u64 = 32 * 1024 * 1024;
 
 // A read-only window into a (possibly larger) row-major matrix: cell (a,b) is
@@ -68,12 +70,13 @@ pub fn solveAtsp(allocator: std.mem.Allocator, asym: []const u32, n: usize, opti
         }
     }
 
-    // The 2n transform materializes a (2n)^2 matrix AND Problem.initFullMatrix dupes it
-    // — 400MB + 400MB at n=5000, per call. That transient peak (× each worker thread)
-    // is where the CVRP giant-tour seed's ~2GB comes from. For large n the doubled-graph
-    // LK isn't worth that memory, especially for a throwaway seed SISR will rip apart:
-    // route to the native directed search (n nodes, no doubling, no full-matrix copy).
-    // Budget passed through as-is (no degeneracy ×100 — large-n native descents aren't cheap).
+    // Large n routes to the native directed search: the doubled-graph LK works
+    // 2n nodes and isn't worth it at scale, especially for a throwaway seed
+    // SISR will rip apart. (This gate was originally also about the transform's
+    // 32n^2 B materialization; the jv_transform view below killed that cost,
+    // but the routing stays — it's a measured speed/regime decision and moving
+    // it would change published results.) Budget passed through as-is (no
+    // degeneracy ×100 — large-n native descents aren't cheap).
     if (@as(u64, 2 * n) * @as(u64, 2 * n) > ATSP_TRANSFORM_MAX_CELLS) {
         return solveAtspNative(allocator, asym, n, options);
     }
@@ -91,25 +94,13 @@ pub fn solveAtsp(allocator: std.mem.Allocator, asym: []const u32, n: usize, opti
     if (inf > std.math.maxInt(u32)) return error.InstanceTooLargeForTransform;
     const inf32: u32 = @intCast(inf);
 
-    const m = 2 * n;
-    const sym = try allocator.alloc(u32, m * m);
-    defer allocator.free(sym);
-    @memset(sym, inf32);
-    for (0..m) |i| sym[i * m + i] = 0;
-    for (0..n) |i| {
-        const head = n + i;
-        sym[i * m + head] = 0;
-        sym[head * m + i] = 0;
-        for (0..n) |j| {
-            if (i == j) continue;
-            const w: u32 = @intCast(@as(u64, asym[i * n + j]) + big);
-            // arc i->j connects head(i) to tail(j)
-            sym[head * m + j] = w;
-            sym[j * m + head] = w;
-        }
-    }
-
-    var p = try problem.Problem.initFullMatrix(allocator, "atsp", m, sym);
+    // In-place JV view: the (2n)^2 symmetric matrix is never materialized (and
+    // initFullMatrix's dupe of it is gone with it — 32n^2 B total, 128+128 MB
+    // at n=2000). distanceUnchecked computes each entry on the fly from the
+    // borrowed n^2 matrix with the exact same formula that used to fill `sym`,
+    // so every distance the solver sees is the same integer and trajectories
+    // are bit-identical to the materialized transform.
+    var p = try problem.Problem.initJvTransform(allocator, "atsp", n, asym, @intCast(big), inf32);
     defer p.deinit();
 
     // Inject candidates ranked by the ORIGINAL asymmetric costs. On the transformed

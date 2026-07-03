@@ -47,6 +47,7 @@ pub fn main(init: std.process.Init) !void {
         };
         const use_sisr = std.mem.eql(u8, env.get("VT_ENGINE") orelse "ils", "sisr");
         const sisr_iters = try std.fmt.parseInt(usize, env.get("VT_ITERS") orelse "300000", 10);
+        const adjacent_gaps = std.mem.eql(u8, env.get("VT_ADJ_GAPS") orelse "0", "1");
         const t0 = nanos();
         var res = if (use_hgs) try commiv.solveVrptwHgs(allocator, inst, solve_opts, .{
             .mu = try std.fmt.parseInt(usize, env.get("VT_MU") orelse "25", 10),
@@ -54,7 +55,7 @@ pub fn main(init: std.process.Init) !void {
             .generations = try std.fmt.parseInt(usize, env.get("VT_GENS") orelse "30", 10),
             .veh_penalty = veh_penalty,
         }) else if (use_sisr)
-            try commiv.solveVrptwSisr(allocator, inst, solve_opts, .{ .iters = sisr_iters, .veh_penalty = veh_penalty })
+            try commiv.solveVrptwSisr(allocator, inst, solve_opts, .{ .iters = sisr_iters, .veh_penalty = veh_penalty, .adjacent_gaps = adjacent_gaps })
         else
             try commiv.solveVrptw(allocator, inst, solve_opts, .{ .rounds = rounds, .restarts = restarts, .veh_penalty = veh_penalty });
         defer res.deinit();

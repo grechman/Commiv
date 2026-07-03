@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const commiv = @import("commiv");
 
 // commiv-serve: the language-agnostic front door. One static binary, JSON over
@@ -11,6 +12,13 @@ const commiv = @import("commiv");
 //                       seed?, rounds?, restarts?, veh_penalty?}
 //   POST /solve/atsp   {matrix, seed?, trials?}
 //   GET  /health
+//
+// Every /solve/* path also accepts the CMV1 binary framing (sniffed by magic,
+// no separate path): "CMV1" + u32 LE header length + the endpoint's JSON body
+// minus "matrix" + the matrix as raw little-endian u32, row-major. The matrix
+// is ~90%+ of a large body and JSON-parsing it dominates request handling from
+// n≈2000 (~175 MB of text at n=5000); the binary framing makes it a memcpy.
+// See docs/rest.md for client snippets.
 //
 // Env: COMMIV_HOST (default 127.0.0.1), COMMIV_PORT (default 8080),
 //      COMMIV_MAX_BODY_MB (default 256).
@@ -110,7 +118,7 @@ fn handleRequest(gpa: std.mem.Allocator, req: *std.http.Server.Request, cfg: Ser
 // ---- endpoint handlers -------------------------------------------------------
 
 const CvrpRequest = struct {
-    matrix: []const []const u32, // (n+1) rows of n+1 directed costs; depot = 0
+    matrix: []const []const u32 = &.{}, // (n+1) rows of n+1 directed costs; depot = 0 (absent in CMV1 bodies)
     demand: []const u32,
     capacity: u32,
     seed: u64 = 1,
@@ -119,11 +127,11 @@ const CvrpRequest = struct {
 };
 
 fn solveCvrp(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []const u8) !void {
-    const r = parseBody(CvrpRequest, arena, req, body) orelse return;
-    const flat = flattenSquare(arena, r.matrix) orelse
-        return respondError(req, .unprocessable_entity, "matrix must be square (n+1 rows of n+1 entries)");
-    const n = r.matrix.len - 1;
-    if (r.matrix.len < 2 or r.demand.len != n + 1)
+    const p = parseSolveRequest(CvrpRequest, arena, req, body) orelse return;
+    const r = p.request;
+    const flat = p.matrix;
+    const n = p.dim - 1;
+    if (p.dim < 2 or r.demand.len != n + 1)
         return respondError(req, .unprocessable_entity, "need >= 1 customer and demand of length n+1");
 
     const inst = commiv.CvrpInstance{ .n = n, .matrix = flat, .demand = r.demand, .capacity = r.capacity };
@@ -147,7 +155,7 @@ fn solveCvrp(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []co
 }
 
 const VrptwRequest = struct {
-    matrix: []const []const u32,
+    matrix: []const []const u32 = &.{}, // absent in CMV1 bodies
     demand: []const u32,
     capacity: u32,
     ready: []const u32, // earliest service start, ready[0] = 0
@@ -163,11 +171,11 @@ const VrptwRequest = struct {
 };
 
 fn solveVrptw(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []const u8) !void {
-    const r = parseBody(VrptwRequest, arena, req, body) orelse return;
-    const flat = flattenSquare(arena, r.matrix) orelse
-        return respondError(req, .unprocessable_entity, "matrix must be square (n+1 rows of n+1 entries)");
-    const n = r.matrix.len - 1;
-    if (r.matrix.len < 2 or r.demand.len != n + 1 or r.ready.len != n + 1 or r.due.len != n + 1 or r.service.len != n + 1)
+    const p = parseSolveRequest(VrptwRequest, arena, req, body) orelse return;
+    const r = p.request;
+    const flat = p.matrix;
+    const n = p.dim - 1;
+    if (p.dim < 2 or r.demand.len != n + 1 or r.ready.len != n + 1 or r.due.len != n + 1 or r.service.len != n + 1)
         return respondError(req, .unprocessable_entity, "demand/ready/due/service must all have length n+1");
 
     const inst = commiv.VrptwInstance{
@@ -207,16 +215,16 @@ fn solveVrptw(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []c
 }
 
 const AtspRequest = struct {
-    matrix: []const []const u32, // n x n directed costs
+    matrix: []const []const u32 = &.{}, // n x n directed costs (absent in CMV1 bodies)
     seed: u64 = 1,
     trials: u64 = 0,
 };
 
 fn solveAtsp(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []const u8) !void {
-    const r = parseBody(AtspRequest, arena, req, body) orelse return;
-    const flat = flattenSquare(arena, r.matrix) orelse
-        return respondError(req, .unprocessable_entity, "matrix must be square");
-    const n = r.matrix.len;
+    const p = parseSolveRequest(AtspRequest, arena, req, body) orelse return;
+    const r = p.request;
+    const flat = p.matrix;
+    const n = p.dim;
     if (n < 2) return respondError(req, .unprocessable_entity, "need at least 2 nodes");
 
     var opts: commiv.SolveOptions = .{ .seed = r.seed };
@@ -235,6 +243,64 @@ fn parseBody(comptime T: type, arena: std.mem.Allocator, req: *std.http.Server.R
         respondError(req, .bad_request, "invalid JSON body: matrix/demand/window entries must be non-negative integers < 2^32 (scale floats to e.g. whole seconds); see docs/rest.md") catch {};
         return null;
     };
+}
+
+fn Parsed(comptime T: type) type {
+    return struct { request: T, matrix: []u32, dim: usize };
+}
+
+/// Decode a /solve/* body in either encoding into (request params, flat
+/// row-major matrix, dim). JSON: the whole body is T, matrix flattened from
+/// its rows. CMV1 binary (sniffed by magic): u32 LE header length at offset 4,
+/// then a JSON header (T minus "matrix"), then the matrix as raw little-endian
+/// u32 — decoded by one aligned memcpy instead of parsing ~7 bytes of text per
+/// entry, which is the difference between ~0.1 s of JSON and ~4 ms at n=2000.
+/// dim is inferred from the byte count (must be 4*dim^2). On any error this
+/// responds to the client and returns null.
+fn parseSolveRequest(comptime T: type, arena: std.mem.Allocator, req: *std.http.Server.Request, body: []const u8) ?Parsed(T) {
+    if (std.mem.startsWith(u8, body, "CMV1")) {
+        if (body.len < 8) {
+            respondError(req, .bad_request, "CMV1 body truncated (need magic + u32 header length)") catch {};
+            return null;
+        }
+        const hlen: usize = std.mem.readInt(u32, body[4..8], .little);
+        if (hlen > body.len - 8) {
+            respondError(req, .bad_request, "CMV1 header length exceeds body") catch {};
+            return null;
+        }
+        const r = parseBody(T, arena, req, body[8 .. 8 + hlen]) orelse return null;
+        const mbytes = body[8 + hlen ..];
+        if (mbytes.len == 0 or mbytes.len % 4 != 0) {
+            respondError(req, .bad_request, "CMV1 matrix must be a non-empty sequence of little-endian u32") catch {};
+            return null;
+        }
+        const cells = mbytes.len / 4;
+        const dim = std.math.sqrt(cells);
+        if (dim * dim != cells) {
+            respondError(req, .bad_request, "CMV1 matrix byte count must be 4*dim^2 (square, row-major)") catch {};
+            return null;
+        }
+        const flat = arena.alloc(u32, cells) catch {
+            respondError(req, .internal_server_error, "out of memory") catch {};
+            return null;
+        };
+        @memcpy(std.mem.sliceAsBytes(flat), mbytes);
+        if (comptime builtin.cpu.arch.endian() == .big) {
+            for (flat) |*v| v.* = @byteSwap(v.*);
+        }
+        return .{ .request = r, .matrix = flat, .dim = dim };
+    }
+
+    const r = parseBody(T, arena, req, body) orelse return null;
+    if (r.matrix.len == 0) {
+        respondError(req, .unprocessable_entity, "missing matrix") catch {};
+        return null;
+    }
+    const flat = flattenSquare(arena, r.matrix) orelse {
+        respondError(req, .unprocessable_entity, "matrix must be square (dim rows of dim entries)") catch {};
+        return null;
+    };
+    return .{ .request = r, .matrix = flat, .dim = r.matrix.len };
 }
 
 /// Rows -> contiguous row-major matrix; null unless every row has rows.len entries.

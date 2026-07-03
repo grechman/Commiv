@@ -257,6 +257,16 @@ const Route = std.ArrayList(usize);
 /// Restricting moves to these pairs is the other half of fast HGS — it cuts the
 /// per-sweep candidate count from O(routes^2 * len^2) to O(n * k). Built ONCE per
 /// instance (shared, read-only across the whole population).
+/// NOTE: deliberately still the full O(n log n) pdq sort with a distance-only
+/// comparator, NOT the bounded top-k selection buildCvrpNeighbors got (which is
+/// byte-identical there because CVRP's comparator already broke ties by index).
+/// This comparator has no tiebreak, so equidistant neighbours land in pdq's
+/// implementation-defined order — and every published VRPTW number (Solomon,
+/// Moscow TW) was measured on exactly that order. Canonicalizing to
+/// (distance, index) was tried and moves trajectories on tie-heavy instances
+/// (Solomon rc201 default-seed gap 0.576% -> 2.291%) for zero quality gain, so
+/// the swap is deferred until we deliberately re-baseline the tables. The build
+/// is one-time and costs ~40ms at n=2000; nothing hot is lost.
 fn buildNeighbors(allocator: std.mem.Allocator, inst: VrptwInstance, k: usize) ![]usize {
     const n = inst.n;
     const gran = try allocator.alloc(usize, n * k);
@@ -1155,7 +1165,12 @@ const Solution = struct {
                 const removal: i64 = self.dd(a, u) + self.dd(u, b) - self.dd(a, b);
                 // route ri after removing u
                 const ri_after = try self.buildCandidate(self.routes.items[ri].items, pi, 1, pi, &.{});
-                const ri_dist = scheduleSlice(self.inst, ri_after) orelse unreachable; // removal keeps feasibility
+                // Removal does NOT always keep feasibility: on directed matrices
+                // the direct arc a->b can exceed the detour through u (triangle-
+                // inequality violation), delaying downstream arrivals. null means
+                // inter-route moves from this position are impossible (was
+                // `orelse unreachable` — UB in release when that fired).
+                const ri_dist_opt = scheduleSlice(self.inst, ri_after);
                 // need a stable copy of ri_after for two-route moves (scratch reused)
                 const ri_after_buf = self.mbuf0;
                 const ri_after_len = ri_after.len;
@@ -1183,6 +1198,7 @@ const Solution = struct {
                             const c = if (q == 0) 0 else rjtems[q - 1];
                             const e = if (q == rjtems.len) 0 else rjtems[q];
                             const insert: i64 = self.dd(c, u) + self.dd(u, e) - self.dd(c, e);
+                            const ri_dist = ri_dist_opt orelse continue; // removal broke ri's TWs
                             const empties = ri_after_len == 0;
                             if (!empties and insert >= removal) continue;
                             const old = self.rdist.items[ri] + self.rdist.items[rj];
@@ -1225,7 +1241,9 @@ const Solution = struct {
                     const b = if (pi + len == ritems.len) 0 else ritems[pi + len];
                     const removal: i64 = self.dd(a, seg_first) + self.dd(seg_last, b) - self.dd(a, b);
                     const ri_after = try self.buildCandidate(self.routes.items[ri].items, pi, len, pi, &.{});
-                    const ri_dist = scheduleSlice(self.inst, ri_after) orelse unreachable;
+                    // Same hazard as tryRelocate: segment removal can break the
+                    // source route's TWs on triangle-violating directed matrices.
+                    const ri_dist_opt = scheduleSlice(self.inst, ri_after);
                     const ri_after_buf = self.mbuf0;
                     const ri_after_len = ri_after.len;
                     @memcpy(ri_after_buf[0..ri_after_len], ri_after);
@@ -1247,6 +1265,7 @@ const Solution = struct {
                                 const c = if (q == 0) 0 else rjtems[q - 1];
                                 const e = if (q == rjtems.len) 0 else rjtems[q];
                                 const insert: i64 = self.dd(c, seg_first) + self.dd(seg_last, e) - self.dd(c, e);
+                                const ri_dist = ri_dist_opt orelse continue; // removal broke ri's TWs
                                 const empties = ri_after_len == 0;
                                 if (!empties and insert >= removal) continue;
                                 const old = self.rdist.items[ri] + self.rdist.items[rj];
@@ -1990,10 +2009,13 @@ fn permRecTw(allocator: std.mem.Allocator, inst: VrptwInstance, perm: []usize, k
 // The enabling piece is the Tws concatenation algebra above: with per-route
 // prefix/suffix Tws arrays, "is inserting c between a and b TW-feasible, and
 // what does it cost" is O(1) per candidate gap instead of an O(route) full
-// re-schedule. Routes are short arrays (~n/vehicles); everything else is plain
-// copies, which keeps rollback trivial (snapshot touched routes, restore on
-// reject). Route slots are never deleted mid-run — emptied slots are reused by
-// recreate and skipped at emit — so snapshot indices stay valid forever.
+// re-schedule. Routes are short arrays (~n/vehicles); rejection is handled by
+// an exact undo journal (the CVRP engine's discipline): every removeString/
+// insertAt logs its inverse and rollback replays the log backwards — O(1) per
+// insert and O(string) per removal to log, instead of an O(route) whole-route
+// copy on first touch. Route slots are never deleted mid-run — emptied slots
+// are reused by recreate and skipped at emit — so the journal's route indices
+// stay valid forever.
 // =============================================================================
 
 pub const VrptwSisrParams = struct {
@@ -2016,6 +2038,14 @@ pub const VrptwSisrParams = struct {
     // 231,299 without — windows already fragment routes, so extra slack
     // induction is churn). Kept as an explicit knob; 0 = off.
     split_rate: f64 = 0.0,
+    // Adjacent-gaps recreate: for each removed customer, evaluate ONLY the two
+    // gaps immediately adjacent to each of its k nearest neighbours (wherever
+    // that neighbour currently sits) instead of every gap of every distinct
+    // route touched by a neighbour — <=2k gap evals instead of O(k * avg route
+    // length). FLAG-GATED, default OFF: a real behavior/quality change (fewer
+    // candidate gaps considered per recreate), not a mechanical speedup, so it
+    // must be measured and opted into rather than silently changing results.
+    adjacent_gaps: bool = false,
 };
 
 const SisrTwRoute = struct {
@@ -2025,6 +2055,22 @@ const SisrTwRoute = struct {
     pre: std.ArrayList(Tws) = .empty, // pre[i] = depot..items[i-1]; len = items.len+1
     suf: std.ArrayList(Tws) = .empty, // suf[i] = items[i]..depot;   len = items.len+1
     dirty: bool = true, // pre/suf stale
+    // Lowest route position touched by any mutation since pre/suf were last
+    // freshened (the min across possibly several removeString/insertAt calls in
+    // one ruin+recreate step). pre[0..dirty_from] is guaranteed to still describe
+    // items[0..dirty_from) correctly (every mutation leaves its own prefix
+    // untouched), so freshen() only needs to rebuild pre[dirty_from+1..]. Only
+    // meaningful while `dirty` is true.
+    dirty_from: usize = 0,
+    // suf's counterpart to dirty_from: suf[suf_from..] still describes the
+    // CURRENT items (suffix chains only involve positions at or after their own
+    // index, so a mutation at position p leaves every suffix strictly after the
+    // edited region valid — provided the entries are kept at the right indices,
+    // which removeString/insertAt do by mirroring their items edit onto suf).
+    // maxInt (or a suf length out of sync with items) = nothing valid, full
+    // rebuild. Unlike dirty_from this is meaningful only together with
+    // `suf.items.len == items.len + 1`; freshen checks both.
+    suf_from: usize = std.math.maxInt(usize),
 
     fn deinit(r: *SisrTwRoute, allocator: std.mem.Allocator) void {
         r.items.deinit(allocator);
@@ -2044,17 +2090,34 @@ const SisrTw = struct {
     gk: usize,
     loc_route: []usize, // NO_ROUTE when absent
     loc_pos: []usize,
-    // per-iteration transaction state
-    snap_items: std.ArrayList(usize) = .empty, // flattened saved routes
-    snaps: std.ArrayList(Snap) = .empty,
-    touched: []bool, // sized routes capacity; grown with routes
+    // Per-iteration transaction state: the exact undo journal. Mutations append
+    // their inverse; rollback() replays the journal in reverse. Removed-string
+    // contents live flattened in undo_items (s.removed can't serve — recreate
+    // shuffles it). State restored exactly: items, dist, load, loc_route,
+    // loc_pos, cost, nonempty (all pure integer set/adds, so bit-identical to
+    // the old whole-route-snapshot restore); pre/suf staleness is reset
+    // conservatively (dirty, no valid prefix/suffix), exactly as the snapshot
+    // path's installRoute did.
+    undo_ops: std.ArrayList(UndoOp) = .empty,
+    undo_items: std.ArrayList(usize) = .empty, // flattened removed segments
     removed: std.ArrayList(usize) = .empty,
     cand_mark: []u64, // route -> generation of last candidate visit
     ruin_mark: []u64, // route -> generation of last ruin
     generation: u64 = 0,
+    // Lowest slot index that MIGHT be empty: a monotone-forward scan cursor,
+    // clamped down (never up) whenever a route transitions nonempty->empty
+    // (installRoute, removeString). Always <= the true lowest empty index, so
+    // scanning forward from it lands on the same slot a from-0 scan would —
+    // O(1)-amortized instead of O(slots) per recreate() empty-slot lookup.
+    min_empty_hint: usize = 0,
 
     const NO_ROUTE = std.math.maxInt(usize);
-    const Snap = struct { idx: usize, start: usize, len: usize, dist: u64, load: u64 };
+    // dist/load are route `ri`'s values from BEFORE the logged mutation;
+    // `seg` indexes the removed string's contents inside undo_items.
+    const UndoOp = union(enum) {
+        remove: struct { ri: usize, start: usize, seg: usize, len: usize, dist: u64, load: u64 },
+        insert: struct { ri: usize, g: usize, dist: u64, load: u64 },
+    };
 
     fn init(allocator: std.mem.Allocator, inst: VrptwInstance, veh_penalty: u64, gran: []const usize, gk: usize) !SisrTw {
         const s = SisrTw{
@@ -2065,7 +2128,6 @@ const SisrTw = struct {
             .gk = gk,
             .loc_route = try allocator.alloc(usize, inst.n + 1),
             .loc_pos = try allocator.alloc(usize, inst.n + 1),
-            .touched = &.{},
             .cand_mark = &.{},
             .ruin_mark = &.{},
         };
@@ -2078,9 +2140,8 @@ const SisrTw = struct {
         s.routes.deinit(s.allocator);
         s.allocator.free(s.loc_route);
         s.allocator.free(s.loc_pos);
-        s.snap_items.deinit(s.allocator);
-        s.snaps.deinit(s.allocator);
-        if (s.touched.len > 0) s.allocator.free(s.touched);
+        s.undo_ops.deinit(s.allocator);
+        s.undo_items.deinit(s.allocator);
         if (s.cand_mark.len > 0) s.allocator.free(s.cand_mark);
         if (s.ruin_mark.len > 0) s.allocator.free(s.ruin_mark);
         s.removed.deinit(s.allocator);
@@ -2099,13 +2160,6 @@ const SisrTw = struct {
         try s.routes.append(s.allocator, .{});
         const cap = s.routes.items.len;
         const grow = struct {
-            fn boolArr(allocator: std.mem.Allocator, old: []bool, ncap: usize) ![]bool {
-                const arr = try allocator.alloc(bool, ncap);
-                @memcpy(arr[0..old.len], old);
-                @memset(arr[old.len..], false);
-                if (old.len > 0) allocator.free(old);
-                return arr;
-            }
             fn u64Arr(allocator: std.mem.Allocator, old: []u64, ncap: usize) ![]u64 {
                 const arr = try allocator.alloc(u64, ncap);
                 @memcpy(arr[0..old.len], old);
@@ -2114,7 +2168,6 @@ const SisrTw = struct {
                 return arr;
             }
         };
-        s.touched = try grow.boolArr(s.allocator, s.touched, cap);
         s.cand_mark = try grow.u64Arr(s.allocator, s.cand_mark, cap);
         s.ruin_mark = try grow.u64Arr(s.allocator, s.ruin_mark, cap);
         return cap - 1;
@@ -2135,6 +2188,8 @@ const SisrTw = struct {
             s.loc_pos[c] = p;
         }
         r.dirty = true;
+        r.dirty_from = 0; // wholesale content replacement — no valid prefix to keep
+        r.suf_from = std.math.maxInt(usize); // ... and no valid suffix either
         s.cost = s.cost - old_dist + r.dist;
         if (was_empty and nodes.len > 0) {
             s.nonempty += 1;
@@ -2142,61 +2197,123 @@ const SisrTw = struct {
         } else if (!was_empty and nodes.len == 0) {
             s.nonempty -= 1;
             s.cost -= s.veh_penalty;
+            if (ri < s.min_empty_hint) s.min_empty_hint = ri;
         }
-    }
-
-    /// First-touch snapshot of route `ri` for O(touched) rollback.
-    fn touch(s: *SisrTw, ri: usize) !void {
-        if (s.touched[ri]) return;
-        s.touched[ri] = true;
-        const r = s.routes.items[ri];
-        const start = s.snap_items.items.len;
-        try s.snap_items.appendSlice(s.allocator, r.items.items);
-        try s.snaps.append(s.allocator, .{ .idx = ri, .start = start, .len = r.items.items.len, .dist = r.dist, .load = r.load });
     }
 
     fn commit(s: *SisrTw) void {
-        for (s.snaps.items) |sn| s.touched[sn.idx] = false;
-        s.snaps.clearRetainingCapacity();
-        s.snap_items.clearRetainingCapacity();
+        s.undo_ops.clearRetainingCapacity();
+        s.undo_items.clearRetainingCapacity();
     }
 
+    /// Replay the undo journal in reverse: each op splices its inverse and
+    /// restores the route's logged dist/load, adjusting cost/nonempty with the
+    /// same integer arithmetic the forward ops used (exact, so the end state is
+    /// bit-identical to what a whole-route snapshot restore produced). loc
+    /// entries compose across ops because replay is exactly reverse-ordered: a
+    /// customer removed from A and reinserted into B passes back through
+    /// NO_ROUTE to A. min_empty_hint only ever clamps down, matching the old
+    /// path: transient empties keep their clamp (the invariant is "hint <= true
+    /// lowest empty", not equality).
     fn rollback(s: *SisrTw) !void {
-        // Restore in reverse: routes created this iteration (touched but with a
-        // snapshot taken while empty) return to empty; contents return verbatim.
-        var i = s.snaps.items.len;
+        var i = s.undo_ops.items.len;
         while (i > 0) {
             i -= 1;
-            const sn = s.snaps.items[i];
-            try s.installRoute(sn.idx, s.snap_items.items[sn.start .. sn.start + sn.len]);
-            s.touched[sn.idx] = false;
+            switch (s.undo_ops.items[i]) {
+                .remove => |op| {
+                    const r = &s.routes.items[op.ri];
+                    const was_empty = r.items.items.len == 0;
+                    try r.items.insertSlice(s.allocator, op.start, s.undo_items.items[op.seg .. op.seg + op.len]);
+                    for (r.items.items[op.start..], op.start..) |c, p| {
+                        s.loc_route[c] = op.ri;
+                        s.loc_pos[c] = p;
+                    }
+                    s.cost = s.cost - r.dist + op.dist;
+                    r.dist = op.dist;
+                    r.load = op.load;
+                    r.dirty = true;
+                    r.dirty_from = 0;
+                    r.suf_from = std.math.maxInt(usize);
+                    if (was_empty) {
+                        s.nonempty += 1;
+                        s.cost += s.veh_penalty;
+                    }
+                },
+                .insert => |op| {
+                    const r = &s.routes.items[op.ri];
+                    const c = r.items.items[op.g];
+                    _ = r.items.orderedRemove(op.g);
+                    s.loc_route[c] = NO_ROUTE;
+                    for (r.items.items[op.g..], op.g..) |cc, p| s.loc_pos[cc] = p;
+                    s.cost = s.cost - r.dist + op.dist;
+                    r.dist = op.dist;
+                    r.load = op.load;
+                    r.dirty = true;
+                    r.dirty_from = 0;
+                    r.suf_from = std.math.maxInt(usize);
+                    if (r.items.items.len == 0) {
+                        s.nonempty -= 1;
+                        s.cost -= s.veh_penalty;
+                        if (op.ri < s.min_empty_hint) s.min_empty_hint = op.ri;
+                    }
+                },
+            }
         }
-        s.snaps.clearRetainingCapacity();
-        s.snap_items.clearRetainingCapacity();
+        s.undo_ops.clearRetainingCapacity();
+        s.undo_items.clearRetainingCapacity();
     }
 
-    /// Rebuild the prefix/suffix Tws arrays for route `ri` if stale. O(len).
+    /// Rebuild the prefix/suffix Tws arrays for route `ri` if stale.
+    ///
+    /// pre is rebuilt PARTIALLY: pre[k] (k <= dirty_from) summarizes items[0..k),
+    /// which every mutation since the last freshen left untouched by construction
+    /// (removeString/insertAt only ever touch positions >= their own start/gap,
+    /// and dirty_from is the min of those across possibly several mutations) — so
+    /// pre[0..dirty_from] can be kept verbatim and only pre[dirty_from+1..] needs
+    /// recomputing: O(len - dirty_from) instead of O(len).
+    ///
+    /// suf is also rebuilt PARTIALLY, but the bookkeeping differs: suf is indexed
+    /// from the start yet each entry summarizes items[i..], so an edit at position
+    /// p invalidates every entry at or BELOW p and shifts the index of every entry
+    /// above it. removeString/insertAt therefore mirror their items edit onto the
+    /// suf array itself (replaceRange / placeholder insert), which keeps every
+    /// still-valid suffix at its correct index, and track the first valid index in
+    /// `suf_from`. freshen then recomputes only suf[0..suf_from), seeding the
+    /// backward fold from the preserved suf[suf_from] instead of the depot: with
+    /// the partial-pre half above, one ruin/insert at position p costs O(len)
+    /// total (p suffix merges + len−p prefix merges) instead of O(2·len). Values
+    /// are bit-identical either way (Tws.merge is a pure function of items); the
+    /// partial-vs-full equivalence test below is the gate.
     fn freshen(s: *SisrTw, ri: usize) !void {
         const r = &s.routes.items[ri];
         if (!r.dirty) return;
         const it = r.items.items;
-        r.pre.clearRetainingCapacity();
-        r.suf.clearRetainingCapacity();
+
+        const keep = @min(r.dirty_from + 1, r.pre.items.len);
+        r.pre.items.len = keep; // shrink first — always within existing capacity
         try r.pre.ensureTotalCapacity(s.allocator, it.len + 1);
-        try r.suf.ensureTotalCapacity(s.allocator, it.len + 1);
-        r.pre.appendAssumeCapacity(Tws.depotNode(s.inst));
-        for (it, 0..) |c, i| {
+        if (keep == 0) r.pre.appendAssumeCapacity(Tws.depotNode(s.inst));
+        var i: usize = if (keep == 0) 0 else keep - 1;
+        while (i < it.len) : (i += 1) {
             const prev: usize = if (i == 0) 0 else it[i - 1];
-            r.pre.appendAssumeCapacity(Tws.merge(r.pre.items[i], @intCast(s.inst.d(prev, c)), Tws.client(s.inst, c)));
+            r.pre.appendAssumeCapacity(Tws.merge(r.pre.items[i], @intCast(s.inst.d(prev, it[i])), Tws.client(s.inst, it[i])));
         }
-        r.suf.items.len = it.len + 1;
-        r.suf.items[it.len] = Tws.depotNode(s.inst);
-        var i = it.len;
-        while (i > 0) {
-            i -= 1;
-            const next: usize = if (i + 1 == it.len) 0 else it[i + 1];
-            r.suf.items[i] = Tws.merge(Tws.client(s.inst, it[i]), @intCast(s.inst.d(it[i], next)), r.suf.items[i + 1]);
+
+        var j: usize = undefined;
+        if (r.suf.items.len == it.len + 1 and r.suf_from <= it.len) {
+            j = r.suf_from; // suf[suf_from..] preserved through the mutations
+        } else {
+            try r.suf.ensureTotalCapacity(s.allocator, it.len + 1);
+            r.suf.items.len = it.len + 1;
+            r.suf.items[it.len] = Tws.depotNode(s.inst);
+            j = it.len;
         }
+        while (j > 0) {
+            j -= 1;
+            const next: usize = if (j + 1 == it.len) 0 else it[j + 1];
+            r.suf.items[j] = Tws.merge(Tws.client(s.inst, it[j]), @intCast(s.inst.d(it[j], next)), r.suf.items[j + 1]);
+        }
+        r.suf_from = 0;
         r.dirty = false;
     }
 
@@ -2215,41 +2332,88 @@ const SisrTw = struct {
         return @as(i64, @intCast(s.inst.d(prev, c) + s.inst.d(c, next))) - @as(i64, @intCast(s.inst.d(prev, next)));
     }
 
-    /// Remove the string [start, start+len) from route `ri` (snapshotting it).
+    /// Remove the string [start, start+len) from route `ri` (journaling it).
+    /// Distance and load are updated by an exact O(len) integer delta (the arcs
+    /// broken minus the one bridging arc created, the demand of the removed
+    /// customers) instead of an O(route) arcSum/re-summation from scratch. The
+    /// delta is the same integer terms arcSum would sum, just regrouped — pure
+    /// integer +/- is exact and reorder-invariant, so this is bit-identical to
+    /// the old full-recompute path.
     fn removeString(s: *SisrTw, ri: usize, start: usize, len: usize) !void {
-        try s.touch(ri);
         const r = &s.routes.items[ri];
-        for (r.items.items[start .. start + len]) |c| {
+        try s.undo_ops.append(s.allocator, .{ .remove = .{ .ri = ri, .start = start, .seg = s.undo_items.items.len, .len = len, .dist = r.dist, .load = r.load } });
+        const old_items = r.items.items;
+        const old_len = old_items.len;
+        const prev: usize = if (start == 0) 0 else old_items[start - 1];
+        const next: usize = if (start + len == old_len) 0 else old_items[start + len];
+        // sum of the arcs being broken: prev->first_removed, internal arcs of the
+        // removed block, last_removed->next (all read off the pre-mutation array).
+        var removed_sum: u64 = s.inst.d(prev, old_items[start]);
+        for (start..start + len - 1) |i| removed_sum += s.inst.d(old_items[i], old_items[i + 1]);
+        removed_sum += s.inst.d(old_items[start + len - 1], next);
+        var removed_load: u64 = 0;
+        for (old_items[start .. start + len]) |c| {
+            removed_load += s.inst.demand[c];
             s.loc_route[c] = NO_ROUTE;
             try s.removed.append(s.allocator, c);
+            try s.undo_items.append(s.allocator, c);
         }
         try r.items.replaceRange(s.allocator, start, len, &.{});
         for (r.items.items[start..], start..) |c, p| s.loc_pos[c] = p;
+        const new_len = old_len - len;
         const old_dist = r.dist;
-        r.dist = arcSum(s.inst, r.items.items);
-        r.load = 0;
-        for (r.items.items) |c| r.load += s.inst.demand[c];
+        // new_len==0 mirrors arcSum's own empty-route special case (dist=0)
+        // rather than assuming d(0,0)==0 for an arbitrary instance's matrix.
+        r.dist = if (new_len == 0) 0 else old_dist - removed_sum + s.inst.d(prev, next);
+        r.load -= removed_load;
+        r.dirty_from = if (r.dirty) @min(r.dirty_from, start) else start;
+        // Mirror the edit onto suf so the suffixes past the removed block keep
+        // their (shifted) slots; everything from `start` on stays valid because
+        // those chains never involved the removed customers or the bridging arc.
+        if (r.suf.items.len == old_len + 1 and r.suf_from <= old_len) {
+            try r.suf.replaceRange(s.allocator, start, len, &.{});
+            r.suf_from = @max(start, r.suf_from -| len);
+        } else {
+            r.suf_from = std.math.maxInt(usize);
+        }
         r.dirty = true;
         s.cost = s.cost - old_dist + r.dist;
-        if (r.items.items.len == 0) {
+        if (new_len == 0) {
             s.nonempty -= 1;
             s.cost -= s.veh_penalty;
+            if (ri < s.min_empty_hint) s.min_empty_hint = ri;
         }
     }
 
-    /// Insert `c` at gap `g` of route `ri` (snapshotting it).
+    /// Insert `c` at gap `g` of route `ri` (journaling it). Same exact-delta
+    /// treatment as removeString: the one old bridging arc (or nothing, if the
+    /// route was empty) is replaced by two new arcs, computed as an O(1) integer
+    /// delta instead of an O(route) arcSum.
     fn insertAt(s: *SisrTw, ri: usize, g: usize, c: usize) !void {
-        try s.touch(ri);
         const r = &s.routes.items[ri];
-        const was_empty = r.items.items.len == 0;
+        try s.undo_ops.append(s.allocator, .{ .insert = .{ .ri = ri, .g = g, .dist = r.dist, .load = r.load } });
+        const old_len = r.items.items.len;
+        const was_empty = old_len == 0;
+        const prev: usize = if (g == 0) 0 else r.items.items[g - 1];
+        const next: usize = if (g == old_len) 0 else r.items.items[g];
         try r.items.insert(s.allocator, g, c);
         for (r.items.items[g..], g..) |cc, p| {
             s.loc_route[cc] = ri;
             s.loc_pos[cc] = p;
         }
         const old_dist = r.dist;
-        r.dist = arcSum(s.inst, r.items.items);
+        r.dist = if (was_empty) s.inst.d(0, c) + s.inst.d(c, 0) else old_dist + s.inst.d(prev, c) + s.inst.d(c, next) - s.inst.d(prev, next);
         r.load += s.inst.demand[c];
+        r.dirty_from = if (r.dirty) @min(r.dirty_from, g) else g;
+        // Mirror the edit onto suf: a placeholder holds c's slot (freshen always
+        // recomputes it — suf_from lands past g), and the suffixes after the gap
+        // shift up with their items, staying valid at their new indices.
+        if (r.suf.items.len == old_len + 1 and r.suf_from <= old_len) {
+            try r.suf.insert(s.allocator, g, r.suf.items[g]);
+            r.suf_from = @max(g, r.suf_from) + 1; // <= old_len+1 in this branch, no overflow
+        } else {
+            r.suf_from = std.math.maxInt(usize);
+        }
         r.dirty = true;
         s.cost = s.cost - old_dist + r.dist;
         if (was_empty) {
@@ -2263,6 +2427,34 @@ const SisrTw = struct {
     /// iterations instead empties the smallest route (fleet minimization); a
     /// fraction of strings preserve a middle block (split-string / "slack
     /// induction"), freeing two short gaps instead of one long one.
+    /// Is removing the string [start, start+len) from route `ri` guaranteed to
+    /// leave the SHORTENED route TW-feasible? On a metric matrix the answer is
+    /// always yes (the direct arc prev->next is never longer than the detour
+    /// through the removed customers, so downstream arrivals only move earlier)
+    /// and the SISR literature never checks. This engine's contract is arbitrary
+    /// DIRECTED matrices, where d(prev,next) can exceed the removed detour
+    /// (triangle-inequality violation / curl) and push every later arrival back
+    /// — silently turning a feasible route infeasible, which then gets accepted
+    /// on cost and poisons `best` (found via twprobe TP_SCALE=100000: validate()
+    /// failing on emit at specific iteration counts). Fast necessary condition
+    /// first (all terms O(len), len <= l_max); the exact O(1) Tws concat check
+    /// on freshened pre/suf only when the guard trips. Draws no RNG, so
+    /// trajectories on instances where removals are always safe are unchanged.
+    fn removalSafe(s: *SisrTw, ri: usize, start: usize, len: usize) !bool {
+        const it = s.routes.items[ri].items.items;
+        if (len == it.len) return true; // whole route removed -> empty, trivially feasible
+        const prev: usize = if (start == 0) 0 else it[start - 1];
+        const next: usize = if (start + len == it.len) 0 else it[start + len];
+        var detour: u64 = s.inst.d(prev, it[start]);
+        for (start..start + len - 1) |i| detour += s.inst.d(it[i], it[i + 1]) + s.inst.service[it[i]];
+        detour += s.inst.d(it[start + len - 1], next) + s.inst.service[it[start + len - 1]];
+        if (s.inst.d(prev, next) <= detour) return true; // arrivals can only move earlier
+        try s.freshen(ri);
+        const r = &s.routes.items[ri];
+        const merged = Tws.merge(r.pre.items[start], @intCast(s.inst.d(prev, next)), r.suf.items[start + len]);
+        return merged.tw == 0;
+    }
+
     fn ruin(s: *SisrTw, params: VrptwSisrParams, rng: std.Random) !void {
         const n = s.inst.n;
         s.removed.clearRetainingCapacity();
@@ -2320,14 +2512,16 @@ const SisrTw = struct {
                 const start = lo + rng.uintLessThan(usize, hi - lo + 1);
                 const l1 = rng.uintLessThan(usize, l + 1); // left piece 0..l
                 const l2 = l - l1;
-                // right piece first so the left piece's indices stay valid
-                if (l2 > 0) try s.removeString(ri, start + l1 + m, l2);
-                if (l1 > 0) try s.removeString(ri, start, l1);
+                // right piece first so the left piece's indices stay valid;
+                // each piece is removal-safety-checked on the current state, so
+                // the checks compose (skipped pieces just stay in the route)
+                if (l2 > 0 and try s.removalSafe(ri, start + l1 + m, l2)) try s.removeString(ri, start + l1 + m, l2);
+                if (l1 > 0 and try s.removalSafe(ri, start, l1)) try s.removeString(ri, start, l1);
             } else {
                 const lo = if (p + 1 >= l) p + 1 - l else 0;
                 const hi = @min(p, rlen - l);
                 const start = lo + rng.uintLessThan(usize, hi - lo + 1);
-                try s.removeString(ri, start, l);
+                if (try s.removalSafe(ri, start, l)) try s.removeString(ri, start, l);
             }
             strings += 1;
         }
@@ -2336,6 +2530,15 @@ const SisrTw = struct {
     /// SISR recreate: greedy cheapest-feasible insertion with blinks over the
     /// gaps of kNN-neighbour routes; falls back to an empty slot (always
     /// feasible for singleton-feasible instances).
+    ///
+    /// `params.adjacent_gaps` (default OFF) narrows the candidate gaps per
+    /// neighbour from "every gap of every distinct neighbour route" to "the two
+    /// gaps immediately next to that neighbour" — see the two branches below.
+    /// The OFF path's operation order (including the RNG draw sequence for
+    /// blinks) is unchanged from before this lever existed: the empty-slot scan
+    /// is hoisted out of the neighbour loop but draws no RNG and always ran
+    /// exactly once per removed customer either way, so it doesn't perturb the
+    /// blink stream.
     fn recreate(s: *SisrTw, params: VrptwSisrParams, rng: std.Random) !void {
         rng.shuffle(usize, s.removed.items);
         for (s.removed.items) |c| {
@@ -2344,36 +2547,59 @@ const SisrTw = struct {
             var best_g: usize = 0;
             var best_delta: i64 = std.math.maxInt(i64);
             var empty_slot: usize = NO_ROUTE;
-            for (0..s.gk + 1) |t| {
-                const nb = if (t == 0) c else s.gran[(c - 1) * s.gk + (t - 1)];
-                if (t > 0 and nb == 0) continue;
-                const ri = if (t == 0) NO_ROUTE else s.loc_route[nb];
-                if (t == 0) {
-                    // also scan one empty slot so reuse beats growth
-                    for (s.routes.items, 0..) |r, i| {
-                        if (r.items.items.len == 0) {
-                            empty_slot = i;
-                            break;
+
+            // also scan one empty slot so reuse beats growth: advance the
+            // O(1)-amortized hint past confirmed-nonempty slots (never skips a
+            // real empty one — see min_empty_hint's invariant).
+            while (s.min_empty_hint < s.routes.items.len and s.routes.items[s.min_empty_hint].items.items.len != 0) : (s.min_empty_hint += 1) {}
+            if (s.min_empty_hint < s.routes.items.len) empty_slot = s.min_empty_hint;
+
+            if (params.adjacent_gaps) {
+                for (0..s.gk) |t| {
+                    const nb = s.gran[(c - 1) * s.gk + t];
+                    if (nb == 0) continue;
+                    const ri = s.loc_route[nb];
+                    if (ri == NO_ROUTE) continue;
+                    const r = &s.routes.items[ri];
+                    if (r.load + s.inst.demand[c] > s.inst.capacity) continue;
+                    if (s.cand_mark[ri] != s.generation) {
+                        s.cand_mark[ri] = s.generation;
+                        try s.freshen(ri);
+                    }
+                    const pos = s.loc_pos[nb];
+                    for ([_]usize{ pos, pos + 1 }) |g| {
+                        if (rng.float(f64) < params.blink) continue;
+                        const delta = s.gapDelta(ri, g, c) orelse continue;
+                        if (delta < best_delta) {
+                            best_delta = delta;
+                            best_ri = ri;
+                            best_g = g;
                         }
                     }
-                    continue;
                 }
-                if (ri == NO_ROUTE) continue;
-                if (s.cand_mark[ri] == s.generation) continue;
-                s.cand_mark[ri] = s.generation;
-                const r = &s.routes.items[ri];
-                if (r.load + s.inst.demand[c] > s.inst.capacity) continue;
-                try s.freshen(ri);
-                for (0..r.items.items.len + 1) |g| {
-                    if (rng.float(f64) < params.blink) continue;
-                    const delta = s.gapDelta(ri, g, c) orelse continue;
-                    if (delta < best_delta) {
-                        best_delta = delta;
-                        best_ri = ri;
-                        best_g = g;
+            } else {
+                for (0..s.gk) |t| {
+                    const nb = s.gran[(c - 1) * s.gk + t];
+                    if (nb == 0) continue;
+                    const ri = s.loc_route[nb];
+                    if (ri == NO_ROUTE) continue;
+                    if (s.cand_mark[ri] == s.generation) continue;
+                    s.cand_mark[ri] = s.generation;
+                    const r = &s.routes.items[ri];
+                    if (r.load + s.inst.demand[c] > s.inst.capacity) continue;
+                    try s.freshen(ri);
+                    for (0..r.items.items.len + 1) |g| {
+                        if (rng.float(f64) < params.blink) continue;
+                        const delta = s.gapDelta(ri, g, c) orelse continue;
+                        if (delta < best_delta) {
+                            best_delta = delta;
+                            best_ri = ri;
+                            best_g = g;
+                        }
                     }
                 }
             }
+
             const singleton: i64 = @intCast(s.inst.d(0, c) + s.inst.d(c, 0) + s.veh_penalty);
             if (best_ri == NO_ROUTE or singleton < best_delta) {
                 const slot = if (empty_slot != NO_ROUTE) empty_slot else try s.addSlot();
@@ -2490,7 +2716,7 @@ pub fn solveVrptwSisr(allocator: std.mem.Allocator, inst: VrptwInstance, options
         } else {
             try cur.rollback();
             // Debug invariant (mirrors the CVRP engine): rollback must restore the
-            // incremental cost exactly, or the snapshot machinery is corrupting state.
+            // incremental cost exactly, or the undo journal is corrupting state.
             if (builtin.mode == .Debug) std.debug.assert(cur.cost == saved_cost);
         }
         temp *= cf;
@@ -2603,6 +2829,445 @@ pub fn solveVrptwSisrParallel(allocator: std.mem.Allocator, inst: VrptwInstance,
         allocator.free(s.ends);
     }
     return .{ .allocator = allocator, .routes = routes, .total_cost = bs.dist, .vehicles = bs.nroutes };
+}
+
+test "VRPTW SISR: exact-delta dist/load match a from-scratch recompute after every mutation" {
+    // Lever A: removeString/insertAt now update dist/load via O(1)/O(len) integer
+    // deltas instead of full arcSum/re-summation. Drive many ruin+recreate cycles,
+    // always committing (so deltas keep compounding on top of each other rather
+    // than being wiped by rollback), and after each cycle independently recompute
+    // every route's distance/load from scratch and compare.
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0xD17A);
+    const rng = prng.random();
+    const n = 40;
+    const dim = n + 1;
+    const matrix = try allocator.alloc(u32, dim * dim);
+    defer allocator.free(matrix);
+    for (0..dim) |i| {
+        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 100);
+    }
+    const demand = try allocator.alloc(u32, dim);
+    defer allocator.free(demand);
+    const ready = try allocator.alloc(u32, dim);
+    defer allocator.free(ready);
+    const due = try allocator.alloc(u32, dim);
+    defer allocator.free(due);
+    const service = try allocator.alloc(u32, dim);
+    defer allocator.free(service);
+    demand[0] = 0;
+    ready[0] = 0;
+    due[0] = 100_000;
+    service[0] = 0;
+    for (1..dim) |i| {
+        demand[i] = rng.intRangeAtMost(u32, 1, 5);
+        ready[i] = 0;
+        due[i] = 100_000; // wide windows: exercises the mutation deltas without TW rejecting most moves
+        service[i] = rng.intRangeAtMost(u32, 0, 5);
+    }
+    const inst = VrptwInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 20, .ready = ready, .due = due, .service = service };
+
+    const gk: usize = @min(@as(usize, 20), n - 1);
+    const gran = try buildNeighbors(allocator, inst, gk);
+    defer allocator.free(gran);
+
+    var s = try SisrTw.init(allocator, inst, 0, gran, gk);
+    defer s.deinit();
+    {
+        const ri = try s.addSlot();
+        const all = try allocator.alloc(usize, n);
+        defer allocator.free(all);
+        for (0..n) |i| all[i] = i + 1;
+        try s.installRoute(ri, all);
+    }
+
+    var it: usize = 0;
+    while (it < 500) : (it += 1) {
+        try s.ruin(.{}, rng);
+        try s.recreate(.{}, rng);
+        s.commit();
+        for (s.routes.items) |r| {
+            const want_dist = SisrTw.arcSum(inst, r.items.items);
+            try std.testing.expectEqual(want_dist, r.dist);
+            var want_load: u64 = 0;
+            for (r.items.items) |c| want_load += inst.demand[c];
+            try std.testing.expectEqual(want_load, r.load);
+        }
+    }
+}
+
+test "VRPTW SISR: undo-journal rollback restores the exact pre-iteration state" {
+    // Rollback used to restore whole-route snapshots; it now replays an exact
+    // undo journal in reverse. Drive ruin+recreate cycles with real time
+    // windows, curl (directed noise, so removalSafe vetoes fire) and
+    // veh_penalty > 0 (so fleet-min ruin and route creation/emptying fire),
+    // reject most iterations, and after every rollback compare the COMPLETE
+    // solution state against a deep copy taken before the iteration: per-route
+    // items/dist/load, loc_route/loc_pos, cost, nonempty. min_empty_hint is a
+    // monotone hint with invariant "<= the true lowest empty slot", not exact
+    // state — assert the invariant.
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0xBACC0FF);
+    const rng = prng.random();
+    const n = 60;
+    const dim = n + 1;
+    const matrix = try allocator.alloc(u32, dim * dim);
+    defer allocator.free(matrix);
+    for (0..dim) |i| {
+        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 300);
+    }
+    const demand = try allocator.alloc(u32, dim);
+    defer allocator.free(demand);
+    const ready = try allocator.alloc(u32, dim);
+    defer allocator.free(ready);
+    const due = try allocator.alloc(u32, dim);
+    defer allocator.free(due);
+    const service = try allocator.alloc(u32, dim);
+    defer allocator.free(service);
+    demand[0] = 0;
+    ready[0] = 0;
+    due[0] = 500_000;
+    service[0] = 0;
+    for (1..dim) |i| {
+        demand[i] = rng.intRangeAtMost(u32, 1, 5);
+        ready[i] = rng.intRangeAtMost(u32, 0, 800);
+        due[i] = ready[i] + rng.intRangeAtMost(u32, 300, 2000);
+        service[i] = rng.intRangeAtMost(u32, 0, 10);
+    }
+    const inst = VrptwInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 25, .ready = ready, .due = due, .service = service };
+
+    const gk: usize = @min(@as(usize, 20), n - 1);
+    const gran = try buildNeighbors(allocator, inst, gk);
+    defer allocator.free(gran);
+
+    var s = try SisrTw.init(allocator, inst, 500, gran, gk);
+    defer s.deinit();
+    {
+        // seed: one customer per route (always TW-feasible), the engine merges from there
+        for (1..dim) |c| {
+            const ri = try s.addSlot();
+            try s.installRoute(ri, &.{c});
+        }
+    }
+    const params = VrptwSisrParams{ .veh_penalty = 500 };
+
+    // deep-copy buffers
+    var saved_items: std.ArrayList(usize) = .empty;
+    defer saved_items.deinit(allocator);
+    var saved_lens: std.ArrayList(usize) = .empty;
+    defer saved_lens.deinit(allocator);
+    var saved_dist: std.ArrayList(u64) = .empty;
+    defer saved_dist.deinit(allocator);
+    var saved_load: std.ArrayList(u64) = .empty;
+    defer saved_load.deinit(allocator);
+    const saved_loc_route = try allocator.alloc(usize, dim);
+    defer allocator.free(saved_loc_route);
+    const saved_loc_pos = try allocator.alloc(usize, dim);
+    defer allocator.free(saved_loc_pos);
+
+    var it: usize = 0;
+    while (it < 400) : (it += 1) {
+        // snapshot the full state (test-side, from-scratch)
+        saved_items.clearRetainingCapacity();
+        saved_lens.clearRetainingCapacity();
+        saved_dist.clearRetainingCapacity();
+        saved_load.clearRetainingCapacity();
+        for (s.routes.items) |r| {
+            try saved_items.appendSlice(allocator, r.items.items);
+            try saved_lens.append(allocator, r.items.items.len);
+            try saved_dist.append(allocator, r.dist);
+            try saved_load.append(allocator, r.load);
+        }
+        @memcpy(saved_loc_route, s.loc_route);
+        @memcpy(saved_loc_pos, s.loc_pos);
+        const saved_cost = s.cost;
+        const saved_nonempty = s.nonempty;
+        const saved_nroutes = s.routes.items.len;
+
+        try s.ruin(params, rng);
+        try s.recreate(params, rng);
+
+        if (rng.float(f64) < 0.7) {
+            try s.rollback();
+            // routes added this iteration must have rolled back to empty
+            try std.testing.expectEqual(saved_nonempty, s.nonempty);
+            try std.testing.expectEqual(saved_cost, s.cost);
+            var off: usize = 0;
+            for (0..saved_nroutes) |ri| {
+                const r = s.routes.items[ri];
+                try std.testing.expectEqualSlices(usize, saved_items.items[off .. off + saved_lens.items[ri]], r.items.items);
+                try std.testing.expectEqual(saved_dist.items[ri], r.dist);
+                try std.testing.expectEqual(saved_load.items[ri], r.load);
+                off += saved_lens.items[ri];
+            }
+            for (saved_nroutes..s.routes.items.len) |ri| {
+                try std.testing.expectEqual(@as(usize, 0), s.routes.items[ri].items.items.len);
+            }
+            for (1..dim) |c| {
+                try std.testing.expectEqual(saved_loc_route[c], s.loc_route[c]);
+                if (s.loc_route[c] != SisrTw.NO_ROUTE) try std.testing.expectEqual(saved_loc_pos[c], s.loc_pos[c]);
+            }
+            // min_empty_hint invariant: never past the true lowest empty slot
+            var lowest_empty: usize = s.routes.items.len;
+            for (s.routes.items, 0..) |r, ri| {
+                if (r.items.items.len == 0) {
+                    lowest_empty = ri;
+                    break;
+                }
+            }
+            try std.testing.expect(s.min_empty_hint <= lowest_empty);
+        } else {
+            s.commit();
+        }
+    }
+}
+
+test "VRPTW SISR: partial freshen matches a full from-scratch pre/suf rebuild" {
+    // Lever B: freshen() rebuilds pre partially (from dirty_from) and suf
+    // partially (head below suf_from, seeded from the mutation-mirrored tail).
+    // Drive many ruin+recreate cycles and, before EVERY freshen call would fire
+    // (i.e. right after mutating, while a route is still dirty), independently
+    // rebuild pre/suf from scratch via the exact pre-Lever-B algorithm and compare
+    // entry-by-entry against what freshen() produces. This is a stronger check
+    // than the Solomon/probe canaries alone: it validates every intermediate
+    // dirty route, not just the final emitted routes.
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0xF12E5);
+    const rng = prng.random();
+    const n = 50;
+    const dim = n + 1;
+    const matrix = try allocator.alloc(u32, dim * dim);
+    defer allocator.free(matrix);
+    for (0..dim) |i| {
+        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 200);
+    }
+    const demand = try allocator.alloc(u32, dim);
+    defer allocator.free(demand);
+    const ready = try allocator.alloc(u32, dim);
+    defer allocator.free(ready);
+    const due = try allocator.alloc(u32, dim);
+    defer allocator.free(due);
+    const service = try allocator.alloc(u32, dim);
+    defer allocator.free(service);
+    demand[0] = 0;
+    ready[0] = 0;
+    due[0] = 200_000;
+    service[0] = 0;
+    for (1..dim) |i| {
+        demand[i] = rng.intRangeAtMost(u32, 1, 5);
+        ready[i] = rng.intRangeAtMost(u32, 0, 500);
+        due[i] = ready[i] + rng.intRangeAtMost(u32, 100, 1000);
+        service[i] = rng.intRangeAtMost(u32, 0, 10);
+    }
+    const inst = VrptwInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 20, .ready = ready, .due = due, .service = service };
+
+    const gk: usize = @min(@as(usize, 20), n - 1);
+    const gran = try buildNeighbors(allocator, inst, gk);
+    defer allocator.free(gran);
+
+    var s = try SisrTw.init(allocator, inst, 0, gran, gk);
+    defer s.deinit();
+    {
+        const ri = try s.addSlot();
+        const all = try allocator.alloc(usize, n);
+        defer allocator.free(all);
+        for (0..n) |i| all[i] = i + 1;
+        try s.installRoute(ri, all);
+    }
+
+    // scratch buffers for the reference (full, from-scratch) rebuild
+    var ref_pre: std.ArrayList(Tws) = .empty;
+    defer ref_pre.deinit(allocator);
+    var ref_suf: std.ArrayList(Tws) = .empty;
+    defer ref_suf.deinit(allocator);
+
+    var it: usize = 0;
+    while (it < 300) : (it += 1) {
+        try s.ruin(.{}, rng);
+        try s.recreate(.{}, rng);
+        for (s.routes.items, 0..) |*r, ri| {
+            if (!r.dirty) continue; // freshen() is a no-op here anyway
+            const items = r.items.items;
+            // reference: exactly the pre-Lever-B full-rebuild algorithm
+            ref_pre.clearRetainingCapacity();
+            ref_suf.clearRetainingCapacity();
+            try ref_pre.ensureTotalCapacity(allocator, items.len + 1);
+            try ref_suf.ensureTotalCapacity(allocator, items.len + 1);
+            ref_pre.appendAssumeCapacity(Tws.depotNode(inst));
+            for (items, 0..) |c, i| {
+                const prev: usize = if (i == 0) 0 else items[i - 1];
+                ref_pre.appendAssumeCapacity(Tws.merge(ref_pre.items[i], @intCast(inst.d(prev, c)), Tws.client(inst, c)));
+            }
+            ref_suf.items.len = items.len + 1;
+            ref_suf.items[items.len] = Tws.depotNode(inst);
+            var k = items.len;
+            while (k > 0) {
+                k -= 1;
+                const next: usize = if (k + 1 == items.len) 0 else items[k + 1];
+                ref_suf.items[k] = Tws.merge(Tws.client(inst, items[k]), @intCast(inst.d(items[k], next)), ref_suf.items[k + 1]);
+            }
+
+            try s.freshen(ri);
+            try std.testing.expectEqual(ref_pre.items.len, r.pre.items.len);
+            try std.testing.expectEqual(ref_suf.items.len, r.suf.items.len);
+            for (ref_pre.items, r.pre.items) |want, got| try std.testing.expectEqual(want, got);
+            for (ref_suf.items, r.suf.items) |want, got| try std.testing.expectEqual(want, got);
+        }
+        s.commit();
+    }
+}
+
+test "VRPTW SISR: adjacent_gaps recreate stays feasible and self-consistent" {
+    // Lever D, ON path: cost matches validate() (the reported total_cost equals
+    // an independent full recompute), and the OFF path stays available and
+    // distinct as a separate code path (both are exercised on the same fixture).
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0xADEF);
+    const rng = prng.random();
+    for (0..6) |trial| {
+        const n = 4 + rng.uintLessThan(usize, 30);
+        const dim = n + 1;
+        const matrix = try allocator.alloc(u32, dim * dim);
+        defer allocator.free(matrix);
+        for (0..dim) |i| {
+            for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 60);
+        }
+        const demand = try allocator.alloc(u32, dim);
+        defer allocator.free(demand);
+        const ready = try allocator.alloc(u32, dim);
+        defer allocator.free(ready);
+        const due = try allocator.alloc(u32, dim);
+        defer allocator.free(due);
+        const service = try allocator.alloc(u32, dim);
+        defer allocator.free(service);
+        demand[0] = 0;
+        ready[0] = 0;
+        due[0] = 100_000;
+        service[0] = 0;
+        for (1..dim) |i| {
+            demand[i] = rng.intRangeAtMost(u32, 1, 5);
+            ready[i] = rng.intRangeAtMost(u32, 0, 300);
+            due[i] = ready[i] + rng.intRangeAtMost(u32, 80, 400);
+            service[i] = rng.intRangeAtMost(u32, 1, 10);
+        }
+        const inst = VrptwInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 12, .ready = ready, .due = due, .service = service };
+        var on = try solveVrptwSisr(allocator, inst, .{ .seed = trial + 1 }, .{ .iters = 3000, .adjacent_gaps = true });
+        defer on.deinit();
+        const checked = validate(inst, on.routes) orelse return error.TestInfeasibleResult;
+        try std.testing.expectEqual(on.total_cost, checked);
+        try std.testing.expectEqual(on.vehicles, on.routes.len);
+    }
+}
+
+test "VRPTW SISR: string removal is feasibility-checked under triangle-inequality violations" {
+    // The removal-safety bug: on directed matrices, removing a string can make
+    // the SHORTENED route TW-infeasible (direct arc prev->next longer than the
+    // removed detour delays every downstream arrival). Route [1,2,3] is feasible,
+    // but d(1,3)=1000 >> d(1,2)+d(2,3)=20, so cutting customer 2 must be vetoed
+    // when 3's window is tight — and allowed when it is loose.
+    const allocator = std.testing.allocator;
+    const n = 3;
+    const dim = n + 1;
+    var matrix = [_]u32{50} ** (dim * dim);
+    const at = struct {
+        fn set(m: []u32, a: usize, b: usize, v: u32) void {
+            m[a * dim + b] = v;
+        }
+    };
+    for (0..dim) |i| matrix[i * dim + i] = 0;
+    at.set(&matrix, 0, 1, 10);
+    at.set(&matrix, 1, 2, 10);
+    at.set(&matrix, 2, 3, 10);
+    at.set(&matrix, 3, 0, 10);
+    at.set(&matrix, 1, 3, 1000); // curl: direct arc dwarfs the detour through 2
+    at.set(&matrix, 0, 3, 20); // singleton stays feasible
+    const demand = [_]u32{ 0, 1, 1, 1 };
+    const ready = [_]u32{0} ** dim;
+    const service = [_]u32{0} ** dim;
+
+    for ([_]struct { due3: u32, safe: bool }{
+        .{ .due3 = 100, .safe = false }, // arriving via d(1,3)=1000 is late -> veto
+        .{ .due3 = 5000, .safe = true }, // guard trips, exact Tws check clears it
+    }) |case| {
+        const due = [_]u32{ 100_000, 100_000, 100_000, case.due3 };
+        const inst = VrptwInstance{ .n = n, .matrix = &matrix, .demand = &demand, .capacity = 10, .ready = &ready, .due = &due, .service = &service };
+        const gran = try buildNeighbors(allocator, inst, 2);
+        defer allocator.free(gran);
+        var s = try SisrTw.init(allocator, inst, 0, gran, 2);
+        defer s.deinit();
+        const ri = try s.addSlot();
+        try s.installRoute(ri, &.{ 1, 2, 3 });
+        try std.testing.expect(scheduleSlice(inst, &.{ 1, 2, 3 }) != null); // sane fixture
+        try std.testing.expectEqual(case.safe, try s.removalSafe(ri, 1, 1)); // cut customer 2
+        try std.testing.expect(try s.removalSafe(ri, 0, 1)); // cutting customer 1 is metric-safe
+    }
+}
+
+test "VRPTW SISR: emits valid solutions in the tight-window curl regime" {
+    // Engine-level regression for the same bug: windows narrow relative to arc
+    // lengths + heavy one-sided per-arc noise. Replicates examples/twprobe.zig's
+    // generator EXACTLY (same PRNG seed and draw order) at TP_SCALE=100000,
+    // TP_N=100 — verified to make the PRE-FIX engine emit a TW-infeasible best
+    // at 20k iters (its own final validate() returned error.Infeasible).
+    const allocator = std.testing.allocator;
+    {
+        var prng = std.Random.DefaultPrng.init(0xC0FFEE_1000);
+        const rng = prng.random();
+        const n = 100;
+        const dim = n + 1;
+        const matrix = try allocator.alloc(u32, dim * dim);
+        defer allocator.free(matrix);
+        const xs = try allocator.alloc(f64, dim);
+        defer allocator.free(xs);
+        const ys = try allocator.alloc(f64, dim);
+        defer allocator.free(ys);
+        for (0..dim) |i| {
+            xs[i] = rng.float(f64) * 100_000.0;
+            ys[i] = rng.float(f64) * 100_000.0;
+        }
+        for (0..dim) |a| {
+            for (0..dim) |b| {
+                if (a == b) {
+                    matrix[a * dim + b] = 0;
+                    continue;
+                }
+                const dx = xs[a] - xs[b];
+                const dy = ys[a] - ys[b];
+                const base: i64 = @intFromFloat(@round(@sqrt(dx * dx + dy * dy)));
+                const noise = rng.intRangeAtMost(i64, 0, @divTrunc(base, 5) + 1);
+                matrix[a * dim + b] = @intCast(@max(base + noise, 1));
+            }
+        }
+        const demand = try allocator.alloc(u32, dim);
+        defer allocator.free(demand);
+        const ready = try allocator.alloc(u32, dim);
+        defer allocator.free(ready);
+        const due = try allocator.alloc(u32, dim);
+        defer allocator.free(due);
+        const service = try allocator.alloc(u32, dim);
+        defer allocator.free(service);
+        demand[0] = 0;
+        ready[0] = 0;
+        service[0] = 0;
+        var horizon_floor: u64 = 0;
+        for (1..dim) |c| {
+            demand[c] = rng.intRangeAtMost(u32, 1, 10);
+            const fwd = matrix[0 * dim + c];
+            const bwd = matrix[c * dim + 0];
+            const r = rng.intRangeAtMost(u32, 0, 50_000);
+            const width = rng.intRangeAtMost(u32, 3_000, 20_000);
+            ready[c] = r;
+            due[c] = @max(fwd, r) + width;
+            service[c] = rng.intRangeAtMost(u32, 0, 50);
+            horizon_floor = @max(horizon_floor, @as(u64, due[c]) + service[c] + bwd);
+        }
+        due[0] = @intCast(horizon_floor + 10);
+        const inst = VrptwInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 200, .ready = ready, .due = due, .service = service };
+        var res = try solveVrptwSisr(allocator, inst, .{ .seed = 12345 }, .{ .iters = 20_000 });
+        defer res.deinit();
+        const checked = validate(inst, res.routes) orelse return error.TestInfeasibleResult;
+        try std.testing.expectEqual(res.total_cost, checked);
+    }
 }
 
 test "VRPTW SISR parallel: best-of-K is feasible and no worse than one chain" {

@@ -28,6 +28,13 @@ pub const DistanceOracle = struct {
             };
         }
 
+        // jv_transform falls through to the budget-gated cache below, like the
+        // coordinate kinds: small transforms materialize (2n)^2 once and keep
+        // the straight-matrix-read hot path (measured ~20% faster than paying
+        // the per-lookup transform branches when the cache fits), large ones
+        // run off the borrowed n^2 matrix and never spend the 16n^2 B. Either
+        // way initFullMatrix's second copy is gone.
+
         // Budget is a byte/L3 figure; the matrix stores u32 weights. Convert to
         // a weight count by integer division (a weight fits only if the whole
         // u32 fits), which avoids overflowing total*elem_size for large n.
@@ -82,7 +89,7 @@ pub const DistanceOracle = struct {
         const base = if (self.matrix.len != 0)
             self.matrix[a * self.p.dimension + b]
         else base_blk: {
-            if (self.p.distance_kind != .explicit_full_matrix) self.uncached_coordinate_distances += 1;
+            if (self.p.distance_kind != .explicit_full_matrix and self.p.distance_kind != .jv_transform) self.uncached_coordinate_distances += 1;
             break :base_blk self.p.distanceUnchecked(a, b);
         };
         return base;

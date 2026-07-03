@@ -108,28 +108,53 @@ pub fn buildCvrpNeighbors(allocator: std.mem.Allocator, inst: CvrpInstance, k: u
     const gran = try allocator.alloc(usize, n * k);
     @memset(gran, 0);
     const kk = @min(k, if (n > 1) n - 1 else 0);
-    const idx = try allocator.alloc(usize, n);
-    defer allocator.free(idx);
-    const keyc = try allocator.alloc(u64, n + 1);
-    defer allocator.free(keyc);
+    const top_idx = try allocator.alloc(usize, kk);
+    defer allocator.free(top_idx);
+    const top_key = try allocator.alloc(u64, kk);
+    defer allocator.free(top_key);
     for (1..n + 1) |c| {
-        var m: usize = 0;
-        for (1..n + 1) |j| {
-            if (j == c) continue;
-            keyc[j] = inst.d(c, j) + inst.d(j, c);
-            idx[m] = j;
-            m += 1;
-        }
-        std.sort.pdq(usize, idx[0..m], keyc, struct {
-            fn lt(key: []const u64, a: usize, b: usize) bool {
-                // index tiebreak: canonical neighbour order independent of the unstable
-                // pdq pivot, so equidistant neighbours never depend on sort internals.
-                return key[a] < key[b] or (key[a] == key[b] and a < b);
-            }
-        }.lt);
-        for (0..kk) |i| gran[(c - 1) * k + i] = idx[i];
+        const cnt = cvrpTopKInsert(top_idx, top_key, kk, n, inst, c);
+        for (0..cnt) |i| gran[(c - 1) * k + i] = top_idx[i];
     }
     return gran;
+}
+
+/// Bounded top-k selection over d(c,j)+d(j,c), sorted ascending by (distance, then
+/// index) — an explicit, canonical tiebreak (this already matched the old full-sort
+/// comparator here, so this is a pure algorithmic swap for CVRP: O(n) key evals +
+/// O(kk) insertion-sorted maintenance per improving candidate instead of an
+/// O(n log n) full sort of which only the first kk entries were ever used). Same
+/// selection contract as vrptw.zig's topKInsert, duplicated here because the two
+/// live on different Instance types.
+fn cvrpTopKInsert(top_idx: []usize, top_key: []u64, kk: usize, n: usize, inst: CvrpInstance, c: usize) usize {
+    var cnt: usize = 0;
+    for (1..n + 1) |j| {
+        if (j == c) continue;
+        const key = inst.d(c, j) + inst.d(j, c);
+        if (cnt < kk) {
+            var pos = cnt;
+            while (pos > 0 and (top_key[pos - 1] > key or (top_key[pos - 1] == key and top_idx[pos - 1] > j))) : (pos -= 1) {}
+            var t = cnt;
+            while (t > pos) : (t -= 1) {
+                top_key[t] = top_key[t - 1];
+                top_idx[t] = top_idx[t - 1];
+            }
+            top_key[pos] = key;
+            top_idx[pos] = j;
+            cnt += 1;
+        } else if (kk > 0 and (key < top_key[kk - 1] or (key == top_key[kk - 1] and j < top_idx[kk - 1]))) {
+            var pos = kk - 1;
+            while (pos > 0 and (top_key[pos - 1] > key or (top_key[pos - 1] == key and top_idx[pos - 1] > j))) : (pos -= 1) {}
+            var t = kk - 1;
+            while (t > pos) : (t -= 1) {
+                top_key[t] = top_key[t - 1];
+                top_idx[t] = top_idx[t - 1];
+            }
+            top_key[pos] = key;
+            top_idx[pos] = j;
+        }
+    }
+    return cnt;
 }
 
 /// Education = Split the giant under the fleet cap, then drive to a local optimum.
@@ -1924,4 +1949,80 @@ pub fn validate(inst: CvrpInstance, routes: []const []const usize) ?u64 {
     }
     for (1..inst.n + 1) |c| if (!seen[c]) return null; // every customer served
     return total;
+}
+
+/// Reference kNN builder: the pre-Lever-C algorithm (full sort under the same
+/// (distance, then index) comparator this file already used). Kept ONLY for the
+/// A/B equivalence test below.
+fn buildCvrpNeighborsFullSortRef(allocator: std.mem.Allocator, inst: CvrpInstance, k: usize) ![]usize {
+    const n = inst.n;
+    const gran = try allocator.alloc(usize, n * k);
+    @memset(gran, 0);
+    const kk = @min(k, if (n > 1) n - 1 else 0);
+    const idx = try allocator.alloc(usize, n);
+    defer allocator.free(idx);
+    const keyc = try allocator.alloc(u64, n + 1);
+    defer allocator.free(keyc);
+    for (1..n + 1) |c| {
+        var m: usize = 0;
+        for (1..n + 1) |j| {
+            if (j == c) continue;
+            keyc[j] = inst.d(c, j) + inst.d(j, c);
+            idx[m] = j;
+            m += 1;
+        }
+        std.sort.pdq(usize, idx[0..m], keyc, struct {
+            fn lt(key: []const u64, a: usize, b: usize) bool {
+                return key[a] < key[b] or (key[a] == key[b] and a < b);
+            }
+        }.lt);
+        for (0..kk) |i| gran[(c - 1) * k + i] = idx[i];
+    }
+    return gran;
+}
+
+test "CVRP kNN: partial-selection matches full-sort byte-for-byte (both already tiebreak-canonical)" {
+    // Unlike VRPTW's builder, this one's OLD full-sort comparator already broke
+    // ties by index, so the partial-selection swap must be byte-identical here —
+    // no canonicalization decision needed, distinct from ties or not.
+    const allocator = std.testing.allocator;
+
+    // distinct distances
+    {
+        const n = 25;
+        const dim = n + 1;
+        const matrix = try allocator.alloc(u32, dim * dim);
+        defer allocator.free(matrix);
+        for (0..dim) |i| for (0..dim) |j| {
+            matrix[i * dim + j] = if (i == j) 0 else @intCast(1 + i * dim + j);
+        };
+        const zeros = try allocator.alloc(u32, dim);
+        defer allocator.free(zeros);
+        @memset(zeros, 0);
+        const inst = CvrpInstance{ .n = n, .matrix = matrix, .demand = zeros, .capacity = 1 };
+        const old = try buildCvrpNeighborsFullSortRef(allocator, inst, 20);
+        defer allocator.free(old);
+        const new = try buildCvrpNeighbors(allocator, inst, 20);
+        defer allocator.free(new);
+        try std.testing.expectEqualSlices(usize, old, new);
+    }
+    // heavy ties
+    {
+        const n = 18;
+        const dim = n + 1;
+        const matrix = try allocator.alloc(u32, dim * dim);
+        defer allocator.free(matrix);
+        for (0..dim) |i| for (0..dim) |j| {
+            matrix[i * dim + j] = if (i == j) 0 else @as(u32, @intCast((i % 3) + (j % 3) + 1));
+        };
+        const zeros = try allocator.alloc(u32, dim);
+        defer allocator.free(zeros);
+        @memset(zeros, 0);
+        const inst = CvrpInstance{ .n = n, .matrix = matrix, .demand = zeros, .capacity = 1 };
+        const old = try buildCvrpNeighborsFullSortRef(allocator, inst, 10);
+        defer allocator.free(old);
+        const new = try buildCvrpNeighbors(allocator, inst, 10);
+        defer allocator.free(new);
+        try std.testing.expectEqualSlices(usize, old, new);
+    }
 }

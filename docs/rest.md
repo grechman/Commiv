@@ -100,6 +100,38 @@ curl -X POST http://127.0.0.1:8080/solve/atsp -d '{
 # {"cost":4,"tour":[0,1,2,3]}
 ```
 
+## Binary matrix framing (CMV1)
+
+The matrix is 90%+ of a large body, and JSON-parsing it dominates request
+handling from n≈2000 (at n=5000 the matrix alone is ~175 MB of JSON text).
+Every `/solve/*` path also accepts a binary framing on the **same URL** —
+the server sniffs the leading magic, no header or path changes needed:
+
+```
+"CMV1"                      4 bytes, magic
+header_len                  u32, little-endian
+header                      header_len bytes: the endpoint's JSON body, minus "matrix"
+matrix                      dim*dim u32 values, little-endian, row-major
+```
+
+`dim` is inferred from the byte count (which must be exactly `4*dim*dim`);
+for CVRP/VRPTW `dim = n+1` with the depot at index 0, for ATSP `dim = n`.
+Responses and results are byte-identical to the JSON encoding — same seed,
+same routes. Measured at n=2000 (moscow-2000): body 22.2 → 16.0 MB,
+server peak RSS 75 → 47 MB, and the parse stage drops from ~0.25 s of JSON
+to one memcpy.
+
+Python with numpy (`matrix` any integer array-like):
+
+```python
+import json, struct, numpy as np, requests
+
+header = json.dumps({"demand": demand, "capacity": 10, "seed": 1}).encode()
+body = (b"CMV1" + struct.pack("<I", len(header)) + header
+        + np.ascontiguousarray(matrix, dtype="<u4").tobytes())
+resp = requests.post("http://127.0.0.1:8080/solve/cvrp", data=body)
+```
+
 ## Clients
 
 Python (or use the native binding in [`bindings/python/`](../bindings/python/),
