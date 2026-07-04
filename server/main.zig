@@ -124,6 +124,7 @@ const CvrpRequest = struct {
     seed: u64 = 1,
     iters: u64 = 0, // SISR iterations; 0 = default
     threads: u32 = 1, // >1 = parallel islands (result depends on the count)
+    marathon: bool = false, // long-run constants profile (active at iters >= 1M)
 };
 
 fn solveCvrp(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []const u8) !void {
@@ -137,6 +138,7 @@ fn solveCvrp(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []co
     const inst = commiv.CvrpInstance{ .n = n, .matrix = flat, .demand = r.demand, .capacity = r.capacity };
     var params: commiv.CvrpSisrParams = .{};
     if (r.iters != 0) params.iters = @intCast(r.iters);
+    params.marathon = r.marathon;
     const opts: commiv.SolveOptions = .{ .seed = r.seed };
 
     const result = blk: {
@@ -168,6 +170,13 @@ const VrptwRequest = struct {
     rounds: u64 = 0, // ILS engine only
     restarts: u64 = 0, // ILS engine only
     veh_penalty: u64 = 0,
+    // Long-run quality levers (see VrptwSisrParams); all default off, best
+    // measured together at iters >= ~1M ("combo"): polish + stress_rate 0.5 +
+    // tabu_tenure 10000 + marathon.
+    polish: bool = false,
+    stress_rate: f64 = 0.0,
+    tabu_tenure: u64 = 0,
+    marathon: bool = false,
 };
 
 fn solveVrptw(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []const u8) !void {
@@ -200,6 +209,10 @@ fn solveVrptw(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []c
         }
         var params: commiv.VrptwSisrParams = .{ .veh_penalty = r.veh_penalty };
         if (r.iters != 0) params.iters = @intCast(r.iters);
+        params.polish = r.polish;
+        params.stress_rate = r.stress_rate;
+        params.tabu_tenure = @intCast(r.tabu_tenure);
+        params.marathon = r.marathon;
         if (r.threads > 1)
             break :blk commiv.solveVrptwSisrParallel(arena, inst, .{ .seed = r.seed }, params, r.threads) catch |err|
                 return respondSolverError(req, err);

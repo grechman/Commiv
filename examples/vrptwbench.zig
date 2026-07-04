@@ -48,6 +48,13 @@ pub fn main(init: std.process.Init) !void {
         const use_sisr = std.mem.eql(u8, env.get("VT_ENGINE") orelse "ils", "sisr");
         const sisr_iters = try std.fmt.parseInt(usize, env.get("VT_ITERS") orelse "300000", 10);
         const adjacent_gaps = std.mem.eql(u8, env.get("VT_ADJ_GAPS") orelse "0", "1");
+        // Long-run quality levers; VT_COMBO=1 = the measured-best set (polish +
+        // stress 0.5 + tabu 10000 + marathon), individual knobs override.
+        const combo = std.mem.eql(u8, env.get("VT_COMBO") orelse "0", "1");
+        const polish = combo or std.mem.eql(u8, env.get("VT_POLISH") orelse "0", "1");
+        const stress = try std.fmt.parseFloat(f64, env.get("VT_STRESS") orelse if (combo) "0.5" else "0");
+        const tabu = try std.fmt.parseInt(usize, env.get("VT_TABU") orelse if (combo) "10000" else "0", 10);
+        const marathon = combo or std.mem.eql(u8, env.get("VT_MARATHON") orelse "0", "1");
         const t0 = nanos();
         var res = if (use_hgs) try commiv.solveVrptwHgs(allocator, inst, solve_opts, .{
             .mu = try std.fmt.parseInt(usize, env.get("VT_MU") orelse "25", 10),
@@ -55,7 +62,7 @@ pub fn main(init: std.process.Init) !void {
             .generations = try std.fmt.parseInt(usize, env.get("VT_GENS") orelse "30", 10),
             .veh_penalty = veh_penalty,
         }) else if (use_sisr)
-            try commiv.solveVrptwSisr(allocator, inst, solve_opts, .{ .iters = sisr_iters, .veh_penalty = veh_penalty, .adjacent_gaps = adjacent_gaps })
+            try commiv.solveVrptwSisr(allocator, inst, solve_opts, .{ .iters = sisr_iters, .veh_penalty = veh_penalty, .adjacent_gaps = adjacent_gaps, .polish = polish, .stress_rate = stress, .tabu_tenure = tabu, .marathon = marathon })
         else
             try commiv.solveVrptw(allocator, inst, solve_opts, .{ .rounds = rounds, .restarts = restarts, .veh_penalty = veh_penalty });
         defer res.deinit();

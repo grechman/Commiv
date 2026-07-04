@@ -17,7 +17,8 @@ const commiv = @import("commiv");
 //      cost of pretending the roads are undirected.
 //
 // Env: RB_DIR (default vendor/road), RB_FILES (comma list, default moscow-100),
-//      RB_ITERS (SISR iterations), RB_THREADS, RB_SEED.
+//      RB_ITERS (SISR iterations), RB_THREADS, RB_SEED, RB_MARATHON (long-run
+//      constants profile, active at RB_ITERS >= 1M).
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const env = init.environ_map;
@@ -47,7 +48,7 @@ pub fn main(init: std.process.Init) !void {
         // 1. conservativeness / curl decomposition (the scientific gate)
         const cons = try commiv.conservativeness(allocator, road.matrix, dim);
 
-        const sp = commiv.CvrpSisrParams{ .iters = iters };
+        const sp = commiv.CvrpSisrParams{ .iters = iters, .marathon = std.mem.eql(u8, env.get("RB_MARATHON") orelse "0", "1") };
         const solve_opts = commiv.SolveOptions{
             .seed = seed,
             .budget = .{ .trials = @min(dim, 100), .trial_extension_factor = 2, .max_passes = 60 },

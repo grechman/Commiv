@@ -100,6 +100,14 @@ curl -X POST http://127.0.0.1:8080/solve/atsp -d '{
 # {"cost":4,"tour":[0,1,2,3]}
 ```
 
+## Long-run quality levers (VRPTW)
+
+`POST /solve/vrptw` accepts four optional fields, all default-off: `polish` (bool),
+`stress_rate` (float), `tabu_tenure` (int), `marathon` (bool). Measured best together
+("combo": `polish=true, stress_rate=0.5, tabu_tenure=10000, marathon=true`) on runs of
+1M+ iterations (~30 s and up at n=1000); below that budget leave them off. `marathon`
+is also accepted by `/solve/cvrp`. Same seed + same flags stays fully deterministic.
+
 ## Binary matrix framing (CMV1)
 
 The matrix is 90%+ of a large body, and JSON-parsing it dominates request
