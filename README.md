@@ -508,8 +508,35 @@ with nyc-2000 TW its biggest win (−2.5%) and two deep directed+windowed cells 
 holding for commiv (nyc-1000 TW, berlin-2000 TW). Directedness sets how *long* commiv's
 lead survives: the more asymmetric and windowed the cell, the further out the crossing.
 
+### Reclaiming the minutes regime (opt-in VRPTW levers)
+
+The table above is the **baseline** engine. commiv also ships an opt-in set of long-run
+levers — a post-accept local-search polish (FILO-style education), stress-guided ruin
+centers, a reinsertion tabu, and a colder large-neighborhood "marathon" profile — all off
+by default and enabled per call (`polish`, `stress_rate`, `tabu_tenure`, `marathon`; or
+`VT_COMBO=1` in the bench). They spend per-iteration wall, so they lose in the seconds
+regime and exist for the minutes budgets where the table above handed cells to PyVRP. With
+them on, the deep directed+windowed cells flip back:
+
+| n=1000 TW | commiv (levers on) | PyVRP | margin |
+|---|---|---|---:|
+| berlin | **151,417** @ 132 s | 151,948 @ 150 s | +0.35% |
+| nyc | **132,996** @ 151 s | 135,054 @ 150 s | +1.52% |
+| moscow | 229,544 @ 141 s | **227,581** @ 341 s | −0.86% |
+
+Two of the three long-budget TW cells come back to commiv at equal-or-less wall. Moscow —
+the most-tuned instance in the suite — is the one PyVRP keeps: its HGS reaches a basin the
+SISR trajectory plateaus above (10 M iterations move it only from 229,511 to 229,544). The
+levers scale where there is slack to recover: at n=2000 they take nyc TW to 213,500 (−3.0 %
+and two vehicles under baseline), and at n=5000 they even take *Moscow* TW to 866,679
+(−0.7 %, one vehicle fewer) at near-equal wall — the larger, less-converged instances
+benefit most. They are VRPTW-only: the same four ported to the CVRP engine measured dead
+(an already-converged, window-free search has no slack to recover), so the CVRP rows above
+are unaffected.
+
 Reproduce: `tools/competitors/pyvrp_road.py <instance.road> {cvrp|vrptw} <seconds>`; the
-NYC and Berlin matrices live in `vendor/road/` next to Moscow.
+NYC and Berlin matrices live in `vendor/road/` next to Moscow. The levers are the
+`solveVrptwSisr` flags above (see [`docs/rest.md`](docs/rest.md) for the REST fields).
 
 ---
 
