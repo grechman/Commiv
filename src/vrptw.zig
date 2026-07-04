@@ -2054,6 +2054,14 @@ pub const VrptwSisrParams = struct {
     // test), so results differ from the OFF path. Default OFF; measure before
     // opting in.
     polish: bool = false,
+    // Polish cadence: with params.polish on, only run the touched-route
+    // relocate descent (and the scratch derivation that feeds it) on every
+    // `polish_every`-th ACCEPTED iteration instead of after every acceptance.
+    // The counter only advances while params.polish is true. Default 1 fires
+    // every accepted iteration — bit-identical to the original always-on
+    // polish path, since anything mod 1 is 0. No-op when params.polish is
+    // false.
+    polish_every: usize = 1,
     // Stress-guided ruin center: probability an iteration picks its ruin seed
     // by a 4-way tournament on detour cost (stress(c) = d(prev,c)+d(c,next)-
     // d(prev,next) at c's current route position) instead of a uniform random
@@ -2906,6 +2914,10 @@ pub fn solveVrptwSisr(allocator: std.mem.Allocator, inst: VrptwInstance, options
     // polish is off (no allocation happens until the first append).
     var touched_scratch: std.ArrayList(usize) = .empty;
     defer touched_scratch.deinit(allocator);
+    // Counts ACCEPTED iterations, only while params.polish is true (see
+    // VrptwSisrParams.polish_every). Stays at 0 and unused on the polish=false
+    // path.
+    var accepted_count: usize = 0;
 
     var it: usize = 0;
     while (it < iters) : (it += 1) {
@@ -2914,7 +2926,12 @@ pub fn solveVrptwSisr(allocator: std.mem.Allocator, inst: VrptwInstance, options
         try cur.recreate(eff_params, rng);
         const dt = @as(i64, @intCast(cur.cost)) - @as(i64, @intCast(saved_cost));
         if (@as(f64, @floatFromInt(dt)) < temp) {
+            var do_polish = false;
             if (params.polish) {
+                accepted_count += 1;
+                do_polish = accepted_count % params.polish_every == 0;
+            }
+            if (do_polish) {
                 touched_scratch.clearRetainingCapacity();
                 for (cur.undo_ops.items) |op| {
                     const ri = switch (op) {
@@ -2941,7 +2958,7 @@ pub fn solveVrptwSisr(allocator: std.mem.Allocator, inst: VrptwInstance, options
                 // iteration's ruin, so they must not be tabu-stamped.
                 for (cur.removed.items) |c| cur.tabu_until[c] = it + params.tabu_tenure;
             }
-            if (params.polish) {
+            if (do_polish) {
                 try cur.polish(touched_scratch.items);
                 cur.commit(); // fold polish's own journal in — never rollback-able
             }
@@ -3480,6 +3497,90 @@ test "VRPTW SISR: polish changes the trajectory vs polish=false" {
     try std.testing.expect(validate(inst, off.routes) != null);
     try std.testing.expect(validate(inst, on.routes) != null);
     try std.testing.expect(on.total_cost != off.total_cost);
+}
+
+test "VRPTW SISR: polish_every=1 matches the implicit default exactly" {
+    // polish_every defaults to 1, so leaving it unset must be bit-identical to
+    // setting it explicitly to 1 — the accepted_count % 1 gate is always 0.
+    const allocator = std.testing.allocator;
+    const n = 40;
+    const dim = n + 1;
+    var prng = std.Random.DefaultPrng.init(0x901123);
+    const rng = prng.random();
+    const matrix = try allocator.alloc(u32, dim * dim);
+    defer allocator.free(matrix);
+    for (0..dim) |i| {
+        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 60);
+    }
+    const demand = try allocator.alloc(u32, dim);
+    defer allocator.free(demand);
+    const ready = try allocator.alloc(u32, dim);
+    defer allocator.free(ready);
+    const due = try allocator.alloc(u32, dim);
+    defer allocator.free(due);
+    const service = try allocator.alloc(u32, dim);
+    defer allocator.free(service);
+    demand[0] = 0;
+    ready[0] = 0;
+    due[0] = 100_000;
+    service[0] = 0;
+    for (1..dim) |i| {
+        demand[i] = rng.intRangeAtMost(u32, 1, 5);
+        ready[i] = rng.intRangeAtMost(u32, 0, 300);
+        due[i] = ready[i] + rng.intRangeAtMost(u32, 80, 400);
+        service[i] = rng.intRangeAtMost(u32, 1, 10);
+    }
+    const inst = VrptwInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 12, .ready = ready, .due = due, .service = service };
+
+    var implicit = try solveVrptwSisr(allocator, inst, .{ .seed = 7 }, .{ .iters = 8000, .polish = true });
+    defer implicit.deinit();
+    var explicit = try solveVrptwSisr(allocator, inst, .{ .seed = 7 }, .{ .iters = 8000, .polish = true, .polish_every = 1 });
+    defer explicit.deinit();
+    try std.testing.expectEqual(implicit.total_cost, explicit.total_cost);
+    try std.testing.expectEqual(implicit.vehicles, explicit.vehicles);
+}
+
+test "VRPTW SISR: polish_every=4 stays feasible and diverges from every-iteration polish" {
+    // Same seed/instance, only polish_every differs (both polish=true). A
+    // sparser cadence still yields a feasible tour and (with enough
+    // iterations) a different trajectory than polishing every acceptance.
+    const allocator = std.testing.allocator;
+    const n = 40;
+    const dim = n + 1;
+    var prng = std.Random.DefaultPrng.init(0x901123);
+    const rng = prng.random();
+    const matrix = try allocator.alloc(u32, dim * dim);
+    defer allocator.free(matrix);
+    for (0..dim) |i| {
+        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 60);
+    }
+    const demand = try allocator.alloc(u32, dim);
+    defer allocator.free(demand);
+    const ready = try allocator.alloc(u32, dim);
+    defer allocator.free(ready);
+    const due = try allocator.alloc(u32, dim);
+    defer allocator.free(due);
+    const service = try allocator.alloc(u32, dim);
+    defer allocator.free(service);
+    demand[0] = 0;
+    ready[0] = 0;
+    due[0] = 100_000;
+    service[0] = 0;
+    for (1..dim) |i| {
+        demand[i] = rng.intRangeAtMost(u32, 1, 5);
+        ready[i] = rng.intRangeAtMost(u32, 0, 300);
+        due[i] = ready[i] + rng.intRangeAtMost(u32, 80, 400);
+        service[i] = rng.intRangeAtMost(u32, 1, 10);
+    }
+    const inst = VrptwInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 12, .ready = ready, .due = due, .service = service };
+
+    var every1 = try solveVrptwSisr(allocator, inst, .{ .seed = 7 }, .{ .iters = 8000, .polish = true, .polish_every = 1 });
+    defer every1.deinit();
+    var every4 = try solveVrptwSisr(allocator, inst, .{ .seed = 7 }, .{ .iters = 8000, .polish = true, .polish_every = 4 });
+    defer every4.deinit();
+    try std.testing.expect(validate(inst, every1.routes) != null);
+    try std.testing.expect(validate(inst, every4.routes) != null);
+    try std.testing.expect(every1.total_cost != every4.total_cost);
 }
 
 test "VRPTW SISR: stressPick always returns the worst-detour customer" {
