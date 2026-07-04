@@ -46,6 +46,12 @@ pub const SisrParams = struct {
     // hurt small/tight instances (n<=200) AND large iteration-starved ones (X-n1001
     // loses on both quality and wall). 0 = always greedy. 1 = always regret.
     regret_rate: f64 = -1.0,
+    // Marathon profile: for very long runs (iters >= 1,000,000) swap in a
+    // colder-finish, larger-neighborhood constant set (cbar=13, l_max=13,
+    // tf_factor=0.001, blink=0.02) tuned for the extra budget instead of the
+    // short-run defaults above. Below the 1M-iter gate this is a no-op — the
+    // default (false) path is bit-identical to before this flag existed.
+    marathon: bool = false,
 };
 
 /// SISR solver for (symmetric or asymmetric) CVRP, uncapped fleet. Builds a feasible
@@ -107,14 +113,21 @@ pub fn solveCvrpSisr(allocator: std.mem.Allocator, inst: CvrpInstance, options: 
     // Regret recreate is a mid/large-n lever (see SisrParams.regret_rate): auto-gate
     // it on for n >= 250 (the split-string boundary), off below.
     const eff_regret: f64 = if (params.regret_rate < 0) (if (n >= POP_CROSSOVER_N and n <= REGRET_MAX_N) @as(f64, 1.0) else 0.0) else params.regret_rate;
-    var ctx = SisrCtx{ .present = present, .removed = removed, .rprev = rprev, .rroute = rroute, .ins = ins, .touched = touched, .rmark = rmark, .blink = params.blink, .l_max = params.l_max, .cbar = params.cbar, .split_rate = eff_split, .split_alpha = params.split_alpha, .regret_rate = eff_regret };
+    // Marathon profile (see SisrParams.marathon): only takes effect at
+    // iters >= 1,000,000, so this is a pure no-op below that gate.
+    const marathon_on = params.marathon and params.iters >= 1_000_000;
+    const eff_cbar: f64 = if (marathon_on) 13.0 else params.cbar;
+    const eff_lmax: usize = if (marathon_on) 13 else params.l_max;
+    const eff_blink: f64 = if (marathon_on) 0.02 else params.blink;
+    const eff_tf_factor: f64 = if (marathon_on) 0.001 else params.tf_factor;
+    var ctx = SisrCtx{ .present = present, .removed = removed, .rprev = rprev, .rroute = rroute, .ins = ins, .touched = touched, .rmark = rmark, .blink = eff_blink, .l_max = eff_lmax, .cbar = eff_cbar, .split_rate = eff_split, .split_alpha = params.split_alpha, .regret_rate = eff_regret };
 
     var prng = std.Random.DefaultPrng.init(options.seed);
     const rng = prng.random();
 
     const unit = @as(f64, @floatFromInt(cur.distance)) / @as(f64, @floatFromInt(n));
     const t0 = @max(1e-9, params.t0_factor * unit);
-    const tf = @max(1e-9, params.tf_factor * unit);
+    const tf = @max(1e-9, eff_tf_factor * unit);
     const iters = @max(@as(usize, 1), params.iters);
     const cf = std.math.pow(f64, tf / t0, 1.0 / @as(f64, @floatFromInt(iters)));
     var temp = t0;
@@ -288,4 +301,61 @@ pub fn solveCvrpSisrParallel(allocator: std.mem.Allocator, inst: CvrpInstance, o
         allocator.free(s.ends);
     }
     return .{ .allocator = allocator, .routes = routes, .total_cost = bs.cost };
+}
+
+test "CVRP SISR marathon: below the 1M-iter gate is a no-op (bit-identical)" {
+    const allocator = std.testing.allocator;
+    const n = 9;
+    const dim = n + 1;
+    var prng = std.Random.DefaultPrng.init(0x515A);
+    const rng = prng.random();
+    const matrix = try allocator.alloc(u32, dim * dim);
+    defer allocator.free(matrix);
+    for (0..dim) |i| {
+        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 60);
+    }
+    const demand = try allocator.alloc(u32, dim);
+    defer allocator.free(demand);
+    demand[0] = 0;
+    for (1..dim) |i| demand[i] = rng.intRangeAtMost(u32, 1, 5);
+    const inst = CvrpInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 12 };
+    const opts = solver.SolveOptions{ .seed = 7 };
+
+    var r_off = try solveCvrpSisr(allocator, inst, opts, .{ .iters = 50_000, .marathon = false });
+    defer r_off.deinit();
+    var r_on = try solveCvrpSisr(allocator, inst, opts, .{ .iters = 50_000, .marathon = true });
+    defer r_on.deinit();
+    try std.testing.expectEqual(r_off.total_cost, r_on.total_cost);
+    try std.testing.expectEqual(r_off.routes.len, r_on.routes.len);
+    for (r_off.routes, r_on.routes) |a, b| try std.testing.expectEqualSlices(usize, a, b);
+}
+
+test "CVRP SISR marathon: at 1M+ iters, feasible and changes the trajectory" {
+    const allocator = std.testing.allocator;
+    const n = 60;
+    const dim = n + 1;
+    var prng = std.Random.DefaultPrng.init(0xC0DE15);
+    const rng = prng.random();
+    const matrix = try allocator.alloc(u32, dim * dim);
+    defer allocator.free(matrix);
+    for (0..dim) |i| {
+        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 100);
+    }
+    const demand = try allocator.alloc(u32, dim);
+    defer allocator.free(demand);
+    demand[0] = 0;
+    for (1..dim) |i| demand[i] = rng.intRangeAtMost(u32, 1, 5);
+    const inst = CvrpInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 12 };
+    const opts = solver.SolveOptions{ .seed = 3 };
+
+    var r_off = try solveCvrpSisr(allocator, inst, opts, .{ .iters = 1_000_000, .marathon = false });
+    defer r_off.deinit();
+    var r_on = try solveCvrpSisr(allocator, inst, opts, .{ .iters = 1_000_000, .marathon = true });
+    defer r_on.deinit();
+    try std.testing.expect(validate(inst, r_off.routes) != null);
+    try std.testing.expect(validate(inst, r_on.routes) != null);
+    // Different constants (cbar/l_max/tf_factor/blink) must move the trajectory;
+    // a truly inert flag would collapse this to an equality, which is the bug
+    // this test exists to catch.
+    try std.testing.expect(r_off.total_cost != r_on.total_cost);
 }

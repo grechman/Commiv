@@ -2046,6 +2046,35 @@ pub const VrptwSisrParams = struct {
     // candidate gaps considered per recreate), not a mechanical speedup, so it
     // must be measured and opted into rather than silently changing results.
     adjacent_gaps: bool = false,
+    // FILO-style "education": immediately after an iteration is accepted and
+    // committed, run a bounded relocate descent restricted to just the routes
+    // that iteration touched (see SisrTw.polish). Every move it makes is a
+    // strict cost improvement and it draws no RNG, but it DOES change the
+    // trajectory (the post-polish cost feeds the next iteration's acceptance
+    // test), so results differ from the OFF path. Default OFF; measure before
+    // opting in.
+    polish: bool = false,
+    // Stress-guided ruin center: probability an iteration picks its ruin seed
+    // by a 4-way tournament on detour cost (stress(c) = d(prev,c)+d(c,next)-
+    // d(prev,next) at c's current route position) instead of a uniform random
+    // customer. The customer sitting worst in its current slot gets ripped out
+    // first, so the string grows from the spot most likely to pay off. Draws
+    // no RNG when 0 (the default), so the trajectory is unchanged.
+    stress_rate: f64 = 0.0,
+    // Reinsertion tabu: once a customer is removed-and-reinserted in an
+    // ACCEPTED iteration, it may not be chosen as the ruin STRING CENTER for
+    // this many further iterations (it can still be swept up as part of a
+    // string centered on someone else). Meant to stop late-run cycling where
+    // the same customer keeps getting ping-ponged between the same couple of
+    // gaps. 0 = off (default) — no allocation, no extra RNG draws, no behavior
+    // change.
+    tabu_tenure: usize = 0,
+    // Marathon profile: for very long runs (iters >= 1,000,000) swap in a
+    // colder-finish, larger-neighborhood constant set (cbar=13, l_max=13,
+    // tf_factor=0.001, blink=0.02) tuned for the extra budget instead of the
+    // short-run defaults above. Below the 1M-iter gate this is a no-op — the
+    // default (false) path is bit-identical to before this flag existed.
+    marathon: bool = false,
 };
 
 const SisrTwRoute = struct {
@@ -2110,6 +2139,12 @@ const SisrTw = struct {
     // scanning forward from it lands on the same slot a from-0 scan would —
     // O(1)-amortized instead of O(slots) per recreate() empty-slot lookup.
     min_empty_hint: usize = 0,
+    // Reinsertion tabu (VrptwSisrParams.tabu_tenure): tabu_until[c] is the
+    // iteration index up to (exclusive of) which customer c may not be picked
+    // as a ruin string center. Sized n+1, allocated only when tabu_tenure > 0
+    // and left as an empty slice otherwise — every access is gated by
+    // `params.tabu_tenure > 0` so the off path never indexes it.
+    tabu_until: []u64 = &.{},
 
     const NO_ROUTE = std.math.maxInt(usize);
     // dist/load are route `ri`'s values from BEFORE the logged mutation;
@@ -2144,6 +2179,7 @@ const SisrTw = struct {
         s.undo_items.deinit(s.allocator);
         if (s.cand_mark.len > 0) s.allocator.free(s.cand_mark);
         if (s.ruin_mark.len > 0) s.allocator.free(s.ruin_mark);
+        if (s.tabu_until.len > 0) s.allocator.free(s.tabu_until);
         s.removed.deinit(s.allocator);
         s.* = undefined;
     }
@@ -2317,6 +2353,21 @@ const SisrTw = struct {
         r.dirty = false;
     }
 
+    /// Detour cost of `c` at its CURRENT route position: the two arcs touching
+    /// it minus the one direct arc that would remain without it. Signed (i64):
+    /// directed matrices can violate the triangle inequality (see
+    /// removalSafe), so this can go negative. Used only by the stress-guided
+    /// ruin-center tournament (params.stress_rate); needs no freshened pre/suf,
+    /// just the route's raw item list.
+    fn stress(s: *SisrTw, c: usize) i64 {
+        const ri = s.loc_route[c];
+        const it = s.routes.items[ri].items.items;
+        const p = s.loc_pos[c];
+        const prev: usize = if (p == 0) 0 else it[p - 1];
+        const next: usize = if (p + 1 == it.len) 0 else it[p + 1];
+        return @as(i64, @intCast(s.inst.d(prev, c) + s.inst.d(c, next))) - @as(i64, @intCast(s.inst.d(prev, next)));
+    }
+
     /// O(1): TW feasibility + distance delta of inserting `c` at gap `g` of
     /// (freshened) route `ri`. Returns null if infeasible. The delta is signed:
     /// real directed road matrices violate the triangle inequality, so an
@@ -2455,12 +2506,65 @@ const SisrTw = struct {
         return merged.tw == 0;
     }
 
-    fn ruin(s: *SisrTw, params: VrptwSisrParams, rng: std.Random) !void {
+    /// Stress-guided ruin-center pick: sample 4 distinct customers out of
+    /// 1..n and return whichever currently pays the worst detour (stress()).
+    /// Returns null if every sampled customer is unrouted — should never
+    /// happen mid-iteration, but ruin() falls back to the uniform seed_c when
+    /// it does. Draws exactly 4 uintLessThan calls (plus rejection retries on
+    /// a collision) — only ever invoked when params.stress_rate > 0 fired.
+    fn stressPick(s: *SisrTw, rng: std.Random, n: usize) ?usize {
+        var cs: [4]usize = undefined;
+        var picked: usize = 0;
+        while (picked < 4) {
+            const cand = 1 + rng.uintLessThan(usize, n);
+            var dup = false;
+            for (cs[0..picked]) |x| {
+                if (x == cand) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (!dup) {
+                cs[picked] = cand;
+                picked += 1;
+            }
+        }
+        var best_c: usize = NO_ROUTE;
+        var best_stress: i64 = undefined;
+        for (cs) |c| {
+            if (s.loc_route[c] == NO_ROUTE) continue;
+            const st = s.stress(c);
+            if (best_c == NO_ROUTE or st > best_stress) {
+                best_c = c;
+                best_stress = st;
+            }
+        }
+        return if (best_c == NO_ROUTE) null else best_c;
+    }
+
+    fn ruin(s: *SisrTw, params: VrptwSisrParams, rng: std.Random, it: usize) !void {
         const n = s.inst.n;
         s.removed.clearRetainingCapacity();
         s.generation += 1;
 
         var seed_c = 1 + rng.uintLessThan(usize, n);
+        if (params.stress_rate > 0 and n >= 4 and rng.float(f64) < params.stress_rate) {
+            // Composition rule: when the stress tournament fires it overrides
+            // the center outright (a just-reinserted customer sitting badly is
+            // exactly what stress wants to attack); the tabu redraw governs
+            // only the uniform path. Each lever alone behaves exactly as
+            // measured standalone.
+            if (s.stressPick(rng, n)) |c| seed_c = c;
+        } else if (params.tabu_tenure > 0) {
+            // Reinsertion tabu: re-draw the string center while it's tabu, up
+            // to 8 total draws so this never loops forever; if the 8th draw is
+            // still tabu, use it anyway (it can still be pulled in as part of a
+            // string centered on a different, non-tabu customer below).
+            var tries: usize = 1;
+            while (s.tabu_until[seed_c] > it and tries < 8) : (tries += 1) {
+                seed_c = 1 + rng.uintLessThan(usize, n);
+            }
+        }
         if (params.veh_penalty > 0 and s.nonempty > 1 and rng.float(f64) < params.fleet_ruin_rate) {
             // Fleet-min ruin: empty the smallest route outright. Its customers
             // reinsert into the slack the normal strings below open up around
@@ -2610,6 +2714,87 @@ const SisrTw = struct {
         }
     }
 
+    /// Distance delta of removing the single customer at `items[pos]` of route
+    /// `ri`, WITHOUT mutating anything — a peek at exactly the arithmetic
+    /// removeString itself performs for a length-1 string (broken arcs
+    /// prev->c and c->next replaced by the bridging arc prev->next). Used by
+    /// polish() to rank relocation candidates before committing the one it
+    /// picks through the real removeString/insertAt journal.
+    fn removeDeltaPeek(s: *SisrTw, ri: usize, pos: usize) i64 {
+        const it = s.routes.items[ri].items.items;
+        const prev: usize = if (pos == 0) 0 else it[pos - 1];
+        const next: usize = if (pos + 1 == it.len) 0 else it[pos + 1];
+        const c = it[pos];
+        return @as(i64, @intCast(s.inst.d(prev, next))) - @as(i64, @intCast(s.inst.d(prev, c))) - @as(i64, @intCast(s.inst.d(c, next)));
+    }
+
+    /// FILO-style post-accept "education": a bounded relocate descent over
+    /// just the routes a just-committed ruin+recreate iteration touched.
+    /// For every customer currently in a touched route, evaluate relocating
+    /// it (removeDeltaPeek for the removal side, the exact same `gapDelta`
+    /// recreate uses for every gap of every OTHER touched route) and apply
+    /// the single best strictly-improving move via the real removeString/
+    /// insertAt so Tws arrays, loc_route/loc_pos and cost stay consistent.
+    /// Repeats until a full pass finds no improving move, capped at 2 passes.
+    /// Draws no RNG (fixed scan order), so it never perturbs the ruin/
+    /// recreate draw sequence — only the resulting cost/state changes.
+    ///
+    /// Callers must commit() again after this returns: polish appends its
+    /// own entries to the very undo journal the caller just committed (that
+    /// is what keeps removeString/insertAt's bookkeeping consistent), and
+    /// those entries must never be replayed by a LATER iteration's rollback.
+    fn polish(s: *SisrTw, touched: []const usize) !void {
+        if (touched.len < 2) return; // nothing else to relocate into
+        var pass: usize = 0;
+        while (pass < 2) : (pass += 1) {
+            var improved_any = false;
+            for (touched) |ri| {
+                if (ri >= s.routes.items.len) continue;
+                var pos: usize = 0;
+                while (pos < s.routes.items[ri].items.items.len) {
+                    const c = s.routes.items[ri].items.items[pos];
+                    if (!try s.removalSafe(ri, pos, 1)) {
+                        pos += 1;
+                        continue;
+                    }
+                    const rem_delta = s.removeDeltaPeek(ri, pos);
+
+                    var best_total: i64 = 0; // strict improvement only (< 0)
+                    var best_rj: usize = NO_ROUTE;
+                    var best_g: usize = 0;
+                    for (touched) |rj| {
+                        if (rj == ri or rj >= s.routes.items.len) continue;
+                        const r = &s.routes.items[rj];
+                        if (r.load + s.inst.demand[c] > s.inst.capacity) continue;
+                        try s.freshen(rj);
+                        const glen = r.items.items.len;
+                        var g: usize = 0;
+                        while (g <= glen) : (g += 1) {
+                            const ins_delta = s.gapDelta(rj, g, c) orelse continue;
+                            const total = rem_delta + ins_delta;
+                            if (total < best_total) {
+                                best_total = total;
+                                best_rj = rj;
+                                best_g = g;
+                            }
+                        }
+                    }
+
+                    if (best_rj != NO_ROUTE) {
+                        try s.removeString(ri, pos, 1);
+                        try s.insertAt(best_rj, best_g, c);
+                        improved_any = true;
+                        // items[pos] is now whatever followed c — recheck the
+                        // same slot instead of advancing past it.
+                    } else {
+                        pos += 1;
+                    }
+                }
+            }
+            if (!improved_any) break;
+        }
+    }
+
     fn toResult(s: *SisrTw, allocator: std.mem.Allocator) !VrptwResult {
         const routes = try allocator.alloc([]usize, s.nonempty);
         var filled: usize = 0;
@@ -2665,6 +2850,10 @@ pub fn solveVrptwSisr(allocator: std.mem.Allocator, inst: VrptwInstance, options
 
     var cur = try SisrTw.init(allocator, inst, params.veh_penalty, gran, gk);
     defer cur.deinit();
+    if (params.tabu_tenure > 0) {
+        cur.tabu_until = try allocator.alloc(u64, n + 1);
+        @memset(cur.tabu_until, 0);
+    }
     {
         // install seed routes from the Split pred chain (walk back, emit forward)
         var bounds: std.ArrayList([2]usize) = .empty;
@@ -2688,6 +2877,17 @@ pub fn solveVrptwSisr(allocator: std.mem.Allocator, inst: VrptwInstance, options
 
     var prng = std.Random.DefaultPrng.init(options.seed ^ 0x51_53_52_7457); // distinct stream from the ILS
     const rng = prng.random();
+    // Marathon profile (see VrptwSisrParams.marathon): only takes effect at
+    // iters >= 1,000,000, so this is a pure no-op below that gate. ruin/recreate
+    // take params by value, so passing this overridden copy in their place is
+    // the same flow the unmodified params already take — no new state, no RNG.
+    var eff_params = params;
+    if (params.marathon and params.iters >= 1_000_000) {
+        eff_params.cbar = 13.0;
+        eff_params.l_max = 13;
+        eff_params.tf_factor = 0.001;
+        eff_params.blink = 0.02;
+    }
     // Threshold scale comes from DISTANCE per customer, not the veh_penalty-
     // inflated cost: with Solomon's 10M-per-vehicle bias a cost-derived t0 is
     // ~penalty-sized and the first half of the schedule degenerates into a
@@ -2695,19 +2895,56 @@ pub fn solveVrptwSisr(allocator: std.mem.Allocator, inst: VrptwInstance, options
     const seed_distance = cur.cost - params.veh_penalty * cur.nonempty;
     const unit = @as(f64, @floatFromInt(seed_distance)) / @as(f64, @floatFromInt(n));
     const t0 = @max(1e-9, params.t0_factor * unit);
-    const tf = @max(1e-9, params.tf_factor * unit);
+    const tf = @max(1e-9, eff_params.tf_factor * unit);
     const iters = @max(@as(usize, 1), params.iters);
     const cf = std.math.pow(f64, tf / t0, 1.0 / @as(f64, @floatFromInt(iters)));
     var temp = t0;
 
+    // Scratch list for params.polish: the distinct route indices a committed
+    // iteration touched, re-derived from the undo journal before commit()
+    // clears it. Allocated once outside the loop; empty and unused when
+    // polish is off (no allocation happens until the first append).
+    var touched_scratch: std.ArrayList(usize) = .empty;
+    defer touched_scratch.deinit(allocator);
+
     var it: usize = 0;
     while (it < iters) : (it += 1) {
         const saved_cost = cur.cost;
-        try cur.ruin(params, rng);
-        try cur.recreate(params, rng);
+        try cur.ruin(eff_params, rng, it);
+        try cur.recreate(eff_params, rng);
         const dt = @as(i64, @intCast(cur.cost)) - @as(i64, @intCast(saved_cost));
         if (@as(f64, @floatFromInt(dt)) < temp) {
+            if (params.polish) {
+                touched_scratch.clearRetainingCapacity();
+                for (cur.undo_ops.items) |op| {
+                    const ri = switch (op) {
+                        .remove => |r| r.ri,
+                        .insert => |ins| ins.ri,
+                    };
+                    var seen = false;
+                    for (touched_scratch.items) |t| {
+                        if (t == ri) {
+                            seen = true;
+                            break;
+                        }
+                    }
+                    if (!seen) try touched_scratch.append(allocator, ri);
+                }
+            }
             cur.commit();
+            if (params.tabu_tenure > 0) {
+                // Stamp every customer removed (and reinserted) this iteration:
+                // s.removed still holds that exact set — recreate() only reads
+                // it, and the next ruin() call clears it at its own top. Stamped
+                // BEFORE polish: polish's removeString calls append relocated
+                // customers to s.removed, and those were not part of this
+                // iteration's ruin, so they must not be tabu-stamped.
+                for (cur.removed.items) |c| cur.tabu_until[c] = it + params.tabu_tenure;
+            }
+            if (params.polish) {
+                try cur.polish(touched_scratch.items);
+                cur.commit(); // fold polish's own journal in — never rollback-able
+            }
             if (cur.cost < best_cost) {
                 best_cost = cur.cost;
                 best.deinit();
@@ -2883,7 +3120,7 @@ test "VRPTW SISR: exact-delta dist/load match a from-scratch recompute after eve
 
     var it: usize = 0;
     while (it < 500) : (it += 1) {
-        try s.ruin(.{}, rng);
+        try s.ruin(.{}, rng, it);
         try s.recreate(.{}, rng);
         s.commit();
         for (s.routes.items) |r| {
@@ -2984,7 +3221,7 @@ test "VRPTW SISR: undo-journal rollback restores the exact pre-iteration state" 
         const saved_nonempty = s.nonempty;
         const saved_nroutes = s.routes.items.len;
 
-        try s.ruin(params, rng);
+        try s.ruin(params, rng, it);
         try s.recreate(params, rng);
 
         if (rng.float(f64) < 0.7) {
@@ -3083,7 +3320,7 @@ test "VRPTW SISR: partial freshen matches a full from-scratch pre/suf rebuild" {
 
     var it: usize = 0;
     while (it < 300) : (it += 1) {
-        try s.ruin(.{}, rng);
+        try s.ruin(.{}, rng, it);
         try s.recreate(.{}, rng);
         for (s.routes.items, 0..) |*r, ri| {
             if (!r.dirty) continue; // freshen() is a no-op here anyway
@@ -3157,6 +3394,183 @@ test "VRPTW SISR: adjacent_gaps recreate stays feasible and self-consistent" {
         try std.testing.expectEqual(on.total_cost, checked);
         try std.testing.expectEqual(on.vehicles, on.routes.len);
     }
+}
+
+test "VRPTW SISR: polish=true stays feasible and self-consistent" {
+    // polish ON: reported total_cost still matches an independent full
+    // recompute (the relocate descent never desyncs Tws/loc bookkeeping),
+    // and vehicle count still matches the route slice length.
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x901123);
+    const rng = prng.random();
+    for (0..6) |trial| {
+        const n = 4 + rng.uintLessThan(usize, 30);
+        const dim = n + 1;
+        const matrix = try allocator.alloc(u32, dim * dim);
+        defer allocator.free(matrix);
+        for (0..dim) |i| {
+            for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 60);
+        }
+        const demand = try allocator.alloc(u32, dim);
+        defer allocator.free(demand);
+        const ready = try allocator.alloc(u32, dim);
+        defer allocator.free(ready);
+        const due = try allocator.alloc(u32, dim);
+        defer allocator.free(due);
+        const service = try allocator.alloc(u32, dim);
+        defer allocator.free(service);
+        demand[0] = 0;
+        ready[0] = 0;
+        due[0] = 100_000;
+        service[0] = 0;
+        for (1..dim) |i| {
+            demand[i] = rng.intRangeAtMost(u32, 1, 5);
+            ready[i] = rng.intRangeAtMost(u32, 0, 300);
+            due[i] = ready[i] + rng.intRangeAtMost(u32, 80, 400);
+            service[i] = rng.intRangeAtMost(u32, 1, 10);
+        }
+        const inst = VrptwInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 12, .ready = ready, .due = due, .service = service };
+        var on = try solveVrptwSisr(allocator, inst, .{ .seed = trial + 1 }, .{ .iters = 3000, .polish = true });
+        defer on.deinit();
+        const checked = validate(inst, on.routes) orelse return error.TestInfeasibleResult;
+        try std.testing.expectEqual(on.total_cost, checked);
+        try std.testing.expectEqual(on.vehicles, on.routes.len);
+    }
+}
+
+test "VRPTW SISR: polish changes the trajectory vs polish=false" {
+    // Same seed and instance, only params.polish differs. The default (off)
+    // path must be untouched (still bit-identical to pre-lever behavior,
+    // covered by every other SISR test); this only checks that flipping the
+    // new flag actually does something and stays feasible either way.
+    const allocator = std.testing.allocator;
+    const n = 40;
+    const dim = n + 1;
+    var prng = std.Random.DefaultPrng.init(0x901123);
+    const rng = prng.random();
+    const matrix = try allocator.alloc(u32, dim * dim);
+    defer allocator.free(matrix);
+    for (0..dim) |i| {
+        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 60);
+    }
+    const demand = try allocator.alloc(u32, dim);
+    defer allocator.free(demand);
+    const ready = try allocator.alloc(u32, dim);
+    defer allocator.free(ready);
+    const due = try allocator.alloc(u32, dim);
+    defer allocator.free(due);
+    const service = try allocator.alloc(u32, dim);
+    defer allocator.free(service);
+    demand[0] = 0;
+    ready[0] = 0;
+    due[0] = 100_000;
+    service[0] = 0;
+    for (1..dim) |i| {
+        demand[i] = rng.intRangeAtMost(u32, 1, 5);
+        ready[i] = rng.intRangeAtMost(u32, 0, 300);
+        due[i] = ready[i] + rng.intRangeAtMost(u32, 80, 400);
+        service[i] = rng.intRangeAtMost(u32, 1, 10);
+    }
+    const inst = VrptwInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 12, .ready = ready, .due = due, .service = service };
+
+    var off = try solveVrptwSisr(allocator, inst, .{ .seed = 7 }, .{ .iters = 8000, .polish = false });
+    defer off.deinit();
+    var on = try solveVrptwSisr(allocator, inst, .{ .seed = 7 }, .{ .iters = 8000, .polish = true });
+    defer on.deinit();
+    try std.testing.expect(validate(inst, off.routes) != null);
+    try std.testing.expect(validate(inst, on.routes) != null);
+    try std.testing.expect(on.total_cost != off.total_cost);
+}
+
+test "VRPTW SISR: stressPick always returns the worst-detour customer" {
+    // n=4 forces the distinct-sample loop to draw all 4 customers every time
+    // (order may vary with the rng stream, but the candidate SET never does),
+    // so the tournament winner is deterministic: whichever customer has the
+    // biggest d(prev,c)+d(c,next)-d(prev,next) at its current position. Route
+    // is 1 -> 2 -> 3 -> 4 -> depot; customer 3 is planted far out of the way
+    // so its detour dwarfs the other three.
+    const allocator = std.testing.allocator;
+    const n = 4;
+    const dim = n + 1;
+    var matrix = [_]u32{10} ** (dim * dim);
+    for (0..dim) |i| matrix[i * dim + i] = 0;
+    const at = struct {
+        fn set(m: []u32, a: usize, b: usize, v: u32) void {
+            m[a * dim + b] = v;
+        }
+    };
+    at.set(&matrix, 2, 3, 5000); // 2 -> 3 detour arc, huge
+    at.set(&matrix, 3, 4, 5000); // 3 -> 4 detour arc, huge
+    at.set(&matrix, 2, 4, 10); // direct 2 -> 4 stays cheap
+    const demand = [_]u32{0} ** dim;
+    const ready = [_]u32{0} ** dim;
+    const due = [_]u32{100_000} ** dim;
+    const service = [_]u32{0} ** dim;
+    const inst = VrptwInstance{ .n = n, .matrix = &matrix, .demand = &demand, .capacity = 10, .ready = &ready, .due = &due, .service = &service };
+    const gran = try buildNeighbors(allocator, inst, 2);
+    defer allocator.free(gran);
+    var s = try SisrTw.init(allocator, inst, 0, gran, 2);
+    defer s.deinit();
+    const ri = try s.addSlot();
+    try s.installRoute(ri, &.{ 1, 2, 3, 4 });
+
+    var prng = std.Random.DefaultPrng.init(1234);
+    const rng = prng.random();
+    for (0..10) |_| {
+        const picked = s.stressPick(rng, n) orelse return error.TestUnexpectedNull;
+        try std.testing.expectEqual(@as(usize, 3), picked);
+    }
+}
+
+test "VRPTW SISR: stress_rate is feasible and changes the trajectory vs uniform ruin" {
+    // Lever E, ON path: cost matches validate() on the reported result across
+    // random fixtures, and turning it fully on (every iteration's coin flip
+    // fires) perturbs the RNG stream enough that the final cost differs from
+    // the OFF path on the same seed — proof the new draws are actually wired
+    // into ruin(), not a dead branch.
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0xB57E55);
+    const rng = prng.random();
+    var any_diff = false;
+    for (0..6) |trial| {
+        const n = 4 + rng.uintLessThan(usize, 30);
+        const dim = n + 1;
+        const matrix = try allocator.alloc(u32, dim * dim);
+        defer allocator.free(matrix);
+        for (0..dim) |i| {
+            for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 60);
+        }
+        const demand = try allocator.alloc(u32, dim);
+        defer allocator.free(demand);
+        const ready = try allocator.alloc(u32, dim);
+        defer allocator.free(ready);
+        const due = try allocator.alloc(u32, dim);
+        defer allocator.free(due);
+        const service = try allocator.alloc(u32, dim);
+        defer allocator.free(service);
+        demand[0] = 0;
+        ready[0] = 0;
+        due[0] = 100_000;
+        service[0] = 0;
+        for (1..dim) |i| {
+            demand[i] = rng.intRangeAtMost(u32, 1, 5);
+            ready[i] = rng.intRangeAtMost(u32, 0, 300);
+            due[i] = ready[i] + rng.intRangeAtMost(u32, 80, 400);
+            service[i] = rng.intRangeAtMost(u32, 1, 10);
+        }
+        const inst = VrptwInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 12, .ready = ready, .due = due, .service = service };
+
+        var off = try solveVrptwSisr(allocator, inst, .{ .seed = trial + 1 }, .{ .iters = 3000 });
+        defer off.deinit();
+        var on = try solveVrptwSisr(allocator, inst, .{ .seed = trial + 1 }, .{ .iters = 3000, .stress_rate = 1.0 });
+        defer on.deinit();
+
+        const checked = validate(inst, on.routes) orelse return error.TestInfeasibleResult;
+        try std.testing.expectEqual(on.total_cost, checked);
+        try std.testing.expectEqual(on.vehicles, on.routes.len);
+        if (on.total_cost != off.total_cost) any_diff = true;
+    }
+    try std.testing.expect(any_diff);
 }
 
 test "VRPTW SISR: string removal is feasibility-checked under triangle-inequality violations" {
@@ -3345,6 +3759,86 @@ test "VRPTW SISR: feasible on random instances, cost matches the validator" {
         try std.testing.expectEqual(res.total_cost, checked);
         try std.testing.expectEqual(res.vehicles, res.routes.len);
     }
+}
+
+test "VRPTW SISR: reinsertion tabu (tabu_tenure) stays feasible" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0xFACADE1);
+    const rng = prng.random();
+    const n = 30;
+    const dim = n + 1;
+    const matrix = try allocator.alloc(u32, dim * dim);
+    defer allocator.free(matrix);
+    for (0..dim) |i| {
+        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 60);
+    }
+    const demand = try allocator.alloc(u32, dim);
+    defer allocator.free(demand);
+    const ready = try allocator.alloc(u32, dim);
+    defer allocator.free(ready);
+    const due = try allocator.alloc(u32, dim);
+    defer allocator.free(due);
+    const service = try allocator.alloc(u32, dim);
+    defer allocator.free(service);
+    demand[0] = 0;
+    ready[0] = 0;
+    due[0] = 100_000; // generous horizon: keeps the random instance feasible
+    service[0] = 0;
+    for (1..dim) |i| {
+        demand[i] = rng.intRangeAtMost(u32, 1, 5);
+        ready[i] = rng.intRangeAtMost(u32, 0, 300);
+        due[i] = ready[i] + rng.intRangeAtMost(u32, 80, 400);
+        service[i] = rng.intRangeAtMost(u32, 1, 10);
+    }
+    const inst = VrptwInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 12, .ready = ready, .due = due, .service = service };
+
+    var res = try solveVrptwSisr(allocator, inst, .{ .seed = 7 }, .{ .iters = 3000, .tabu_tenure = 20 });
+    defer res.deinit();
+    const checked = validate(inst, res.routes) orelse return error.TestInfeasibleResult;
+    try std.testing.expectEqual(res.total_cost, checked);
+    try std.testing.expectEqual(res.vehicles, res.routes.len);
+}
+
+test "VRPTW SISR: reinsertion tabu changes the search trajectory" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0xFACADE2);
+    const rng = prng.random();
+    const n = 40;
+    const dim = n + 1;
+    const matrix = try allocator.alloc(u32, dim * dim);
+    defer allocator.free(matrix);
+    for (0..dim) |i| {
+        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 60);
+    }
+    const demand = try allocator.alloc(u32, dim);
+    defer allocator.free(demand);
+    const ready = try allocator.alloc(u32, dim);
+    defer allocator.free(ready);
+    const due = try allocator.alloc(u32, dim);
+    defer allocator.free(due);
+    const service = try allocator.alloc(u32, dim);
+    defer allocator.free(service);
+    demand[0] = 0;
+    ready[0] = 0;
+    due[0] = 100_000;
+    service[0] = 0;
+    for (1..dim) |i| {
+        demand[i] = rng.intRangeAtMost(u32, 1, 5);
+        ready[i] = rng.intRangeAtMost(u32, 0, 300);
+        due[i] = ready[i] + rng.intRangeAtMost(u32, 80, 400);
+        service[i] = rng.intRangeAtMost(u32, 1, 10);
+    }
+    const inst = VrptwInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 12, .ready = ready, .due = due, .service = service };
+
+    var off = try solveVrptwSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 5000 });
+    defer off.deinit();
+    var on = try solveVrptwSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 5000, .tabu_tenure = 50 });
+    defer on.deinit();
+    _ = validate(inst, off.routes) orelse return error.TestInfeasibleResult;
+    _ = validate(inst, on.routes) orelse return error.TestInfeasibleResult;
+    // Same seed, same instance, only the tabu flag differs: the re-draws it
+    // triggers perturb the RNG stream, so the two runs must diverge.
+    try std.testing.expect(off.total_cost != on.total_cost);
 }
 
 test "VRPTW SISR matches the ILS engine on the brute-force fixture" {
@@ -3558,4 +4052,89 @@ test "VRPTW end-to-end: feasible and beats one-per-route" {
     var baseline: u64 = 0;
     for (1..dim) |c| baseline += inst.d(0, c) + inst.d(c, 0);
     try std.testing.expect(res.total_cost < baseline);
+}
+
+test "VRPTW SISR marathon: below the 1M-iter gate is a no-op (bit-identical)" {
+    const allocator = std.testing.allocator;
+    const n = 12;
+    const dim = n + 1;
+    var prng = std.Random.DefaultPrng.init(0xC0FFEE);
+    const rng = prng.random();
+    const matrix = try allocator.alloc(u32, dim * dim);
+    defer allocator.free(matrix);
+    for (0..dim) |i| {
+        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 60);
+    }
+    const demand = try allocator.alloc(u32, dim);
+    defer allocator.free(demand);
+    const ready = try allocator.alloc(u32, dim);
+    defer allocator.free(ready);
+    const due = try allocator.alloc(u32, dim);
+    defer allocator.free(due);
+    const service = try allocator.alloc(u32, dim);
+    defer allocator.free(service);
+    demand[0] = 0;
+    ready[0] = 0;
+    due[0] = 100_000;
+    service[0] = 0;
+    for (1..dim) |i| {
+        demand[i] = rng.intRangeAtMost(u32, 1, 5);
+        ready[i] = rng.intRangeAtMost(u32, 0, 300);
+        due[i] = ready[i] + rng.intRangeAtMost(u32, 80, 400);
+        service[i] = rng.intRangeAtMost(u32, 1, 10);
+    }
+    const inst = VrptwInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 12, .ready = ready, .due = due, .service = service };
+    const opts = solver.SolveOptions{ .seed = 5 };
+
+    var r_off = try solveVrptwSisr(allocator, inst, opts, .{ .iters = 50_000, .marathon = false });
+    defer r_off.deinit();
+    var r_on = try solveVrptwSisr(allocator, inst, opts, .{ .iters = 50_000, .marathon = true });
+    defer r_on.deinit();
+    try std.testing.expectEqual(r_off.total_cost, r_on.total_cost);
+    try std.testing.expectEqual(r_off.routes.len, r_on.routes.len);
+    for (r_off.routes, r_on.routes) |a, b| try std.testing.expectEqualSlices(usize, a, b);
+}
+
+test "VRPTW SISR marathon: at 1M+ iters, feasible and changes the trajectory" {
+    const allocator = std.testing.allocator;
+    const n = 60;
+    const dim = n + 1;
+    var prng = std.Random.DefaultPrng.init(0xBEEF15);
+    const rng = prng.random();
+    const matrix = try allocator.alloc(u32, dim * dim);
+    defer allocator.free(matrix);
+    for (0..dim) |i| {
+        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 60);
+    }
+    const demand = try allocator.alloc(u32, dim);
+    defer allocator.free(demand);
+    const ready = try allocator.alloc(u32, dim);
+    defer allocator.free(ready);
+    const due = try allocator.alloc(u32, dim);
+    defer allocator.free(due);
+    const service = try allocator.alloc(u32, dim);
+    defer allocator.free(service);
+    demand[0] = 0;
+    ready[0] = 0;
+    due[0] = 100_000;
+    service[0] = 0;
+    for (1..dim) |i| {
+        demand[i] = rng.intRangeAtMost(u32, 1, 5);
+        ready[i] = rng.intRangeAtMost(u32, 0, 300);
+        due[i] = ready[i] + rng.intRangeAtMost(u32, 80, 400);
+        service[i] = rng.intRangeAtMost(u32, 1, 10);
+    }
+    const inst = VrptwInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 12, .ready = ready, .due = due, .service = service };
+    const opts = solver.SolveOptions{ .seed = 11 };
+
+    var r_off = try solveVrptwSisr(allocator, inst, opts, .{ .iters = 1_000_000, .marathon = false });
+    defer r_off.deinit();
+    var r_on = try solveVrptwSisr(allocator, inst, opts, .{ .iters = 1_000_000, .marathon = true });
+    defer r_on.deinit();
+    try std.testing.expect(validate(inst, r_off.routes) != null);
+    try std.testing.expect(validate(inst, r_on.routes) != null);
+    // Different constants (cbar/l_max/tf_factor/blink) must move the trajectory;
+    // a truly inert flag would collapse this to an equality, which is the bug
+    // this test exists to catch.
+    try std.testing.expect(r_off.total_cost != r_on.total_cost);
 }
