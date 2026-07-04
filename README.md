@@ -326,10 +326,21 @@ wall-clock at the stated budget.
 | CVRP, Uchoa X | best-known | 6 | **0.456%** (SISR 20M, 3 threads) | 50–170 s/instance |
 | CVRP, Uchoa X | best-known | 6 | 0.711% (SISR 1M best-of-3) | ~seconds |
 | VRPTW, Solomon | SINTEF BKS | 5 | 0.182% distance (vehicle-matched) | ~seconds |
+| VRPTW, Gehring–Homberger 400/1000 | SINTEF BKS | 12 | fleet matched on 4/12 (see below) | 2–60 s |
 
 Uchoa X per-instance (SISR 20M): X-n101 **0.120%**, X-n153 0.452%, X-n200 **0.143%**,
 X-n303 0.902%, X-n502 **0.087%**, X-n1001 1.034%. The two hard instances (X-n303 and
 X-n1001) sit near 1%; the rest land between 0.09% and 0.45%.
+
+Gehring–Homberger (first instance of each class at 400 and 1000 customers) is the honest
+miss. The objective is lexicographic — fewest vehicles first, distance second — and commiv
+matches the BKS fleet only on the easy clustered classes (c1_4_1 +0.09%, c1_10_1 +0.06%,
+c2_10_1 +0.78% distance at matched fleet, plus r2_4_1 at +2.3%). On the R and RC classes it
+runs 1–6 vehicles over the best known (often at *lower* distance, which is exactly the
+trade the lexicographic objective forbids). Root cause is known: commiv has a per-vehicle
+penalty and a fleet-emptying ruin, but no dedicated route-minimization phase
+(ejection-pool style, as in the solvers that hold these records). That is a real gap, not
+a tuning issue.
 
 ### Asymmetric
 
@@ -388,13 +399,15 @@ Two budget points per solver, cost @ wall (vehicles).
 | 100  | **45,993 @ 1.7 s (10 veh)** | 46,486 @ 1.7 s (11) | 47,538 @ 60 s (11) |
 | 1000 | **232,544 @ 3.5 s** (51); 229,909 @ 30 s at 3M iters | 246,573 @ 22 s / 239,977 @ 341 s (50) | 267,897 @ 60 s (53) |
 | 2000 | **412,602 @ 10 s, 3 threads** (102) | not run¹ | not run¹ |
+| 5000 | **884,137 @ 22 s, 3 threads** (257) | not run¹ | not run¹ |
 
-<sub>commiv: `solveVrptwSisr`, default 300k iterations, single-threaded except n=2000
-(best-of-3 chains). VROOM 3 cores, OR-Tools 1. Seeds {7, 42, 12345} at n=1000 span
+<sub>commiv: `solveVrptwSisr`, default 300k iterations, single-threaded except n≥2000
+(best-of-3 chains; n=5000 served over the binary REST framing). VROOM 3 cores, OR-Tools 1.
+Seeds {7, 42, 12345} at n=1000 span
 231,417–232,544; best-of-3 parallel: 231,892 @ 4.9 s. Objective is pure distance
 (`veh_penalty = 0`); VROOM's n=1000 solution uses one vehicle fewer at 3.2% more distance.
-¹ n=2000 competitor runs were skipped: VROOM level 5 already needs 1607 s on the same
-matrix without windows.</sub>
+¹ n≥2000 competitor runs were skipped: VROOM level 5 already needs 1607 s on the same
+matrix without windows, and did not finish n=5000 CVRP within an hour.</sub>
 
 The history of this table is worth telling straight. The first published version was the
 one benchmark commiv did not win: the original VRPTW engine (a giant-tour ILS predating
@@ -409,6 +422,94 @@ given budget — including the notoriously tight rc101 at 14 vehicles (2M iterat
 via the fleet-minimization ruin that empties the smallest route when `veh_penalty` is set.
 One negative result, kept honest: the CVRP split-string ("slack induction") ruin measured
 WORSE with time windows on (Moscow n=1000: +0.8%), so it defaults off for VRPTW.
+
+### PyVRP head-to-head, and two more cities
+
+[PyVRP](https://github.com/PyVRP/PyVRP) (0.13.4) is the open-source descendant of HGS and
+the strongest freely available quality reference that natively accepts directed matrices
+with time windows — the one competitor that plays on commiv's home turf without adapters
+bending the problem. Same instances, same window overlay, same independent validator;
+PyVRP is single-threaded by design and gets a full core.
+
+Moscow, at commiv's wall and at 6–10x more (cost @ seconds; commiv long runs in
+parentheses for the equal-long comparison):
+
+| n / mode | commiv | PyVRP @ equal wall | PyVRP @ more time |
+|---|---|---|---|
+| 100 CVRP  | 41,808 @ 0.8 s | 42,449 @ 1.0 s | **41,705 @ 6 s** (commiv 41,806 @ 6.3 s) |
+| 1000 CVRP | **207,406 @ 2 s** | 214,285 @ 1.5 s | **203,190 @ 60 s** (commiv 205,315 @ 36 s) |
+| 2000 CVRP | **366,996 @ 9 s** | 379,446 @ 6 s | **357,454 @ 161 s** (commiv 361,000 @ 16 s) |
+| 100 TW    | **45,993 @ 1.7 s** | 46,505 @ 1.7 s | 46,267 @ 17 s |
+| 1000 TW   | **232,544 @ 3.5 s** | 240,081 @ 3.7 s | **227,581 @ 341 s** (commiv 228,243 @ 299 s) |
+| 2000 TW   | **412,602 @ 10 s** | 426,882 @ 11 s | **400,437 @ 501 s** (commiv 406,038 @ 50 s) |
+
+At equal wall commiv wins every Moscow cell by 1.2–3.5%. Given ~10x the time, PyVRP
+crosses on five of six cells, by 0.2–1.4% (only 100 TW holds against any PyVRP budget
+tried). The crossing wall grows with size — at n=2000 PyVRP needs 161 s (CVRP) and 501 s
+(TW) to pass numbers commiv produced in 9–50 s. That is the shape of the claim: commiv is
+not "better than HGS at convergence" — it reaches ~98–99% of PyVRP's multi-minute quality
+in 1–10% of the time.
+
+To test that this is not a Moscow artifact, the same protocol ran on two more real
+cities with opposite road topologies: NYC (Manhattan one-way grid, measured asymmetry
+ratio 1.13–1.17, higher than Moscow's ~1.11) and Berlin (ring city, nearly symmetric at
+1.06). All 12 commiv cells validate feasible; equal-wall margins (PyVRP cost vs commiv
+cost, positive = commiv wins):
+
+| cell | commiv | PyVRP | margin |
+|---|---|---|---:|
+| nyc-100 CVRP | **32,563** @ 0.9 s | 32,718 @ 0.9 s | +0.5% |
+| nyc-1000 CVRP | **95,057** @ 2.0 s | 96,070 @ 2.2 s | +1.1% |
+| nyc-2000 CVRP | **139,772** @ 9.0 s | 141,241 @ 10.0 s | +1.1% |
+| berlin-100 CVRP | **34,046** @ 0.9 s | 34,292 @ 0.9 s | +0.7% |
+| berlin-1000 CVRP | **111,631** @ 2.3 s | 111,855 @ 2.5 s | +0.2% |
+| berlin-2000 CVRP | 167,232 @ 9.9 s | **166,234** @ 10.8 s | **−0.6%** |
+| nyc-100 TW | 36,992 @ 1.7 s | **36,925** @ 1.7 s | **−0.2%** |
+| nyc-1000 TW | **135,873** @ 5.0 s | 138,044 @ 5.2 s | +1.6% |
+| nyc-2000 TW | **221,184** @ 14.5 s | 229,132 @ 17.2 s | +3.6% |
+| berlin-100 TW | **36,967** @ 1.6 s | 37,335 @ 1.6 s | +1.0% |
+| berlin-1000 TW | **152,784** @ 6.1 s | 154,941 @ 6.3 s | +1.4% |
+| berlin-2000 TW | **247,678** @ 16.3 s | infeasible @ 19 s¹ | +2.7%¹ |
+
+<sub>¹ At commiv's 16 s wall PyVRP found no feasible schedule at all on berlin-2000 TW;
+its first feasible solution needed 63 s and still cost 254,459, +2.7% over commiv's 16 s
+result.</sub>
+
+Score at equal short wall: 10 of 12 cells to commiv, two thin losses (berlin-2000 CVRP
+−0.6%, nyc-100 TW −0.2%). The pattern matches the physics: the margin tracks the asymmetry
+of the city. NYC's one-way grid (most asymmetric) gives the widest margins; near-symmetric
+Berlin is where PyVRP — an engine born symmetric — gets closest, and takes its one CVRP
+cell.
+
+The same cells at ~10x budgets (commiv given matching wall via more iterations):
+
+| cell | commiv | PyVRP | margin |
+|---|---|---|---:|
+| nyc-100 CVRP | 32,371 @ 7.4 s | **32,285** @ 9 s | −0.3% |
+| nyc-1000 CVRP | **92,815** @ 20.2 s | 92,843 @ 20.2 s | +0.03% |
+| nyc-2000 CVRP | 134,779 @ 88 s | **134,478** @ 91 s | −0.2% |
+| berlin-100 CVRP | 34,012 @ 8.4 s | **33,809** @ 9 s | −0.6% |
+| berlin-1000 CVRP | 110,254 @ 24 s² | **109,717** @ 23 s | −0.5% |
+| berlin-2000 CVRP | 163,860 @ 89 s | **162,243** @ 100 s | −1.0% |
+| nyc-100 TW | 36,827 @ 16.4 s | **36,526** @ 17 s | −0.8% |
+| nyc-1000 TW | **134,885** @ 50 s | 135,171 @ 50 s | +0.2% |
+| nyc-2000 TW | 220,036 @ 141 s | **214,471** @ 148 s | −2.5% |
+| berlin-100 TW | 37,008 @ 16.4 s | **36,910** @ 16 s | −0.3% |
+| berlin-1000 TW | 152,889 @ 60 s | **152,053** @ 61 s | −0.6% |
+| berlin-2000 TW | **246,602** @ 164 s | 247,822 @ 166 s | +0.5% |
+
+<sub>² commiv's 3M-iteration run at 11.7 s scored 109,774, better than the 6M run shown —
+long SISR trajectories are not monotone in budget (a known limitation of the current
+threshold schedule; also visible at berlin-100 TW and Moscow 100 TW).</sub>
+
+So the honest division of the map: commiv owns the seconds regime nearly everywhere;
+give both engines minutes and the HGS machinery grinds past on most cells by 0.05–2.5%,
+with nyc-2000 TW its biggest win (−2.5%) and two deep directed+windowed cells still
+holding for commiv (nyc-1000 TW, berlin-2000 TW). Directedness sets how *long* commiv's
+lead survives: the more asymmetric and windowed the cell, the further out the crossing.
+
+Reproduce: `tools/competitors/pyvrp_road.py <instance.road> {cvrp|vrptw} <seconds>`; the
+NYC and Berlin matrices live in `vendor/road/` next to Moscow.
 
 ---
 
@@ -428,9 +529,14 @@ WORSE with time windows on (Moscow n=1000: +0.8%), so it defaults off for VRPTW.
 **Where the competition wins, and you should know it**
 
 - **Absolute accuracy at huge budgets.** LKH-3, HGS-CVRP, and SISR (the paper) reach lower
-  gaps (about 0.16% to 0.39% on Uchoa X) when given far more time. commiv trades that last
-  fraction of a percent for a large speed advantage. It is not state-of-the-art on accuracy
-  at the frontier.
+  gaps (about 0.16% to 0.39% on Uchoa X) when given far more time, and PyVRP crosses
+  commiv's seconds-scale numbers by 0.05–2.5% when both get minutes — the crossing wall
+  grows with instance size and asymmetry, but it exists on almost every cell. commiv
+  trades that last fraction of a percent for a large speed advantage. It is not
+  state-of-the-art on accuracy at the frontier.
+- **Dedicated fleet minimization.** On the vehicles-first Gehring–Homberger objective
+  commiv matches the best-known fleet on only 4 of 12 instances; the record holders run an
+  ejection-pool route-minimization phase commiv does not have yet.
 - **Massive symmetric instances.** FILO solves symmetric CVRPs with tens of thousands of
   nodes faster than anything here. commiv targets the routing-scale (hundreds to a few
   thousand) directed regime.
