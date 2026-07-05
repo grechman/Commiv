@@ -528,15 +528,30 @@ Two of the three long-budget TW cells come back to commiv at equal-or-less wall.
 the most-tuned instance in the suite — is the one PyVRP keeps: its HGS reaches a basin the
 SISR trajectory plateaus above (10 M iterations move it only from 229,511 to 229,544). The
 levers scale where there is slack to recover: at n=2000 they take nyc TW to 213,500 (−3.0 %
-and two vehicles under baseline), and at n=5000 they even take *Moscow* TW to 866,679
-(−0.7 %, one vehicle fewer) at near-equal wall — the larger, less-converged instances
-benefit most. They are VRPTW-only: the same four ported to the CVRP engine measured dead
-(an already-converged, window-free search has no slack to recover), so the CVRP rows above
-are unaffected.
+and two vehicles under baseline, at roughly twice the baseline wall — the equal-wall n=2000
+rerun is still open), and at n=5000 they even take *Moscow* TW to 866,679 (−0.7 %, one
+vehicle fewer) at near-equal wall — the larger, less-converged instances benefit most.
 
-Reproduce: `tools/competitors/pyvrp_road.py <instance.road> {cvrp|vrptw} <seconds>`; the
-NYC and Berlin matrices live in `vendor/road/` next to Moscow. The levers are the
-`solveVrptwSisr` flags above (see [`docs/rest.md`](docs/rest.md) for the REST fields).
+On the CVRP engine, three of the four ports (polish, stress, tabu) measured dead across
+cities — the window-free flagship is already near-converged and they only perturb it.
+`marathon` is alive there (an earlier "measured dead" verdict traced to a stale bench
+binary that silently ignored the flag): at 1M+ iterations it fixes the long-run
+non-monotonicity on near-symmetric instances. berlin-1000 baseline *worsens* with budget
+(109,774 @ 13 s at 3 M → 110,254 @ 30 s at 6 M); marathon gives 109,181 @ 18 s (4 M) and
+109,051 @ 29 s (6 M), better than baseline on 3/3 seeds, taking the berlin-1000 minute
+cell under the tables' fixed-seed protocol (PyVRP rerun at its 23 s wall: 109,522). NYC —
+the most asymmetric city — is the mirror image: every deviation from the base constants
+(marathon, colder tf alone, education at any cadence) measured *worse* there, and Moscow
+is a seed-level wash, so `marathon` stays opt-in. Seed-honest summary of the CVRP minute
+regime with the lever: berlin-1000 and nyc-1000 are statistical ties (3-seed spreads on
+both solvers span the margin), moscow and the n=2000 cells stay PyVRP's by 0.2–0.8 %.
+
+Reproduce: `tools/competitors/pyvrp_road.py <instance.road> {cvrp|vrptw} <seconds> [seed]`;
+the NYC and Berlin matrices live in `vendor/road/` next to Moscow. TW levers are the
+`solveVrptwSisr` flags above (see [`docs/rest.md`](docs/rest.md) for the REST fields); the
+CVRP cell: `zig build roadbench -Doptimize=ReleaseFast && RB_FILES=berlin-1000
+RB_ITERS=4000000 RB_THREADS=3 RB_SYM=0 RB_MARATHON=1 ./zig-out/bin/commiv-roadbench`
+→ 109,181, 11 routes, ~18 s.
 
 ---
 
