@@ -11,6 +11,7 @@ const Solution = cvrp_solution.Solution;
 const SisrCtx = cvrp_solution.SisrCtx;
 const educateGiant = cvrp_solution.educateGiant;
 const buildCvrpNeighbors = cvrp_solution.buildCvrpNeighbors;
+const buildCvrpNeighborsKeyed = cvrp_solution.buildCvrpNeighborsKeyed;
 const solveCvrpImpl = cvrp_solution.solveCvrpImpl;
 const validate = cvrp_solution.validate;
 const POP_CROSSOVER_N = cvrp_split.POP_CROSSOVER_N;
@@ -52,6 +53,13 @@ pub const SisrParams = struct {
     // short-run defaults above. Below the 1M-iter gate this is a no-op — the
     // default (false) path is bit-identical to before this flag existed.
     marathon: bool = false,
+    // Granular neighbor-list proximity key (see cvrp_solution.NbrKey). The
+    // historical .sum key symmetrizes and can hide one-way-close pairs on
+    // directed matrices; .min matches the ATSP seed's metric. Default .sum =
+    // bit-identical to before this knob existed.
+    nbr_key: cvrp_solution.NbrKey = .sum,
+    // Granular neighbor-list size. 0 = auto (the historical min(20, n-1)).
+    gk: usize = 0,
 };
 
 /// SISR solver for (symmetric or asymmetric) CVRP, uncapped fleet. Builds a feasible
@@ -63,8 +71,8 @@ pub fn solveCvrpSisr(allocator: std.mem.Allocator, inst: CvrpInstance, options: 
     if (inst.demand[0] != 0) return error.InvalidInstance; // depot demand must be 0: a nonzero value is a caller data-mapping bug, not something to silently ignore
     if (n <= 2) return solveCvrpImpl(allocator, inst, options, 10, 1, 0);
 
-    const gk: usize = @min(@as(usize, 20), n - 1);
-    const gran = try buildCvrpNeighbors(allocator, inst, gk);
+    const gk: usize = @min(if (params.gk == 0) @as(usize, 20) else params.gk, n - 1);
+    const gran = try buildCvrpNeighborsKeyed(allocator, inst, gk, params.nbr_key);
     defer allocator.free(gran);
 
     // initial solution: ATSP giant -> Split -> local optimum (strict-feasible).
@@ -358,4 +366,33 @@ test "CVRP SISR marathon: at 1M+ iters, feasible and changes the trajectory" {
     // a truly inert flag would collapse this to an equality, which is the bug
     // this test exists to catch.
     try std.testing.expect(r_off.total_cost != r_on.total_cost);
+}
+
+test "CVRP SISR nbr_key=min and gk: feasible, self-consistent, default bit-identical" {
+    const allocator = std.testing.allocator;
+    const n = 60;
+    const dim = n + 1;
+    var prng = std.Random.DefaultPrng.init(0xA51CE);
+    const rng = prng.random();
+    const matrix = try allocator.alloc(u32, dim * dim);
+    defer allocator.free(matrix);
+    for (0..dim) |i| {
+        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 100);
+    }
+    const demand = try allocator.alloc(u32, dim);
+    defer allocator.free(demand);
+    demand[0] = 0;
+    for (1..dim) |i| demand[i] = rng.intRangeAtMost(u32, 1, 5);
+    const inst = CvrpInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 12 };
+    // default nbr_key/gk must be bit-identical to the pre-knob engine
+    var a = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000 });
+    defer a.deinit();
+    var b = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000, .nbr_key = .sum, .gk = 20 });
+    defer b.deinit();
+    try std.testing.expectEqual(a.total_cost, b.total_cost);
+    // min key + larger list: still feasible and self-consistent
+    var c = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000, .nbr_key = .min, .gk = 40 });
+    defer c.deinit();
+    const checked = validate(inst, c.routes) orelse return error.TestInfeasibleResult;
+    try std.testing.expectEqual(c.total_cost, checked);
 }

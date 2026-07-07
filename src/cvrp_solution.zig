@@ -103,7 +103,19 @@ pub fn solveCvrpImpl(allocator: std.mem.Allocator, inst: CvrpInstance, options: 
 /// 1..n, 1-indexed; gran[(c-1)*k + i] = the i-th nearest, 0-padded). Restricts
 /// SWAP* to spatially close customers — the granular neighbourhood that makes the
 /// search fast and scalable. Caller owns the returned slice.
+pub const NbrKey = enum { sum, min, out };
+
 pub fn buildCvrpNeighbors(allocator: std.mem.Allocator, inst: CvrpInstance, k: usize) ![]usize {
+    return buildCvrpNeighborsKeyed(allocator, inst, k, .sum);
+}
+
+/// Same as buildCvrpNeighbors but with a selectable proximity key:
+/// .sum = d(c,j)+d(j,c) (the historical default; buries one-way-close
+/// pairs on directed matrices), .min = @min(d(c,j),d(j,c)) (keeps a pair
+/// that is cheap in EITHER direction - the same metric the ATSP seed's
+/// buildNativeCands uses, and what PyVRP's neighbourhood defaults to),
+/// .out = d(c,j) only (successor proximity).
+pub fn buildCvrpNeighborsKeyed(allocator: std.mem.Allocator, inst: CvrpInstance, k: usize, key_mode: NbrKey) ![]usize {
     const n = inst.n;
     const gran = try allocator.alloc(usize, n * k);
     @memset(gran, 0);
@@ -113,7 +125,7 @@ pub fn buildCvrpNeighbors(allocator: std.mem.Allocator, inst: CvrpInstance, k: u
     const top_key = try allocator.alloc(u64, kk);
     defer allocator.free(top_key);
     for (1..n + 1) |c| {
-        const cnt = cvrpTopKInsert(top_idx, top_key, kk, n, inst, c);
+        const cnt = cvrpTopKInsert(top_idx, top_key, kk, n, inst, c, key_mode);
         for (0..cnt) |i| gran[(c - 1) * k + i] = top_idx[i];
     }
     return gran;
@@ -126,11 +138,15 @@ pub fn buildCvrpNeighbors(allocator: std.mem.Allocator, inst: CvrpInstance, k: u
 /// O(n log n) full sort of which only the first kk entries were ever used). Same
 /// selection contract as vrptw.zig's topKInsert, duplicated here because the two
 /// live on different Instance types.
-fn cvrpTopKInsert(top_idx: []usize, top_key: []u64, kk: usize, n: usize, inst: CvrpInstance, c: usize) usize {
+fn cvrpTopKInsert(top_idx: []usize, top_key: []u64, kk: usize, n: usize, inst: CvrpInstance, c: usize, key_mode: NbrKey) usize {
     var cnt: usize = 0;
     for (1..n + 1) |j| {
         if (j == c) continue;
-        const key = inst.d(c, j) + inst.d(j, c);
+        const key = switch (key_mode) {
+            .sum => inst.d(c, j) + inst.d(j, c),
+            .min => @min(inst.d(c, j), inst.d(j, c)),
+            .out => inst.d(c, j),
+        };
         if (cnt < kk) {
             var pos = cnt;
             while (pos > 0 and (top_key[pos - 1] > key or (top_key[pos - 1] == key and top_idx[pos - 1] > j))) : (pos -= 1) {}
