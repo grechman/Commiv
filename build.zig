@@ -80,6 +80,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "commiv-atspbench", .src = "examples/atspbench.zig", .step = "atspbench", .desc = "ATSP gap benchmark (TSPLIB) vs proven optima" },
         .{ .name = "commiv-vrptwbench", .src = "examples/vrptwbench.zig", .step = "vrptwbench", .desc = "VRPTW gap benchmark (Solomon) vs SINTEF BKS" },
         .{ .name = "commiv-roadbench", .src = "examples/roadbench.zig", .step = "roadbench", .desc = "Real directed-road (OSRM Moscow) asymmetry + solve benchmark" },
+        .{ .name = "commiv-twroadbench", .src = "examples/twroadbench.zig", .step = "twroadbench", .desc = "Real directed-road VRPTW benchmark (make_windows overlay)" },
         .{ .name = "commiv-twprobe", .src = "examples/twprobe.zig", .step = "twprobe", .desc = "Synthetic VRPTW-SISR throughput + bit-identity probe (n=1000)" },
     };
     for (benches) |x| {
