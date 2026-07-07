@@ -532,6 +532,23 @@ and two vehicles under baseline, at roughly twice the baseline wall — the equa
 rerun is still open), and at n=5000 they even take *Moscow* TW to 866,679 (−0.7 %, one
 vehicle fewer) at near-equal wall — the larger, less-converged instances benefit most.
 
+The `nbr_key`/`gk` knobs (below) and the `polish_every` cadence apply to the TW engine
+too, and together they retake nyc-2000 TW — PyVRP's biggest win in the baseline tables —
+at *equal-or-less* wall, no 2x asterisk (`combo + nbr_key=min + polish_every=8`, 800 k
+iterations, 3 seeds, `commiv-twroadbench` protocol):
+
+| nyc-2000 TW @ ≤150 s | seed 12345 | seed 7 | seed 99 | mean |
+|---|---|---|---|---:|
+| commiv (109–123 s) | 215,026 | 215,052 | **214,233** | **214,770** |
+| PyVRP (150 s) | 214,812 | 220,158 | 216,533 | 217,168 |
+
+commiv's *worst* seed beats PyVRP's 3-seed mean (+1.1 %). Sparse polish cadence is the
+n=2000 ingredient: per-accept polish costs too much wall at that scale, and
+`polish_every=8` bought both the iterations and three vehicles over every-accept polish.
+On nyc-1000 TW at 150 s commiv holds either way (~133.2 k vs PyVRP's 133.9 k 3-seed mean,
+17–19 vehicles vs their 19–20); `min` is equal-wall-neutral there, and Berlin TW measured
+neutral too, so `.sum` stays the TW default as well.
+
 On the CVRP engine, three of the four ports (polish, stress, tabu) measured dead across
 cities — the window-free flagship is already near-converged and they only perturb it.
 `marathon` is alive there (an earlier "measured dead" verdict traced to a stale bench
@@ -558,11 +575,14 @@ old behavior bit-identically) restores them at zero per-iteration cost:
 | nyc-2000 (min, gk=40, 5 M, ≤91 s) | **133,815 / 133,894 / 134,303** | 134,549 / 133,421 / 134,676 @ 91 s | **+0.16 %** |
 
 Every nyc-1000 seed beats PyVRP's best seed; nyc-1000's *seconds* cell also improves
-(95,057 → 93,832 @ 2.4 s with `min`). The key is topology-gated like marathon: Moscow
-(ratio 1.11) and Berlin (1.06) measured neutral-to-worse on `min`, so `.sum` stays the
-default. Seed-honest summary of the CVRP minute regime with both levers: nyc-1000 is
-commiv's outright, nyc-2000 commiv on 3-seed means, berlin-1000 tie-to-commiv, the
-moscow cells stay PyVRP's by 0.4–0.8 %.
+(95,057 → 93,832 @ 2.4 s with `min`). At the 60-second wall the margin holds and grows
+earlier: commiv 13 M `min` iterations finish in ~49 s at 91,405 / 91,714 / 91,973 vs
+PyVRP's 92,525 / 93,484 / 92,786 at 60 s — every commiv seed beats PyVRP's best seed
+with ten seconds to spare (+1.33 % on means). The key is topology-gated like marathon:
+Moscow (ratio 1.11) and Berlin (1.06) measured neutral-to-worse on `min`, so `.sum`
+stays the default. Seed-honest summary of the CVRP minute regime with both levers:
+nyc-1000 is commiv's outright, nyc-2000 commiv on 3-seed means, berlin-1000
+tie-to-commiv, the moscow cells stay PyVRP's by 0.4–0.8 %.
 
 Reproduce: `tools/competitors/pyvrp_road.py <instance.road> {cvrp|vrptw} <seconds> [seed]`;
 the NYC and Berlin matrices live in `vendor/road/` next to Moscow. TW levers are the
@@ -574,6 +594,11 @@ CVRP cells (`zig build roadbench -Doptimize=ReleaseFast` first):
 ./zig-out/bin/commiv-roadbench` → 91,639;
 `RB_FILES=nyc-2000 RB_ITERS=5000000 RB_THREADS=3 RB_SYM=0 RB_NBR=min RB_GK=40
 ./zig-out/bin/commiv-roadbench` → 133,815.
+The road-TW cells: `zig build twroadbench -Doptimize=ReleaseFast && python3
+tools/competitors/dump_windows.py nyc-2000 && TP_FILE=nyc-2000 TP_ITERS=800000
+TP_THREADS=3 TP_COMBO=1 TP_NBR=min TP_POLISH_EVERY=8 ./zig-out/bin/commiv-twroadbench`
+→ 215,026, 33 vehicles, ~123 s (PyVRP side: `pyvrp_road.py vendor/road/nyc-2000.road
+vrptw 150 [seed]`).
 
 ---
 
