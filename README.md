@@ -593,7 +593,12 @@ CVRP cells (`zig build roadbench -Doptimize=ReleaseFast` first):
 `RB_FILES=nyc-1000 RB_ITERS=4000000 RB_THREADS=3 RB_SYM=0 RB_NBR=min
 ./zig-out/bin/commiv-roadbench` → 91,639;
 `RB_FILES=nyc-2000 RB_ITERS=5000000 RB_THREADS=3 RB_SYM=0 RB_NBR=min RB_GK=40
-./zig-out/bin/commiv-roadbench` → 133,815.
+./zig-out/bin/commiv-roadbench` → 133,815 (add `RB_FINAL_LS=1` → 133,677).
+`final_ls` is the newest lever (both engines, also REST-less bench-only for now): one
+improvement-only local-search convergence on the returned best — the insertion-sort
+principle, a cheap refiner suited to nearly-optimal input. Never worse by construction,
+~free wall (≤2 s at n=2000), worth −0.05 % to −0.3 % depending on how converged the
+cell already is (biggest on small instances, crumbs where polish already ran).
 The road-TW cells: `zig build twroadbench -Doptimize=ReleaseFast && python3
 tools/competitors/dump_windows.py nyc-2000 && TP_FILE=nyc-2000 TP_ITERS=800000
 TP_THREADS=3 TP_COMBO=1 TP_NBR=min TP_POLISH_EVERY=8 ./zig-out/bin/commiv-twroadbench`
