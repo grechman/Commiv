@@ -221,9 +221,14 @@ pub fn solveCvrpSisr(allocator: std.mem.Allocator, inst: CvrpInstance, options: 
     if (params.route_atsp) {
         // A route reorder can open inter-route moves and vice versa, so
         // alternate refine and education until the refiner finds nothing.
+        // The memo array makes re-sweeps skip routes untouched since their
+        // last (non-improving) sub-solve.
         best.flushLinks();
+        const solved_hash = try allocator.alloc(u64, best.nroutes);
+        defer allocator.free(solved_hash);
+        @memset(solved_hash, 0);
         while (true) {
-            if (!(try best.routeAtspRefine(options.seed ^ 0xA75A))) break;
+            if (!(try best.routeAtspRefine(options.seed ^ 0xA75A, solved_hash))) break;
             var prev_dist = best.distance;
             while (true) {
                 try best.localSearch();

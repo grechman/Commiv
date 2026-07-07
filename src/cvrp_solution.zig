@@ -760,14 +760,18 @@ pub const Solution = struct {
     /// the rewritten route rather than the sub-solver's accounting. Returns
     /// true if any route improved. Suited to nearly-converged input: the
     /// LK-grade sub-solve reaches orderings the relocate/2-opt vocabulary
-    /// cannot.
-    pub fn routeAtspRefine(self: *Solution, seed: u64) !bool {
+    /// cannot. `solved_hash` (caller-owned, zeroed before the first call, one
+    /// slot per route index) memoizes the order-hash each route was last
+    /// solved at, so alternation re-sweeps skip untouched routes for free.
+    pub fn routeAtspRefine(self: *Solution, seed: u64, solved_hash: []u64) !bool {
         var any = false;
         for (0..self.nroutes) |r| {
             const s = self.routeStart(r);
             const e = self.route_end[r];
             const len = e - s;
             if (len < 5) continue; // short routes are already LS-optimal
+            const hash = orderHash(self.order[s..e]);
+            if (solved_hash[r] == hash) continue; // unchanged since last solve
             const m = len + 1; // + depot as node 0
             const sub = try self.allocator.alloc(u32, m * m);
             defer self.allocator.free(sub);
@@ -794,7 +798,10 @@ pub const Solution = struct {
                 .search = .{ .enable_lk = true, .lk_max_depth = 5 },
             }) catch continue;
             defer res.deinit();
-            if (res.length >= cur) continue;
+            if (res.length >= cur) {
+                solved_hash[r] = hash;
+                continue;
+            }
             // Rotate the returned cycle so the depot (node 0) leads, then map
             // sub-nodes back to customers via the saved old order.
             @memcpy(self.scratch[0..len], self.order[s..e]);
@@ -815,12 +822,26 @@ pub const Solution = struct {
             }
             if (got >= cur) {
                 @memcpy(self.order[s..e], self.scratch[0..len]);
+                solved_hash[r] = hash;
             } else {
+                // Improved: leave the slot open so the next sweep re-solves
+                // the new order (the sub-solve is seeded/deterministic, so
+                // skipping is only sound for contents already solved to a
+                // no-improvement verdict).
+                solved_hash[r] = 0;
                 any = true;
             }
         }
         if (any) self.recompute();
         return any;
+    }
+
+    // FNV-1a over a route's customer sequence; 0 is reserved as the
+    // "never solved" sentinel for routeAtspRefine's memo array.
+    fn orderHash(seq: []const usize) u64 {
+        var h: u64 = 0xcbf29ce484222325;
+        for (seq) |c| h = (h ^ @as(u64, c)) *% 0x100000001b3;
+        return if (h == 0) 1 else h;
     }
 
     // ---- Linked-list local search (the O(1)-move engine) -----------------
