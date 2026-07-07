@@ -475,7 +475,7 @@ pub const Solution = struct {
     /// Dispatches to the O(1)-move linked-list engine when granular lists are on
     /// (the real path; n>=2), falling back to the array engine only for the
     /// degenerate gk==0 case (n<=1, nothing to move).
-    fn localSearch(self: *Solution) !void {
+    pub fn localSearch(self: *Solution) !void {
         if (self.gk == 0) return self.localSearchArray();
         return self.localSearchLinked();
     }

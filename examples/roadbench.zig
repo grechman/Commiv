@@ -58,6 +58,7 @@ pub fn main(init: std.process.Init) !void {
             .nbr_key = if (std.mem.eql(u8, nbr, "min")) .min else if (std.mem.eql(u8, nbr, "out")) .out else .sum,
             // RB_GK: neighbor-list size, 0 = auto (20).
             .gk = try std.fmt.parseInt(usize, env.get("RB_GK") orelse "0", 10),
+            .final_ls = std.mem.eql(u8, env.get("RB_FINAL_LS") orelse "0", "1"),
         };
         const solve_opts = commiv.SolveOptions{
             .seed = seed,

@@ -77,6 +77,7 @@ pub fn main(init: std.process.Init) !void {
         .polish_every = try std.fmt.parseInt(usize, env.get("TP_POLISH_EVERY") orelse "1", 10),
         .nbr_key = if (std.mem.eql(u8, nbr, "min")) .min else if (std.mem.eql(u8, nbr, "out")) .out else .sum,
         .gk = gk,
+        .final_ls = std.mem.eql(u8, env.get("TP_FINAL_LS") orelse "0", "1"),
     };
     const solve_opts = commiv.SolveOptions{
         .seed = seed,

@@ -60,6 +60,13 @@ pub const SisrParams = struct {
     nbr_key: cvrp_solution.NbrKey = .sum,
     // Granular neighbor-list size. 0 = auto (the historical min(20, n-1)).
     gk: usize = 0,
+    // Final education: after the ruin-recreate schedule ends, run the full
+    // granular local search (educateGiant's engine: relocate/or-opt/swap/
+    // swap*/2-opt*) on the BEST solution until no improving move remains.
+    // Improvement-only, so the returned cost is never worse than without it;
+    // costs one LS convergence (~ms at n=100, ~seconds at n=2000). Default
+    // off = bit-identical output to before this flag existed.
+    final_ls: bool = false,
 };
 
 /// SISR solver for (symmetric or asymmetric) CVRP, uncapped fleet. Builds a feasible
@@ -192,6 +199,20 @@ pub fn solveCvrpSisr(allocator: std.mem.Allocator, inst: CvrpInstance, options: 
         temp *= cf;
     }
 
+    if (params.final_ls) {
+        // Sync arrays from links, then educate to a full local optimum. Each
+        // localSearch call is a fast loose drain (see localSearchLinked);
+        // iterate until it stops improving so the final answer is a genuine
+        // local optimum of the whole move vocabulary.
+        best.flushLinks();
+        var prev_dist = best.distance;
+        while (true) {
+            try best.localSearch();
+            best.flushLinks();
+            if (best.distance >= prev_dist) break;
+            prev_dist = best.distance;
+        }
+    }
     best.flushLinks(); // order/route_end/load/distance/cost from the linked rep
     var result = try best.toResult(allocator);
     errdefer result.deinit();
@@ -395,4 +416,32 @@ test "CVRP SISR nbr_key=min and gk: feasible, self-consistent, default bit-ident
     defer c.deinit();
     const checked = validate(inst, c.routes) orelse return error.TestInfeasibleResult;
     try std.testing.expectEqual(c.total_cost, checked);
+}
+
+test "CVRP SISR final_ls: never worse than without it, feasible, default bit-identical" {
+    const allocator = std.testing.allocator;
+    const n = 60;
+    const dim = n + 1;
+    var prng = std.Random.DefaultPrng.init(0xF17A1);
+    const rng = prng.random();
+    const matrix = try allocator.alloc(u32, dim * dim);
+    defer allocator.free(matrix);
+    for (0..dim) |i| {
+        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 100);
+    }
+    const demand = try allocator.alloc(u32, dim);
+    defer allocator.free(demand);
+    demand[0] = 0;
+    for (1..dim) |i| demand[i] = rng.intRangeAtMost(u32, 1, 5);
+    const inst = CvrpInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 12 };
+    var off = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000 });
+    defer off.deinit();
+    var off2 = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000, .final_ls = false });
+    defer off2.deinit();
+    try std.testing.expectEqual(off.total_cost, off2.total_cost);
+    var on = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000, .final_ls = true });
+    defer on.deinit();
+    const checked = validate(inst, on.routes) orelse return error.TestInfeasibleResult;
+    try std.testing.expectEqual(on.total_cost, checked);
+    try std.testing.expect(on.total_cost <= off.total_cost);
 }

@@ -2082,6 +2082,10 @@ pub const VrptwSisrParams = struct {
     nbr_key: NbrKey = .sum,
     // Granular neighbor-list size. 0 = auto (the historical min(20, n-1)).
     gk: usize = 0,
+    // Final education: after the schedule ends, run the touched-route polish
+    // descent over ALL routes of the best solution, iterated until no
+    // improving move remains. Improvement-only; default off = bit-identical.
+    final_ls: bool = false,
     // Stress-guided ruin center: probability an iteration picks its ruin seed
     // by a 4-way tournament on detour cost (stress(c) = d(prev,c)+d(c,next)-
     // d(prev,next) at c's current route position) instead of a uniform random
@@ -2996,6 +3000,34 @@ pub fn solveVrptwSisr(allocator: std.mem.Allocator, inst: VrptwInstance, options
         temp *= cf;
     }
 
+    if (params.final_ls) {
+        // Final education (improvement-only): rebuild a live SisrTw from the
+        // BEST routes - cur can legitimately be worse than best at loop end
+        // (threshold acceptance) - polish every route to a fixed point, and
+        // keep the result only if it improved. polish applies strict
+        // improvements only, so the returned cost is never worse than
+        // without this pass.
+        var fin = try SisrTw.init(allocator, inst, params.veh_penalty, gran, gk);
+        defer fin.deinit();
+        for (best.routes) |route| {
+            const ri = try fin.addSlot();
+            try fin.installRoute(ri, route);
+        }
+        var all_routes: std.ArrayList(usize) = .empty;
+        defer all_routes.deinit(allocator);
+        while (true) {
+            const before = fin.cost;
+            all_routes.clearRetainingCapacity();
+            for (0..fin.routes.items.len) |ri| try all_routes.append(allocator, ri);
+            try fin.polish(all_routes.items);
+            fin.commit();
+            if (fin.cost >= before) break;
+        }
+        if (fin.cost < best_cost) {
+            best.deinit();
+            best = try fin.toResult(allocator);
+        }
+    }
     if (validate(inst, best.routes) == null) return error.Infeasible;
     return best;
 }
@@ -4299,4 +4331,45 @@ test "VRPTW SISR nbr_key=min and gk: feasible, self-consistent, default bit-iden
     var c = try solveVrptwSisr(allocator, inst, .{ .seed = 7 }, .{ .iters = 8000, .nbr_key = .min, .gk = 40 });
     defer c.deinit();
     try std.testing.expect(validate(inst, c.routes) != null);
+}
+
+test "VRPTW SISR final_ls: never worse, feasible, default bit-identical" {
+    const allocator = std.testing.allocator;
+    const n = 40;
+    const dim = n + 1;
+    var prng = std.Random.DefaultPrng.init(0xF17A1);
+    const rng = prng.random();
+    const matrix = try allocator.alloc(u32, dim * dim);
+    defer allocator.free(matrix);
+    for (0..dim) |i| {
+        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 60);
+    }
+    const demand = try allocator.alloc(u32, dim);
+    defer allocator.free(demand);
+    const ready = try allocator.alloc(u32, dim);
+    defer allocator.free(ready);
+    const due = try allocator.alloc(u32, dim);
+    defer allocator.free(due);
+    const service = try allocator.alloc(u32, dim);
+    defer allocator.free(service);
+    demand[0] = 0;
+    ready[0] = 0;
+    due[0] = 100_000;
+    service[0] = 0;
+    for (1..dim) |i| {
+        demand[i] = rng.intRangeAtMost(u32, 1, 5);
+        ready[i] = rng.intRangeAtMost(u32, 0, 300);
+        due[i] = ready[i] + rng.intRangeAtMost(u32, 80, 400);
+        service[i] = rng.intRangeAtMost(u32, 1, 10);
+    }
+    const inst = VrptwInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 12, .ready = ready, .due = due, .service = service };
+    var off = try solveVrptwSisr(allocator, inst, .{ .seed = 7 }, .{ .iters = 8000 });
+    defer off.deinit();
+    var off2 = try solveVrptwSisr(allocator, inst, .{ .seed = 7 }, .{ .iters = 8000, .final_ls = false });
+    defer off2.deinit();
+    try std.testing.expectEqual(off.total_cost, off2.total_cost);
+    var on = try solveVrptwSisr(allocator, inst, .{ .seed = 7 }, .{ .iters = 8000, .final_ls = true });
+    defer on.deinit();
+    try std.testing.expect(validate(inst, on.routes) != null);
+    try std.testing.expect(on.total_cost <= off.total_cost);
 }
