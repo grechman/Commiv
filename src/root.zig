@@ -74,6 +74,7 @@ pub const solveVrptwSisr = vrptw.solveVrptwSisr; // flagship engine + time windo
 pub const solveVrptwSisrParallel = vrptw.solveVrptwSisrParallel;
 pub const solveVrptwHgs = vrptw.solveVrptwHgs;
 pub const VrptwSisrParams = vrptw.VrptwSisrParams;
+pub const VrptwNbrKey = vrptw.NbrKey;
 pub const VrptwParams = vrptw.VrptwParams; // tuning for solveVrptw (rounds/restarts/veh_penalty)
 pub const VrptwHgsParams = vrptw.HgsParams;
 pub const validateVrptw = vrptw.validate; // feasibility + true-cost checker for a VrptwResult's routes

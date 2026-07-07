@@ -267,7 +267,17 @@ const Route = std.ArrayList(usize);
 /// (Solomon rc201 default-seed gap 0.576% -> 2.291%) for zero quality gain, so
 /// the swap is deferred until we deliberately re-baseline the tables. The build
 /// is one-time and costs ~40ms at n=2000; nothing hot is lost.
+/// Granular-list proximity key (mirror of cvrp_solution.NbrKey, duplicated
+/// because the two engines live on different Instance types): .sum =
+/// d(c,j)+d(j,c) (historical default), .min = @min of the two directions
+/// (keeps one-way-close pairs visible on directed matrices), .out = d(c,j).
+pub const NbrKey = enum { sum, min, out };
+
 fn buildNeighbors(allocator: std.mem.Allocator, inst: VrptwInstance, k: usize) ![]usize {
+    return buildNeighborsKeyed(allocator, inst, k, .sum);
+}
+
+fn buildNeighborsKeyed(allocator: std.mem.Allocator, inst: VrptwInstance, k: usize, key_mode: NbrKey) ![]usize {
     const n = inst.n;
     const gran = try allocator.alloc(usize, n * k);
     @memset(gran, 0);
@@ -280,7 +290,11 @@ fn buildNeighbors(allocator: std.mem.Allocator, inst: VrptwInstance, k: usize) !
         var m: usize = 0;
         for (1..n + 1) |j| {
             if (j == c) continue;
-            keyc[j] = inst.d(c, j) + inst.d(j, c);
+            keyc[j] = switch (key_mode) {
+                .sum => inst.d(c, j) + inst.d(j, c),
+                .min => @min(inst.d(c, j), inst.d(j, c)),
+                .out => inst.d(c, j),
+            };
             idx[m] = j;
             m += 1;
         }
@@ -2062,6 +2076,12 @@ pub const VrptwSisrParams = struct {
     // polish path, since anything mod 1 is 0. No-op when params.polish is
     // false.
     polish_every: usize = 1,
+    // Granular neighbor-list proximity key (see NbrKey). .min is the measured
+    // lever for strongly one-way street grids; default .sum = bit-identical to
+    // before this knob existed.
+    nbr_key: NbrKey = .sum,
+    // Granular neighbor-list size. 0 = auto (the historical min(20, n-1)).
+    gk: usize = 0,
     // Stress-guided ruin center: probability an iteration picks its ruin seed
     // by a 4-way tournament on detour cost (stress(c) = d(prev,c)+d(c,next)-
     // d(prev,next) at c's current route position) instead of a uniform random
@@ -2852,8 +2872,8 @@ pub fn solveVrptwSisr(allocator: std.mem.Allocator, inst: VrptwInstance, options
     const sp = try splitDpTw(allocator, inst, giant_buf, params.veh_penalty);
     defer allocator.free(sp.pred);
 
-    const gk: usize = @min(@as(usize, 20), if (n > 1) n - 1 else 1);
-    const gran = try buildNeighbors(allocator, inst, gk);
+    const gk: usize = @min(if (params.gk == 0) @as(usize, 20) else params.gk, if (n > 1) n - 1 else 1);
+    const gran = try buildNeighborsKeyed(allocator, inst, gk, params.nbr_key);
     defer allocator.free(gran);
 
     var cur = try SisrTw.init(allocator, inst, params.veh_penalty, gran, gk);
@@ -4238,4 +4258,45 @@ test "VRPTW SISR marathon: at 1M+ iters, feasible and changes the trajectory" {
     // a truly inert flag would collapse this to an equality, which is the bug
     // this test exists to catch.
     try std.testing.expect(r_off.total_cost != r_on.total_cost);
+}
+
+test "VRPTW SISR nbr_key=min and gk: feasible, self-consistent, default bit-identical" {
+    const allocator = std.testing.allocator;
+    const n = 40;
+    const dim = n + 1;
+    var prng = std.Random.DefaultPrng.init(0x901123);
+    const rng = prng.random();
+    const matrix = try allocator.alloc(u32, dim * dim);
+    defer allocator.free(matrix);
+    for (0..dim) |i| {
+        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 60);
+    }
+    const demand = try allocator.alloc(u32, dim);
+    defer allocator.free(demand);
+    const ready = try allocator.alloc(u32, dim);
+    defer allocator.free(ready);
+    const due = try allocator.alloc(u32, dim);
+    defer allocator.free(due);
+    const service = try allocator.alloc(u32, dim);
+    defer allocator.free(service);
+    demand[0] = 0;
+    ready[0] = 0;
+    due[0] = 100_000;
+    service[0] = 0;
+    for (1..dim) |i| {
+        demand[i] = rng.intRangeAtMost(u32, 1, 5);
+        ready[i] = rng.intRangeAtMost(u32, 0, 300);
+        due[i] = ready[i] + rng.intRangeAtMost(u32, 80, 400);
+        service[i] = rng.intRangeAtMost(u32, 1, 10);
+    }
+    const inst = VrptwInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 12, .ready = ready, .due = due, .service = service };
+    var a = try solveVrptwSisr(allocator, inst, .{ .seed = 7 }, .{ .iters = 8000 });
+    defer a.deinit();
+    var b = try solveVrptwSisr(allocator, inst, .{ .seed = 7 }, .{ .iters = 8000, .nbr_key = .sum, .gk = 20 });
+    defer b.deinit();
+    try std.testing.expectEqual(a.total_cost, b.total_cost);
+    try std.testing.expectEqual(a.vehicles, b.vehicles);
+    var c = try solveVrptwSisr(allocator, inst, .{ .seed = 7 }, .{ .iters = 8000, .nbr_key = .min, .gk = 40 });
+    defer c.deinit();
+    try std.testing.expect(validate(inst, c.routes) != null);
 }

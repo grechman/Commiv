@@ -184,6 +184,8 @@ const VrptwRequest = struct {
     stress_rate: f64 = 0.0,
     tabu_tenure: u64 = 0,
     marathon: bool = false,
+    nbr_key: []const u8 = "sum", // granular-list key: "sum" | "min" | "out"
+    gk: u64 = 0, // granular-list size, 0 = auto (20)
 };
 
 fn solveVrptw(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []const u8) !void {
@@ -220,6 +222,8 @@ fn solveVrptw(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []c
         params.stress_rate = r.stress_rate;
         params.tabu_tenure = @intCast(r.tabu_tenure);
         params.marathon = r.marathon;
+        params.nbr_key = if (std.mem.eql(u8, r.nbr_key, "min")) .min else if (std.mem.eql(u8, r.nbr_key, "out")) .out else .sum;
+        params.gk = @intCast(r.gk);
         if (r.threads > 1)
             break :blk commiv.solveVrptwSisrParallel(arena, inst, .{ .seed = r.seed }, params, r.threads) catch |err|
                 return respondSolverError(req, err);

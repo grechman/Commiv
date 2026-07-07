@@ -55,6 +55,10 @@ pub fn main(init: std.process.Init) !void {
         const stress = try std.fmt.parseFloat(f64, env.get("VT_STRESS") orelse if (combo) "0.5" else "0");
         const tabu = try std.fmt.parseInt(usize, env.get("VT_TABU") orelse if (combo) "10000" else "0", 10);
         const marathon = combo or std.mem.eql(u8, env.get("VT_MARATHON") orelse "0", "1");
+        // VT_NBR: granular-list key (sum|min|out); VT_GK: list size, 0 = auto.
+        const nbr_env = env.get("VT_NBR") orelse "sum";
+        const nbr_key: commiv.VrptwNbrKey = if (std.mem.eql(u8, nbr_env, "min")) .min else if (std.mem.eql(u8, nbr_env, "out")) .out else .sum;
+        const vt_gk = try std.fmt.parseInt(usize, env.get("VT_GK") orelse "0", 10);
         const t0 = nanos();
         var res = if (use_hgs) try commiv.solveVrptwHgs(allocator, inst, solve_opts, .{
             .mu = try std.fmt.parseInt(usize, env.get("VT_MU") orelse "25", 10),
@@ -62,7 +66,7 @@ pub fn main(init: std.process.Init) !void {
             .generations = try std.fmt.parseInt(usize, env.get("VT_GENS") orelse "30", 10),
             .veh_penalty = veh_penalty,
         }) else if (use_sisr)
-            try commiv.solveVrptwSisr(allocator, inst, solve_opts, .{ .iters = sisr_iters, .veh_penalty = veh_penalty, .adjacent_gaps = adjacent_gaps, .polish = polish, .stress_rate = stress, .tabu_tenure = tabu, .marathon = marathon })
+            try commiv.solveVrptwSisr(allocator, inst, solve_opts, .{ .iters = sisr_iters, .veh_penalty = veh_penalty, .adjacent_gaps = adjacent_gaps, .polish = polish, .stress_rate = stress, .tabu_tenure = tabu, .marathon = marathon, .nbr_key = nbr_key, .gk = vt_gk })
         else
             try commiv.solveVrptw(allocator, inst, solve_opts, .{ .rounds = rounds, .restarts = restarts, .veh_penalty = veh_penalty });
         defer res.deinit();
