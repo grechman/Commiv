@@ -594,11 +594,23 @@ CVRP cells (`zig build roadbench -Doptimize=ReleaseFast` first):
 ./zig-out/bin/commiv-roadbench` → 91,639;
 `RB_FILES=nyc-2000 RB_ITERS=5000000 RB_THREADS=3 RB_SYM=0 RB_NBR=min RB_GK=40
 ./zig-out/bin/commiv-roadbench` → 133,815 (add `RB_FINAL_LS=1` → 133,677).
-`final_ls` is the newest lever (both engines, also REST-less bench-only for now): one
+`final_ls` is a post-run lever (both engines, also REST-less bench-only for now): one
 improvement-only local-search convergence on the returned best — the insertion-sort
 principle, a cheap refiner suited to nearly-optimal input. Never worse by construction,
 ~free wall (≤2 s at n=2000), worth −0.05 % to −0.3 % depending on how converged the
 cell already is (biggest on small instances, crumbs where polish already ran).
+`route_atsp` (CVRP only, `RB_ROUTE_ATSP=1`) is the next refiner rung: each route's
+internal order re-solved as a standalone ATSP through the depot with the elite directed
+engine, alternated with `final_ls` drains until dry, memoized so re-sweeps skip
+untouched routes. Also never worse by construction (strict-improvement splice, verified
+by recount). 3-seed deltas on top of `final_ls`: nyc-1000 −0.29/−0.32/−0.30 %
+(91,346/91,472/91,793), nyc-2000 −0.15/−0.12/−0.32 % (133,472/133,451/133,588),
+berlin-1000 −0.10/−0.07/−0.18 % (109,075/109,560/109,395), moscow-1000
+−0.01/−0.08/−0.06 %, nyc-100 pulls the worst seed to the best-seed floor (32,328).
+Gain tracks route length (it reaches whole-route reorderings the relocate/2-opt
+vocabulary can't); cost is 1–5.5 s at n=1000–2000 — ~6 % of the nyc-2000 cell's wall,
+~4 % at any 60-second wall, but up to ~15 % of the shortest 20 s protocols, so it stays
+opt-in. Repro: append `RB_FINAL_LS=1 RB_ROUTE_ATSP=1` to any roadbench command above.
 The road-TW cells: `zig build twroadbench -Doptimize=ReleaseFast && python3
 tools/competitors/dump_windows.py nyc-2000 && TP_FILE=nyc-2000 TP_ITERS=800000
 TP_THREADS=3 TP_COMBO=1 TP_NBR=min TP_POLISH_EVERY=8 ./zig-out/bin/commiv-twroadbench`
