@@ -325,6 +325,33 @@ pub const Solution = struct {
         return s;
     }
 
+    /// Build a Solution from a flat customer order plus exclusive route ends
+    /// (the parallel driver's slot layout). Links are allocated but not built;
+    /// gran/gk are left empty for the caller to assign.
+    pub fn fromFlat(allocator: std.mem.Allocator, inst: CvrpInstance, order: []const usize, ends: []const usize) !Solution {
+        const n = inst.n;
+        var s = Solution{
+            .allocator = allocator,
+            .inst = inst,
+            .order = try allocator.dupe(usize, order),
+            .route_end = try allocator.alloc(usize, n),
+            .nroutes = ends.len,
+            .load = try allocator.alloc(u32, n),
+            .cost = 0,
+            .scratch = try allocator.alloc(usize, n),
+            .pos = try allocator.alloc(usize, n + 1),
+            .rof = try allocator.alloc(usize, n + 1),
+            .next = try allocator.alloc(usize, n + 1),
+            .prev = try allocator.alloc(usize, n + 1),
+            .head = try allocator.alloc(usize, n),
+            .tail = try allocator.alloc(usize, n),
+            .active = try allocator.alloc(bool, n + 1),
+        };
+        @memcpy(s.route_end[0..ends.len], ends);
+        s.recompute();
+        return s;
+    }
+
     pub fn deinit(self: *Solution) void {
         self.allocator.free(self.order);
         self.allocator.free(self.route_end);
@@ -393,7 +420,7 @@ pub const Solution = struct {
         }
     }
 
-    fn recompute(self: *Solution) void {
+    pub fn recompute(self: *Solution) void {
         var total: u64 = 0;
         var nonempty: usize = 0;
         for (0..self.nroutes) |r| {
@@ -753,92 +780,95 @@ pub const Solution = struct {
         }
     }
 
-    /// Post-run refiner: re-solve each route's internal order as a standalone
-    /// ATSP through the depot (submatrix extract, tiny budget). Route contents
-    /// are unchanged, so load/feasibility are unchanged; a reorder is applied
-    /// only on strict distance improvement, verified by a direct recount of
-    /// the rewritten route rather than the sub-solver's accounting. Returns
-    /// true if any route improved. Suited to nearly-converged input: the
-    /// LK-grade sub-solve reaches orderings the relocate/2-opt vocabulary
-    /// cannot. `solved_hash` (caller-owned, zeroed before the first call, one
-    /// slot per route index) memoizes the order-hash each route was last
-    /// solved at, so alternation re-sweeps skip untouched routes for free.
-    pub fn routeAtspRefine(self: *Solution, seed: u64, solved_hash: []u64) !bool {
-        var any = false;
-        for (0..self.nroutes) |r| {
-            const s = self.routeStart(r);
-            const e = self.route_end[r];
-            const len = e - s;
-            if (len < 5) continue; // short routes are already LS-optimal
-            const hash = orderHash(self.order[s..e]);
-            if (solved_hash[r] == hash) continue; // unchanged since last solve
-            const m = len + 1; // + depot as node 0
-            const sub = try self.allocator.alloc(u32, m * m);
-            defer self.allocator.free(sub);
-            for (0..m) |i| {
-                const ci = if (i == 0) 0 else self.order[s + i - 1];
-                for (0..m) |j| {
-                    const cj = if (j == 0) 0 else self.order[s + j - 1];
-                    sub[i * m + j] = if (i == j) 0 else @as(u32, @intCast(self.inst.d(ci, cj)));
-                }
-            }
-            var cur: u64 = 0;
-            {
-                var prev: usize = 0;
-                for (self.order[s..e]) |c| {
-                    cur += self.inst.d(prev, c);
-                    prev = c;
-                }
-                cur += self.inst.d(prev, 0);
-            }
-            var res = asymmetric.solveAtsp(self.allocator, sub, m, .{
-                .seed = seed +% r,
-                .budget = .{ .trials = 8, .trial_extension_factor = 2, .max_passes = 40 },
-                .candidates = .{ .candidate_count = @min(@as(usize, 8), m - 2) },
-                .search = .{ .enable_lk = true, .lk_max_depth = 5 },
-            }) catch continue;
-            defer res.deinit();
-            if (res.length >= cur) {
-                solved_hash[r] = hash;
-                continue;
-            }
-            // Rotate the returned cycle so the depot (node 0) leads, then map
-            // sub-nodes back to customers via the saved old order.
-            @memcpy(self.scratch[0..len], self.order[s..e]);
-            var k: usize = 0;
-            while (res.tour[k] != 0) k += 1;
-            for (0..len) |i| {
-                const node = res.tour[(k + 1 + i) % m];
-                self.order[s + i] = self.scratch[node - 1];
-            }
-            var got: u64 = 0;
-            {
-                var prev: usize = 0;
-                for (self.order[s..e]) |c| {
-                    got += self.inst.d(prev, c);
-                    prev = c;
-                }
-                got += self.inst.d(prev, 0);
-            }
-            if (got >= cur) {
-                @memcpy(self.order[s..e], self.scratch[0..len]);
-                solved_hash[r] = hash;
-            } else {
-                // Improved: leave the slot open so the next sweep re-solves
-                // the new order (the sub-solve is seeded/deterministic, so
-                // skipping is only sound for contents already solved to a
-                // no-improvement verdict).
-                solved_hash[r] = 0;
-                any = true;
+    /// Exclusive [start, end) span of route r in `order`.
+    pub fn routeSpan(self: *const Solution, r: usize) struct { start: usize, end: usize } {
+        return .{ .start = self.routeStart(r), .end = self.route_end[r] };
+    }
+
+    /// Post-run refiner, solve half: route r's internal order re-solved as a
+    /// depot-rooted ATSP (submatrix extract, tiny budget). Read-only on the
+    /// solution, so distinct routes can be solved concurrently; scratch
+    /// allocations come from `scratch_alloc`. On a sub-solver improvement the
+    /// proposed customer order (route length) is written into `out` and true
+    /// is returned; acceptance still requires applyRouteOrder's recount.
+    /// Suited to nearly-converged input: the LK-grade sub-solve reaches
+    /// orderings the relocate/2-opt vocabulary cannot.
+    pub fn routeAtspSolveOne(self: *const Solution, r: usize, seed: u64, scratch_alloc: std.mem.Allocator, out: []usize) !bool {
+        const s = self.routeStart(r);
+        const e = self.route_end[r];
+        const len = e - s;
+        const m = len + 1; // + depot as node 0
+        const sub = try scratch_alloc.alloc(u32, m * m);
+        defer scratch_alloc.free(sub);
+        for (0..m) |i| {
+            const ci = if (i == 0) 0 else self.order[s + i - 1];
+            for (0..m) |j| {
+                const cj = if (j == 0) 0 else self.order[s + j - 1];
+                sub[i * m + j] = if (i == j) 0 else @as(u32, @intCast(self.inst.d(ci, cj)));
             }
         }
-        if (any) self.recompute();
-        return any;
+        var cur: u64 = 0;
+        {
+            var prev: usize = 0;
+            for (self.order[s..e]) |c| {
+                cur += self.inst.d(prev, c);
+                prev = c;
+            }
+            cur += self.inst.d(prev, 0);
+        }
+        var res = try asymmetric.solveAtsp(scratch_alloc, sub, m, .{
+            .seed = seed +% r,
+            .budget = .{ .trials = 8, .trial_extension_factor = 2, .max_passes = 40 },
+            .candidates = .{ .candidate_count = @min(@as(usize, 8), m - 2) },
+            .search = .{ .enable_lk = true, .lk_max_depth = 5 },
+        });
+        defer res.deinit();
+        if (res.length >= cur) return false;
+        // Rotate the returned cycle so the depot (node 0) leads, then map
+        // sub-nodes back to customers via the current order.
+        var k: usize = 0;
+        while (res.tour[k] != 0) k += 1;
+        for (0..len) |i| {
+            const node = res.tour[(k + 1 + i) % m];
+            out[i] = self.order[s + node - 1];
+        }
+        return true;
+    }
+
+    /// Post-run refiner, apply half: splice a proposed order into route r if
+    /// strictly better by direct recount (never trust sub-solver accounting).
+    /// distance/cost/pos are left stale — the caller recomputes after the
+    /// batch. Returns whether the proposal was accepted.
+    pub fn applyRouteOrder(self: *Solution, r: usize, new_order: []const usize) bool {
+        const s = self.routeStart(r);
+        const e = self.route_end[r];
+        if (new_order.len != e - s) return false;
+        var cur: u64 = 0;
+        var got: u64 = 0;
+        {
+            var prev: usize = 0;
+            for (self.order[s..e]) |c| {
+                cur += self.inst.d(prev, c);
+                prev = c;
+            }
+            cur += self.inst.d(prev, 0);
+        }
+        {
+            var prev: usize = 0;
+            for (new_order) |c| {
+                got += self.inst.d(prev, c);
+                prev = c;
+            }
+            got += self.inst.d(prev, 0);
+        }
+        if (got >= cur) return false;
+        @memcpy(self.order[s..e], new_order);
+        return true;
     }
 
     // FNV-1a over a route's customer sequence; 0 is reserved as the
     // "never solved" sentinel for routeAtspRefine's memo array.
-    fn orderHash(seq: []const usize) u64 {
+    pub fn orderHash(seq: []const usize) u64 {
         var h: u64 = 0xcbf29ce484222325;
         for (seq) |c| h = (h ^ @as(u64, c)) *% 0x100000001b3;
         return if (h == 0) 1 else h;

@@ -203,12 +203,116 @@ pub fn solveCvrpSisr(allocator: std.mem.Allocator, inst: CvrpInstance, options: 
         temp *= cf;
     }
 
-    if (params.final_ls) {
-        // Sync arrays from links, then educate to a full local optimum. Each
-        // localSearch call is a fast loose drain (see localSearchLinked);
-        // iterate until it stops improving so the final answer is a genuine
-        // local optimum of the whole move vocabulary.
+    if (params.final_ls or params.route_atsp) {
         best.flushLinks();
+        try refineBest(allocator, &best, options, params, 1);
+    }
+    best.flushLinks(); // order/route_end/load/distance/cost from the linked rep
+    var result = try best.toResult(allocator);
+    errdefer result.deinit();
+    if (validate(inst, result.routes) == null) return error.Infeasible;
+    return result;
+}
+
+// --- Post-run refine pipeline -------------------------------------------------
+// Monotone refiners applied to the best solution after the ruin-recreate
+// schedule: final education (final_ls), per-route ATSP re-solve (route_atsp).
+// Precondition: `best` has valid links AND arrays synced (flushLinks'd).
+// Postcondition: the same (every stage ends on an LS flush or a no-op sweep).
+
+/// One sweep over eligible routes: sub-solves run concurrently on up to
+/// `threads` workers (read-only on `sol`), accepted reorders are applied
+/// serially afterward. Routes are disjoint and each sub-solve is seeded
+/// deterministically by (seed +% r), so the outcome is bit-identical to a
+/// serial sweep regardless of thread count. Returns true if any route improved.
+const RouteJob = struct {
+    sol: *const Solution,
+    r: usize,
+    hash: u64,
+    seed: u64,
+    out: []usize,
+    improved: bool = false,
+    failed: bool = false,
+};
+
+fn routeJobWorker(jobs: []RouteJob) void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    for (jobs) |*j| {
+        _ = arena.reset(.retain_capacity);
+        j.improved = j.sol.routeAtspSolveOne(j.r, j.seed, arena.allocator(), j.out) catch blk: {
+            j.failed = true;
+            break :blk false;
+        };
+    }
+}
+
+fn routeAtspSweep(allocator: std.mem.Allocator, sol: *Solution, seed: u64, solved_hash: []u64, threads: usize) !bool {
+    var jobs: std.ArrayList(RouteJob) = .empty;
+    defer {
+        for (jobs.items) |j| allocator.free(j.out);
+        jobs.deinit(allocator);
+    }
+    for (0..sol.nroutes) |r| {
+        const span = sol.routeSpan(r);
+        const len = span.end - span.start;
+        if (len < 5) continue; // short routes are already LS-optimal
+        const hash = Solution.orderHash(sol.order[span.start..span.end]);
+        if (solved_hash[r] == hash) continue; // unchanged since last no-improvement solve
+        const out = try allocator.alloc(usize, len);
+        errdefer allocator.free(out);
+        try jobs.append(allocator, .{ .sol = sol, .r = r, .hash = hash, .seed = seed, .out = out });
+    }
+    if (jobs.items.len == 0) return false;
+
+    const nw = @min(@max(threads, 1), jobs.items.len);
+    if (nw <= 1) {
+        routeJobWorker(jobs.items);
+    } else {
+        const ths = try allocator.alloc(std.Thread, nw);
+        defer allocator.free(ths);
+        var spawned: usize = 0;
+        const per = (jobs.items.len + nw - 1) / nw;
+        for (0..nw) |w| {
+            const lo = w * per;
+            if (lo >= jobs.items.len) break;
+            const hi = @min(lo + per, jobs.items.len);
+            ths[spawned] = std.Thread.spawn(.{}, routeJobWorker, .{jobs.items[lo..hi]}) catch {
+                routeJobWorker(jobs.items[lo..hi]);
+                continue;
+            };
+            spawned += 1;
+        }
+        for (0..spawned) |i| ths[i].join();
+    }
+
+    var any = false;
+    for (jobs.items) |j| {
+        if (j.failed) continue; // memo left open; retried next sweep
+        if (!j.improved) {
+            solved_hash[j.r] = j.hash;
+            continue;
+        }
+        if (sol.applyRouteOrder(j.r, j.out)) {
+            // Improved: leave the slot open so the next sweep re-solves the
+            // new order (skipping is only sound for contents already solved
+            // to a no-improvement verdict — the sub-solve is deterministic).
+            solved_hash[j.r] = 0;
+            any = true;
+        } else {
+            solved_hash[j.r] = j.hash;
+        }
+    }
+    if (any) sol.recompute();
+    return any;
+}
+
+fn refineBest(allocator: std.mem.Allocator, best: *Solution, options: solver.SolveOptions, params: SisrParams, threads: usize) !void {
+    if (params.final_ls) {
+        // Educate to a full local optimum. Each localSearch call is a fast
+        // loose drain (see localSearchLinked); iterate until it stops
+        // improving so the answer is a genuine local optimum of the whole
+        // move vocabulary.
         var prev_dist = best.distance;
         while (true) {
             try best.localSearch();
@@ -217,18 +321,16 @@ pub fn solveCvrpSisr(allocator: std.mem.Allocator, inst: CvrpInstance, options: 
             prev_dist = best.distance;
         }
     }
-
     if (params.route_atsp) {
         // A route reorder can open inter-route moves and vice versa, so
         // alternate refine and education until the refiner finds nothing.
         // The memo array makes re-sweeps skip routes untouched since their
         // last (non-improving) sub-solve.
-        best.flushLinks();
         const solved_hash = try allocator.alloc(u64, best.nroutes);
         defer allocator.free(solved_hash);
         @memset(solved_hash, 0);
         while (true) {
-            if (!(try best.routeAtspRefine(options.seed ^ 0xA75A, solved_hash))) break;
+            if (!(try routeAtspSweep(allocator, best, options.seed ^ 0xA75A, solved_hash, threads))) break;
             var prev_dist = best.distance;
             while (true) {
                 try best.localSearch();
@@ -238,11 +340,6 @@ pub fn solveCvrpSisr(allocator: std.mem.Allocator, inst: CvrpInstance, options: 
             }
         }
     }
-    best.flushLinks(); // order/route_end/load/distance/cost from the linked rep
-    var result = try best.toResult(allocator);
-    errdefer result.deinit();
-    if (validate(inst, result.routes) == null) return error.Infeasible;
-    return result;
 }
 
 // --- Best-of-K parallel SISR -------------------------------------------------
@@ -305,11 +402,16 @@ pub fn solveCvrpSisrParallel(allocator: std.mem.Allocator, inst: CvrpInstance, o
         allocator.free(s.order);
         allocator.free(s.ends);
     };
+    // Chains run raw; the refine pipeline runs once on the winning chain below
+    // (one refine instead of k, and the route sweep uses the idle threads).
+    var chain_params = params;
+    chain_params.final_ls = false;
+    chain_params.route_atsp = false;
     for (slots, 0..) |*s, i| {
         s.* = .{
             .inst = inst,
             .options = options,
-            .params = params,
+            .params = chain_params,
             .seed = options.seed +% i,
             .order = try allocator.alloc(usize, n),
             .ends = try allocator.alloc(usize, n),
@@ -333,6 +435,27 @@ pub fn solveCvrpSisrParallel(allocator: std.mem.Allocator, inst: CvrpInstance, o
         if (best == null or s.cost < slots[best.?].cost) best = i;
     }
     const winner = best orelse return error.AllChainsFailed;
+
+    if (params.final_ls or params.route_atsp) {
+        const ws = slots[winner];
+        var rsol = try Solution.fromFlat(allocator, inst, ws.order[0..n], ws.ends[0..ws.nroutes]);
+        defer rsol.deinit();
+        const gkv: usize = @min(if (params.gk == 0) @as(usize, 20) else params.gk, n - 1);
+        const rgran = try buildCvrpNeighborsKeyed(allocator, inst, gkv, params.nbr_key);
+        defer allocator.free(rgran);
+        rsol.gran = rgran;
+        rsol.gk = gkv;
+        rsol.buildLinks();
+        try refineBest(allocator, &rsol, options, params, k);
+        var result = try rsol.toResult(allocator);
+        errdefer result.deinit();
+        if (validate(inst, result.routes) == null) return error.Infeasible;
+        for (slots) |s| {
+            allocator.free(s.order);
+            allocator.free(s.ends);
+        }
+        return result;
+    }
 
     // build the result from the winning slot's flat order/ends in the parent allocator
     const bs = slots[winner];
