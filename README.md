@@ -542,16 +542,38 @@ non-monotonicity on near-symmetric instances. berlin-1000 baseline *worsens* wit
 cell under the tables' fixed-seed protocol (PyVRP rerun at its 23 s wall: 109,522). NYC —
 the most asymmetric city — is the mirror image: every deviation from the base constants
 (marathon, colder tf alone, education at any cadence) measured *worse* there, and Moscow
-is a seed-level wash, so `marathon` stays opt-in. Seed-honest summary of the CVRP minute
-regime with the lever: berlin-1000 and nyc-1000 are statistical ties (3-seed spreads on
-both solvers span the margin), moscow and the n=2000 cells stay PyVRP's by 0.2–0.8 %.
+is a seed-level wash, so `marathon` stays opt-in.
+
+NYC's real lever turned out to be structural, not a constant: the granular neighbor
+lists were built with a symmetrized key `d(c,j)+d(j,c)`, which buries one-way-close
+pairs — on the NYC grid ~3 % of each customer's five nearest *directional* arcs never
+made the top-20 list (Berlin: 0.4 %), so recreate and every local-search move were
+blind to exactly the arcs that make NYC asymmetric-favorable, while the ATSP seed
+(min-key) could see them. `nbr_key = .min` (+ `gk` list-size knob; both default to the
+old behavior bit-identically) restores them at zero per-iteration cost:
+
+| CVRP minutes, 3 seeds each | commiv (`nbr_key=min`) | PyVRP | mean margin |
+|---|---|---|---:|
+| nyc-1000 (min, 4 M, ≤18 s) | **91,639 / 91,793 / 92,159** | 92,751 / 93,678 / 93,391 @ 20 s | **+1.51 %** |
+| nyc-2000 (min, gk=40, 5 M, ≤91 s) | **133,815 / 133,894 / 134,303** | 134,549 / 133,421 / 134,676 @ 91 s | **+0.16 %** |
+
+Every nyc-1000 seed beats PyVRP's best seed; nyc-1000's *seconds* cell also improves
+(95,057 → 93,832 @ 2.4 s with `min`). The key is topology-gated like marathon: Moscow
+(ratio 1.11) and Berlin (1.06) measured neutral-to-worse on `min`, so `.sum` stays the
+default. Seed-honest summary of the CVRP minute regime with both levers: nyc-1000 is
+commiv's outright, nyc-2000 commiv on 3-seed means, berlin-1000 tie-to-commiv, the
+moscow cells stay PyVRP's by 0.4–0.8 %.
 
 Reproduce: `tools/competitors/pyvrp_road.py <instance.road> {cvrp|vrptw} <seconds> [seed]`;
 the NYC and Berlin matrices live in `vendor/road/` next to Moscow. TW levers are the
 `solveVrptwSisr` flags above (see [`docs/rest.md`](docs/rest.md) for the REST fields); the
-CVRP cell: `zig build roadbench -Doptimize=ReleaseFast && RB_FILES=berlin-1000
-RB_ITERS=4000000 RB_THREADS=3 RB_SYM=0 RB_MARATHON=1 ./zig-out/bin/commiv-roadbench`
-→ 109,181, 11 routes, ~18 s.
+CVRP cells (`zig build roadbench -Doptimize=ReleaseFast` first):
+`RB_FILES=berlin-1000 RB_ITERS=4000000 RB_THREADS=3 RB_SYM=0 RB_MARATHON=1
+./zig-out/bin/commiv-roadbench` → 109,181;
+`RB_FILES=nyc-1000 RB_ITERS=4000000 RB_THREADS=3 RB_SYM=0 RB_NBR=min
+./zig-out/bin/commiv-roadbench` → 91,639;
+`RB_FILES=nyc-2000 RB_ITERS=5000000 RB_THREADS=3 RB_SYM=0 RB_NBR=min RB_GK=40
+./zig-out/bin/commiv-roadbench` → 133,815.
 
 ---
 
