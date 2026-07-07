@@ -71,6 +71,14 @@ pub const SisrParams = struct {
     // alternated with final-education drains until neither improves. Monotone:
     // every accepted step strictly reduces distance. Default off = bit-identical.
     route_atsp: bool = false,
+    // Iterated kicks: after the monotone refiners, run this many deterministic
+    // zero-temperature perturbation rounds on the refined best — one small
+    // ruin+recreate, a full education drain, keep only strict improvements
+    // (reverting to best otherwise). The one refiner that can move customers
+    // BETWEEN routes, so it attacks the small-n inter-route lock-in the
+    // intra-route refiners cannot. Cost ~= kicks * one LS convergence.
+    // Default 0 = off = bit-identical.
+    kicks: usize = 0,
 };
 
 /// SISR solver for (symmetric or asymmetric) CVRP, uncapped fleet. Builds a feasible
@@ -203,7 +211,7 @@ pub fn solveCvrpSisr(allocator: std.mem.Allocator, inst: CvrpInstance, options: 
         temp *= cf;
     }
 
-    if (params.final_ls or params.route_atsp) {
+    if (params.final_ls or params.route_atsp or params.kicks > 0) {
         best.flushLinks();
         try refineBest(allocator, &best, options, params, 1);
     }
@@ -340,6 +348,52 @@ fn refineBest(allocator: std.mem.Allocator, best: *Solution, options: solver.Sol
             }
         }
     }
+    if (params.kicks > 0) {
+        // Iterated kicks: zero-temperature perturb-educate-accept. A small
+        // ruin+recreate jolts inter-route structure the monotone refiners
+        // cannot move, education drains it back to a local optimum, and only
+        // strict improvements are kept — otherwise the next kick restarts
+        // from best. Deterministic: fixed count, seeded rng.
+        const kn = best.inst.n;
+        const present = try allocator.alloc(bool, kn + 1);
+        defer allocator.free(present);
+        @memset(present, true);
+        const removed = try allocator.alloc(usize, kn);
+        defer allocator.free(removed);
+        const rprev = try allocator.alloc(usize, kn);
+        defer allocator.free(rprev);
+        const rroute = try allocator.alloc(usize, kn);
+        defer allocator.free(rroute);
+        const ins = try allocator.alloc(usize, kn);
+        defer allocator.free(ins);
+        const touched = try allocator.alloc(usize, kn);
+        defer allocator.free(touched);
+        const rmark = try allocator.alloc(bool, kn);
+        defer allocator.free(rmark);
+        @memset(rmark, false);
+        var ctx = SisrCtx{ .present = present, .removed = removed, .rprev = rprev, .rroute = rroute, .ins = ins, .touched = touched, .rmark = rmark, .blink = params.blink, .l_max = params.l_max, .cbar = params.cbar, .split_rate = 0, .split_alpha = params.split_alpha, .regret_rate = 0 };
+        var prng = std.Random.DefaultPrng.init(options.seed ^ 0x6B1C6B1C);
+        const rng = prng.random();
+        var work = try best.clone();
+        defer work.deinit();
+        for (0..params.kicks) |_| {
+            work.copyLiveFrom(best);
+            work.sisrRuin(&ctx, rng);
+            work.sisrRecreate(&ctx, rng);
+            work.flushLinks();
+            var prev_dist = work.distance;
+            while (true) {
+                try work.localSearch();
+                work.flushLinks();
+                if (work.distance >= prev_dist) break;
+                prev_dist = work.distance;
+            }
+            if (work.distance < best.distance) best.copyLiveFrom(&work);
+        }
+        // Accepted kicks land via copyLiveFrom (links only) — resync arrays so
+        // callers can read order/route_end directly.
+        best.flushLinks();
+    }
 }
 
 // --- Best-of-K parallel SISR -------------------------------------------------
@@ -436,7 +490,7 @@ pub fn solveCvrpSisrParallel(allocator: std.mem.Allocator, inst: CvrpInstance, o
     }
     const winner = best orelse return error.AllChainsFailed;
 
-    if (params.final_ls or params.route_atsp) {
+    if (params.final_ls or params.route_atsp or params.kicks > 0) {
         const ws = slots[winner];
         var rsol = try Solution.fromFlat(allocator, inst, ws.order[0..n], ws.ends[0..ws.nroutes]);
         defer rsol.deinit();
@@ -616,6 +670,34 @@ test "CVRP SISR route_atsp: never worse than without it, feasible, default bit-i
     defer off2.deinit();
     try std.testing.expectEqual(off.total_cost, off2.total_cost);
     var on = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000, .route_atsp = true });
+    defer on.deinit();
+    const checked = validate(inst, on.routes) orelse return error.TestInfeasibleResult;
+    try std.testing.expectEqual(on.total_cost, checked);
+    try std.testing.expect(on.total_cost <= off.total_cost);
+}
+
+test "CVRP SISR kicks: never worse than without them, feasible, default bit-identical" {
+    const allocator = std.testing.allocator;
+    const n = 60;
+    const dim = n + 1;
+    var prng = std.Random.DefaultPrng.init(0x6B1C1);
+    const rng = prng.random();
+    const matrix = try allocator.alloc(u32, dim * dim);
+    defer allocator.free(matrix);
+    for (0..dim) |i| {
+        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 100);
+    }
+    const demand = try allocator.alloc(u32, dim);
+    defer allocator.free(demand);
+    demand[0] = 0;
+    for (1..dim) |i| demand[i] = rng.intRangeAtMost(u32, 1, 5);
+    const inst = CvrpInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 12 };
+    var off = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000 });
+    defer off.deinit();
+    var off2 = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000, .kicks = 0 });
+    defer off2.deinit();
+    try std.testing.expectEqual(off.total_cost, off2.total_cost);
+    var on = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000, .final_ls = true, .kicks = 30 });
     defer on.deinit();
     const checked = validate(inst, on.routes) orelse return error.TestInfeasibleResult;
     try std.testing.expectEqual(on.total_cost, checked);
