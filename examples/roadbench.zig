@@ -18,7 +18,8 @@ const commiv = @import("commiv");
 //
 // Env: RB_DIR (default vendor/road), RB_FILES (comma list, default moscow-100),
 //      RB_ITERS (SISR iterations), RB_THREADS, RB_SEED, RB_MARATHON (long-run
-//      constants profile, active at RB_ITERS >= 1M).
+//      constants profile, active at RB_ITERS >= 1M), RB_NBR (neighbor key:
+//      sum|min|out), RB_GK (neighbor-list size, 0 = auto).
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const env = init.environ_map;
@@ -48,7 +49,16 @@ pub fn main(init: std.process.Init) !void {
         // 1. conservativeness / curl decomposition (the scientific gate)
         const cons = try commiv.conservativeness(allocator, road.matrix, dim);
 
-        const sp = commiv.CvrpSisrParams{ .iters = iters, .marathon = std.mem.eql(u8, env.get("RB_MARATHON") orelse "0", "1") };
+        const nbr = env.get("RB_NBR") orelse "sum";
+        const sp = commiv.CvrpSisrParams{
+            .iters = iters,
+            .marathon = std.mem.eql(u8, env.get("RB_MARATHON") orelse "0", "1"),
+            // RB_NBR: granular neighbor-list proximity key - "sum" (default),
+            // "min" (direction-tolerant; the NYC lever), "out" (successor only).
+            .nbr_key = if (std.mem.eql(u8, nbr, "min")) .min else if (std.mem.eql(u8, nbr, "out")) .out else .sum,
+            // RB_GK: neighbor-list size, 0 = auto (20).
+            .gk = try std.fmt.parseInt(usize, env.get("RB_GK") orelse "0", 10),
+        };
         const solve_opts = commiv.SolveOptions{
             .seed = seed,
             .budget = .{ .trials = @min(dim, 100), .trial_extension_factor = 2, .max_passes = 60 },

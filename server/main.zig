@@ -125,6 +125,11 @@ const CvrpRequest = struct {
     iters: u64 = 0, // SISR iterations; 0 = default
     threads: u32 = 1, // >1 = parallel islands (result depends on the count)
     marathon: bool = false, // long-run constants profile (active at iters >= 1M)
+    // Granular neighbor-list proximity key: "sum" (default), "min"
+    // (direction-tolerant - measured win on strongly one-way street grids),
+    // "out". Unknown strings fall back to "sum".
+    nbr_key: []const u8 = "sum",
+    gk: u64 = 0, // neighbor-list size, 0 = auto (20)
 };
 
 fn solveCvrp(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []const u8) !void {
@@ -139,6 +144,8 @@ fn solveCvrp(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []co
     var params: commiv.CvrpSisrParams = .{};
     if (r.iters != 0) params.iters = @intCast(r.iters);
     params.marathon = r.marathon;
+    params.nbr_key = if (std.mem.eql(u8, r.nbr_key, "min")) .min else if (std.mem.eql(u8, r.nbr_key, "out")) .out else .sum;
+    params.gk = @intCast(r.gk);
     const opts: commiv.SolveOptions = .{ .seed = r.seed };
 
     const result = blk: {

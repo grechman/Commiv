@@ -106,7 +106,11 @@ curl -X POST http://127.0.0.1:8080/solve/atsp -d '{
 `stress_rate` (float), `tabu_tenure` (int), `marathon` (bool). Measured best together
 ("combo": `polish=true, stress_rate=0.5, tabu_tenure=10000, marathon=true`) on runs of
 1M+ iterations (~30 s and up at n=1000); below that budget leave them off. `marathon`
-is also accepted by `/solve/cvrp`. Same seed + same flags stays fully deterministic.
+is also accepted by `/solve/cvrp`, along with `nbr_key` ("sum" default | "min" |
+"out") and `gk` (int, 0 = auto) - the granular neighbor-list key and size.
+`nbr_key: "min"` is the measured lever for strongly one-way street networks (NYC-like);
+near-symmetric or mildly directed cities measured best on the default. Same seed + same
+flags stays fully deterministic.
 
 ## Binary matrix framing (CMV1)
 
