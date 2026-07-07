@@ -67,6 +67,10 @@ pub const SisrParams = struct {
     // costs one LS convergence (~ms at n=100, ~seconds at n=2000). Default
     // off = bit-identical output to before this flag existed.
     final_ls: bool = false,
+    // Per-route ATSP re-solve on the returned best (see Solution.routeAtspRefine),
+    // alternated with final-education drains until neither improves. Monotone:
+    // every accepted step strictly reduces distance. Default off = bit-identical.
+    route_atsp: bool = false,
 };
 
 /// SISR solver for (symmetric or asymmetric) CVRP, uncapped fleet. Builds a feasible
@@ -211,6 +215,22 @@ pub fn solveCvrpSisr(allocator: std.mem.Allocator, inst: CvrpInstance, options: 
             best.flushLinks();
             if (best.distance >= prev_dist) break;
             prev_dist = best.distance;
+        }
+    }
+
+    if (params.route_atsp) {
+        // A route reorder can open inter-route moves and vice versa, so
+        // alternate refine and education until the refiner finds nothing.
+        best.flushLinks();
+        while (true) {
+            if (!(try best.routeAtspRefine(options.seed ^ 0xA75A))) break;
+            var prev_dist = best.distance;
+            while (true) {
+                try best.localSearch();
+                best.flushLinks();
+                if (best.distance >= prev_dist) break;
+                prev_dist = best.distance;
+            }
         }
     }
     best.flushLinks(); // order/route_end/load/distance/cost from the linked rep
@@ -440,6 +460,34 @@ test "CVRP SISR final_ls: never worse than without it, feasible, default bit-ide
     defer off2.deinit();
     try std.testing.expectEqual(off.total_cost, off2.total_cost);
     var on = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000, .final_ls = true });
+    defer on.deinit();
+    const checked = validate(inst, on.routes) orelse return error.TestInfeasibleResult;
+    try std.testing.expectEqual(on.total_cost, checked);
+    try std.testing.expect(on.total_cost <= off.total_cost);
+}
+
+test "CVRP SISR route_atsp: never worse than without it, feasible, default bit-identical" {
+    const allocator = std.testing.allocator;
+    const n = 60;
+    const dim = n + 1;
+    var prng = std.Random.DefaultPrng.init(0xA75A1);
+    const rng = prng.random();
+    const matrix = try allocator.alloc(u32, dim * dim);
+    defer allocator.free(matrix);
+    for (0..dim) |i| {
+        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 100);
+    }
+    const demand = try allocator.alloc(u32, dim);
+    defer allocator.free(demand);
+    demand[0] = 0;
+    for (1..dim) |i| demand[i] = rng.intRangeAtMost(u32, 1, 5);
+    const inst = CvrpInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 30 };
+    var off = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000 });
+    defer off.deinit();
+    var off2 = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000, .route_atsp = false });
+    defer off2.deinit();
+    try std.testing.expectEqual(off.total_cost, off2.total_cost);
+    var on = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000, .route_atsp = true });
     defer on.deinit();
     const checked = validate(inst, on.routes) orelse return error.TestInfeasibleResult;
     try std.testing.expectEqual(on.total_cost, checked);

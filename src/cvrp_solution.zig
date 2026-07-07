@@ -753,6 +753,76 @@ pub const Solution = struct {
         }
     }
 
+    /// Post-run refiner: re-solve each route's internal order as a standalone
+    /// ATSP through the depot (submatrix extract, tiny budget). Route contents
+    /// are unchanged, so load/feasibility are unchanged; a reorder is applied
+    /// only on strict distance improvement, verified by a direct recount of
+    /// the rewritten route rather than the sub-solver's accounting. Returns
+    /// true if any route improved. Suited to nearly-converged input: the
+    /// LK-grade sub-solve reaches orderings the relocate/2-opt vocabulary
+    /// cannot.
+    pub fn routeAtspRefine(self: *Solution, seed: u64) !bool {
+        var any = false;
+        for (0..self.nroutes) |r| {
+            const s = self.routeStart(r);
+            const e = self.route_end[r];
+            const len = e - s;
+            if (len < 5) continue; // short routes are already LS-optimal
+            const m = len + 1; // + depot as node 0
+            const sub = try self.allocator.alloc(u32, m * m);
+            defer self.allocator.free(sub);
+            for (0..m) |i| {
+                const ci = if (i == 0) 0 else self.order[s + i - 1];
+                for (0..m) |j| {
+                    const cj = if (j == 0) 0 else self.order[s + j - 1];
+                    sub[i * m + j] = if (i == j) 0 else @as(u32, @intCast(self.inst.d(ci, cj)));
+                }
+            }
+            var cur: u64 = 0;
+            {
+                var prev: usize = 0;
+                for (self.order[s..e]) |c| {
+                    cur += self.inst.d(prev, c);
+                    prev = c;
+                }
+                cur += self.inst.d(prev, 0);
+            }
+            var res = asymmetric.solveAtsp(self.allocator, sub, m, .{
+                .seed = seed +% r,
+                .budget = .{ .trials = 8, .trial_extension_factor = 2, .max_passes = 40 },
+                .candidates = .{ .candidate_count = @min(@as(usize, 8), m - 2) },
+                .search = .{ .enable_lk = true, .lk_max_depth = 5 },
+            }) catch continue;
+            defer res.deinit();
+            if (res.length >= cur) continue;
+            // Rotate the returned cycle so the depot (node 0) leads, then map
+            // sub-nodes back to customers via the saved old order.
+            @memcpy(self.scratch[0..len], self.order[s..e]);
+            var k: usize = 0;
+            while (res.tour[k] != 0) k += 1;
+            for (0..len) |i| {
+                const node = res.tour[(k + 1 + i) % m];
+                self.order[s + i] = self.scratch[node - 1];
+            }
+            var got: u64 = 0;
+            {
+                var prev: usize = 0;
+                for (self.order[s..e]) |c| {
+                    got += self.inst.d(prev, c);
+                    prev = c;
+                }
+                got += self.inst.d(prev, 0);
+            }
+            if (got >= cur) {
+                @memcpy(self.order[s..e], self.scratch[0..len]);
+            } else {
+                any = true;
+            }
+        }
+        if (any) self.recompute();
+        return any;
+    }
+
     // ---- Linked-list local search (the O(1)-move engine) -----------------
     // Same moves and same delta math as localSearchArray, but routes are a
     // doubly-linked list (next/prev/head/tail) so each accepted move is an
