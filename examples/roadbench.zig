@@ -72,6 +72,7 @@ pub fn main(init: std.process.Init) !void {
             .chain_kicks = try std.fmt.parseInt(usize, env.get("RB_CHAIN_KICKS") orelse "0", 10),
             .rounds = try std.fmt.parseInt(usize, env.get("RB_ROUNDS") orelse "1", 10),
             .curl_rate = try std.fmt.parseFloat(f64, env.get("RB_CURL") orelse "0"),
+            .reheat = try std.fmt.parseFloat(f64, env.get("RB_REHEAT") orelse "1"),
         };
         const solve_opts = commiv.SolveOptions{
             .seed = seed,

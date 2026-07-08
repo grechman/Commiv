@@ -96,14 +96,19 @@ pub const SisrParams = struct {
     // over chains can only drop. The serial engine ignores this knob (use
     // `kicks`). Default 0 = off = bit-identical.
     chain_kicks: usize = 0,
-    // Restart-to-best rounds: re-run the SAME t0->tf geometric schedule this
-    // many times, each round restarting the trajectory from the best-so-far
-    // with a full reheat. The geometric schedule stretches with iters and is
-    // measurably non-monotone in budget (5M can score worse than 4M); rounds
-    // spend extra budget as more restarts of the proven schedule shape
-    // instead, monotone by construction (best never regresses). Total
-    // ruin-recreate work = rounds * iters. Default 1 = bit-identical.
+    // Restart-to-best rounds: re-run the t0->tf geometric schedule this many
+    // times, each round restarting the trajectory from the best-so-far. The
+    // geometric schedule stretches with iters and can be non-monotone in
+    // budget (nyc-1000: 5M scores worse than 4M); rounds spend extra budget
+    // as more restarts of the proven schedule shape instead, monotone by
+    // construction (best never regresses). Total work = rounds * iters.
+    // Default 1 = bit-identical.
     rounds: usize = 1,
+    // Restart temperature for rounds >= 2, as a fraction of the t0->tf LOG
+    // range: round temp starts at tf * (t0/tf)^reheat. 1.0 = full re-melt
+    // (measured useless at n=1000: the trajectory wanders off and never
+    // re-finds the basin); ~0.2-0.5 = warm restart that keeps the basin.
+    reheat: f64 = 1.0,
     // Curl-guided ruin: probability that a ruin center is picked by a 4-way
     // tournament on one-way regret (how much the solution pays traversing
     // this customer's arcs against the cheaper direction) instead of
@@ -187,7 +192,7 @@ pub fn solveCvrpSisr(allocator: std.mem.Allocator, inst: CvrpInstance, options: 
     const t0 = @max(1e-9, params.t0_factor * unit);
     const tf = @max(1e-9, eff_tf_factor * unit);
     const iters = @max(@as(usize, 1), params.iters);
-    const cf = std.math.pow(f64, tf / t0, 1.0 / @as(f64, @floatFromInt(iters)));
+    var cf = std.math.pow(f64, tf / t0, 1.0 / @as(f64, @floatFromInt(iters)));
     var temp = t0;
 
     // UCB1 bandit over {plain, split} ruin: learns the best mix online instead of the
@@ -197,13 +202,18 @@ pub fn solveCvrpSisr(allocator: std.mem.Allocator, inst: CvrpInstance, options: 
     var bt: f64 = 2;
 
     // In-place ruin+recreate with O(removed) rollback on reject (no snapshot copy).
-    // rounds > 1: restart-to-best with full reheat (see SisrParams.rounds).
+    // rounds > 1: restart-to-best (see SisrParams.rounds/reheat). The restart
+    // temperature interpolates the log range; the geometric decay is re-derived
+    // per round so each round still lands on tf at its end.
     const rounds = @max(@as(usize, 1), params.rounds);
+    const round_t0 = @max(tf, tf * std.math.pow(f64, t0 / tf, std.math.clamp(params.reheat, 0.0, 1.0)));
+    const round_cf = std.math.pow(f64, tf / round_t0, 1.0 / @as(f64, @floatFromInt(iters)));
     var round: usize = 0;
     while (round < rounds) : (round += 1) {
         if (round > 0) {
             cur.copyLiveFrom(&best);
-            temp = t0;
+            temp = round_t0;
+            cf = round_cf;
         }
         var it: usize = 0;
         while (it < iters) : (it += 1) {
