@@ -21,7 +21,8 @@ const commiv = @import("commiv");
 //      constants profile, active at RB_ITERS >= 1M), RB_NBR (neighbor key:
 //      sum|min|out), RB_GK (neighbor-list size, 0 = auto), RB_FINAL_LS,
 //      RB_ROUTE_ATSP (post-run refiners, 1 = on), RB_KICKS (post-run
-//      perturbation rounds, 0 = off).
+//      perturbation rounds, 0 = off), RB_SUBSOLVE (route-pair re-solve
+//      iterations, 0 = off), RB_SUBSOLVE_PAIRS (default 8).
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const env = init.environ_map;
@@ -63,6 +64,8 @@ pub fn main(init: std.process.Init) !void {
             .final_ls = std.mem.eql(u8, env.get("RB_FINAL_LS") orelse "0", "1"),
             .route_atsp = std.mem.eql(u8, env.get("RB_ROUTE_ATSP") orelse "0", "1"),
             .kicks = try std.fmt.parseInt(usize, env.get("RB_KICKS") orelse "0", 10),
+            .subsolve_iters = try std.fmt.parseInt(usize, env.get("RB_SUBSOLVE") orelse "0", 10),
+            .subsolve_pairs = try std.fmt.parseInt(usize, env.get("RB_SUBSOLVE_PAIRS") orelse "8", 10),
         };
         const solve_opts = commiv.SolveOptions{
             .seed = seed,

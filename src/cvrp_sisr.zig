@@ -79,6 +79,15 @@ pub const SisrParams = struct {
     // intra-route refiners cannot. Cost ~= kicks * one LS convergence.
     // Default 0 = off = bit-identical.
     kicks: usize = 0,
+    // Route-pair sub-CVRP re-solve: the refiner that moves LOAD between
+    // routes. Up to subsolve_pairs disjoint route pairs (ranked by granular
+    // cross-link count) are extracted as standalone sub-CVRPs (pair customers
+    // + depot) and re-solved with a fresh seeded SISR of subsolve_iters
+    // iterations; the result replaces the pair only on strict distance
+    // improvement using at most 2 vehicles. Deterministic. 0 = off =
+    // bit-identical.
+    subsolve_iters: usize = 0,
+    subsolve_pairs: usize = 8,
 };
 
 /// SISR solver for (symmetric or asymmetric) CVRP, uncapped fleet. Builds a feasible
@@ -211,7 +220,7 @@ pub fn solveCvrpSisr(allocator: std.mem.Allocator, inst: CvrpInstance, options: 
         temp *= cf;
     }
 
-    if (params.final_ls or params.route_atsp or params.kicks > 0) {
+    if (params.final_ls or params.route_atsp or params.kicks > 0 or params.subsolve_iters > 0) {
         best.flushLinks();
         try refineBest(allocator, &best, options, params, 1);
     }
@@ -315,7 +324,7 @@ fn routeAtspSweep(allocator: std.mem.Allocator, sol: *Solution, seed: u64, solve
     return any;
 }
 
-fn refineBest(allocator: std.mem.Allocator, best: *Solution, options: solver.SolveOptions, params: SisrParams, threads: usize) !void {
+fn refineBest(allocator: std.mem.Allocator, best: *Solution, options: solver.SolveOptions, params: SisrParams, threads: usize) anyerror!void {
     if (params.final_ls) {
         // Educate to a full local optimum. Each localSearch call is a fast
         // loose drain (see localSearchLinked); iterate until it stops
@@ -345,6 +354,127 @@ fn refineBest(allocator: std.mem.Allocator, best: *Solution, options: solver.Sol
                 best.flushLinks();
                 if (best.distance >= prev_dist) break;
                 prev_dist = best.distance;
+            }
+        }
+    }
+    if (params.subsolve_iters > 0) {
+        // Route-pair sub-CVRP re-solve (see SisrParams.subsolve_iters). Pair
+        // selection: rank route pairs by how many granular-neighbor links
+        // cross between them — the cheap proxy for spatial adjacency on a
+        // matrix-only instance.
+        const n = best.inst.n;
+        const nr = best.nroutes;
+        if (nr >= 4 and nr * nr <= 4_000_000) {
+            const counts = try allocator.alloc(u32, nr * nr);
+            defer allocator.free(counts);
+            @memset(counts, 0);
+            for (1..n + 1) |c| {
+                const rc = best.rof[c];
+                for (0..best.gk) |i| {
+                    const j = best.gran[(c - 1) * best.gk + i];
+                    const rj = best.rof[j];
+                    if (rj != rc) counts[rc * nr + rj] += 1;
+                }
+            }
+            const used = try allocator.alloc(bool, nr);
+            defer allocator.free(used);
+            @memset(used, false);
+            var any_spliced = false;
+            var pairs_done: usize = 0;
+            while (pairs_done < params.subsolve_pairs) : (pairs_done += 1) {
+                // highest cross-link score among unused pairs (first hit wins ties)
+                var best_score: u64 = 0;
+                var pa: usize = 0;
+                var pb: usize = 0;
+                for (0..nr) |x| {
+                    if (used[x]) continue;
+                    for (x + 1..nr) |y| {
+                        if (used[y]) continue;
+                        const sc = @as(u64, counts[x * nr + y]) + @as(u64, counts[y * nr + x]);
+                        if (sc > best_score) {
+                            best_score = sc;
+                            pa = x;
+                            pb = y;
+                        }
+                    }
+                }
+                if (best_score == 0) break;
+                used[pa] = true;
+                used[pb] = true;
+                const spa = best.routeSpan(pa);
+                const spb = best.routeSpan(pb);
+                const ka = spa.end - spa.start;
+                const kb = spb.end - spb.start;
+                const kk = ka + kb;
+                if (kk < 10) continue; // tiny pairs are already LS-territory
+                const globals = try allocator.alloc(usize, kk);
+                defer allocator.free(globals);
+                @memcpy(globals[0..ka], best.order[spa.start..spa.end]);
+                @memcpy(globals[ka..], best.order[spb.start..spb.end]);
+                const sdim = kk + 1;
+                const smat = try allocator.alloc(u32, sdim * sdim);
+                defer allocator.free(smat);
+                const sdem = try allocator.alloc(u32, sdim);
+                defer allocator.free(sdem);
+                sdem[0] = 0;
+                for (0..sdim) |i| {
+                    const gi = if (i == 0) 0 else globals[i - 1];
+                    if (i > 0) sdem[i] = best.inst.demand[gi];
+                    for (0..sdim) |j| {
+                        const gj = if (j == 0) 0 else globals[j - 1];
+                        smat[i * sdim + j] = if (i == j) 0 else @as(u32, @intCast(best.inst.d(gi, gj)));
+                    }
+                }
+                const sinst = CvrpInstance{ .n = kk, .matrix = smat, .demand = sdem, .capacity = best.inst.capacity };
+                var sres = solveCvrpSisr(allocator, sinst, .{ .seed = (options.seed ^ 0x5B5B) +% pairs_done }, .{ .iters = params.subsolve_iters, .nbr_key = params.nbr_key }) catch continue;
+                defer sres.deinit();
+                var old_dist: u64 = 0;
+                for ([2]usize{ pa, pb }) |r| {
+                    const sp = best.routeSpan(r);
+                    var prev: usize = 0;
+                    for (best.order[sp.start..sp.end]) |c| {
+                        old_dist += best.inst.d(prev, c);
+                        prev = c;
+                    }
+                    old_dist += best.inst.d(prev, 0);
+                }
+                if (sres.routes.len > 2 or sres.total_cost >= old_dist) continue;
+                // splice: rewrite the flat order with the pair replaced (route
+                // indices and count stay stable; pb may become empty)
+                const old_ends = try allocator.dupe(usize, best.route_end[0..nr]);
+                defer allocator.free(old_ends);
+                var w: usize = 0;
+                for (0..nr) |r| {
+                    if (r == pa or r == pb) {
+                        const which: usize = if (r == pa) 0 else 1;
+                        if (which < sres.routes.len) {
+                            for (sres.routes[which]) |sc2| {
+                                best.scratch[w] = globals[sc2 - 1];
+                                w += 1;
+                            }
+                        }
+                    } else {
+                        const os = if (r == 0) 0 else old_ends[r - 1];
+                        for (best.order[os..old_ends[r]]) |c| {
+                            best.scratch[w] = c;
+                            w += 1;
+                        }
+                    }
+                    best.route_end[r] = w;
+                }
+                @memcpy(best.order[0..w], best.scratch[0..w]);
+                best.recompute();
+                any_spliced = true;
+            }
+            if (any_spliced) {
+                // educate across the new boundaries, then leave links synced
+                var prev_dist = best.distance;
+                while (true) {
+                    try best.localSearch();
+                    best.flushLinks();
+                    if (best.distance >= prev_dist) break;
+                    prev_dist = best.distance;
+                }
             }
         }
     }
@@ -490,7 +620,7 @@ pub fn solveCvrpSisrParallel(allocator: std.mem.Allocator, inst: CvrpInstance, o
     }
     const winner = best orelse return error.AllChainsFailed;
 
-    if (params.final_ls or params.route_atsp or params.kicks > 0) {
+    if (params.final_ls or params.route_atsp or params.kicks > 0 or params.subsolve_iters > 0) {
         const ws = slots[winner];
         var rsol = try Solution.fromFlat(allocator, inst, ws.order[0..n], ws.ends[0..ws.nroutes]);
         defer rsol.deinit();
@@ -698,6 +828,34 @@ test "CVRP SISR kicks: never worse than without them, feasible, default bit-iden
     defer off2.deinit();
     try std.testing.expectEqual(off.total_cost, off2.total_cost);
     var on = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000, .final_ls = true, .kicks = 30 });
+    defer on.deinit();
+    const checked = validate(inst, on.routes) orelse return error.TestInfeasibleResult;
+    try std.testing.expectEqual(on.total_cost, checked);
+    try std.testing.expect(on.total_cost <= off.total_cost);
+}
+
+test "CVRP SISR subsolve: never worse than without it, feasible, default bit-identical" {
+    const allocator = std.testing.allocator;
+    const n = 60;
+    const dim = n + 1;
+    var prng = std.Random.DefaultPrng.init(0x5B5B1);
+    const rng = prng.random();
+    const matrix = try allocator.alloc(u32, dim * dim);
+    defer allocator.free(matrix);
+    for (0..dim) |i| {
+        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 100);
+    }
+    const demand = try allocator.alloc(u32, dim);
+    defer allocator.free(demand);
+    demand[0] = 0;
+    for (1..dim) |i| demand[i] = rng.intRangeAtMost(u32, 1, 5);
+    const inst = CvrpInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 12 };
+    var off = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000 });
+    defer off.deinit();
+    var off2 = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000, .subsolve_iters = 0 });
+    defer off2.deinit();
+    try std.testing.expectEqual(off.total_cost, off2.total_cost);
+    var on = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000, .subsolve_iters = 30000, .subsolve_pairs = 4 });
     defer on.deinit();
     const checked = validate(inst, on.routes) orelse return error.TestInfeasibleResult;
     try std.testing.expectEqual(on.total_cost, checked);
