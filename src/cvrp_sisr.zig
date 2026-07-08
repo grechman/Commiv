@@ -115,6 +115,20 @@ pub const SisrParams = struct {
     // uniformly. Real road asymmetry is ~3/4 curl; this aims the ruin where
     // the routes fight the direction field. Default 0 = bit-identical.
     curl_rate: f64 = 0,
+    // Per-chain matrix jitter (parallel driver only): chains beyond the first
+    // search a deterministically warped copy of the matrix (each arc scaled by
+    // 1 +- jitter * u, u uniform in [-1,1] from the chain seed) and are scored
+    // back on the TRUE matrix for selection. Decorrelates the chains so
+    // best-of-K explores genuinely different basins; chain 0 always runs the
+    // true matrix. Default 0 = off = bit-identical.
+    jitter: f64 = 0,
+    // Re-split rung of the refine ladder: treat the refined solution's flat
+    // order (routes concatenated) as a giant tour and re-cut ALL route
+    // boundaries at once with the Prins split DP — a boundary neighborhood no
+    // other move family touches (every boundary moves simultaneously; the
+    // route count may change). Accept only on strict improvement, then
+    // re-educate. Default off = bit-identical.
+    resplit: bool = false,
 };
 
 /// SISR solver for (symmetric or asymmetric) CVRP, uncapped fleet. Builds a feasible
@@ -398,6 +412,34 @@ fn refineBest(allocator: std.mem.Allocator, best: *Solution, options: solver.Sol
             }
         }
     }
+    if (params.resplit) {
+        // Re-cut all route boundaries at once (see SisrParams.resplit).
+        const out: ?cvrp_split.SplitOutcome = cvrp_split.splitDp(allocator, best.inst, best.order) catch null;
+        if (out) |o| {
+            defer allocator.free(o.pred);
+            if (o.cost < best.distance) {
+                // boundaries from the pred chain — the fromPred walk
+                var nb: usize = 0;
+                var i = best.inst.n;
+                while (i > 0) {
+                    best.route_end[nb] = i;
+                    nb += 1;
+                    i = o.pred[i];
+                }
+                std.mem.reverse(usize, best.route_end[0..nb]);
+                best.nroutes = nb;
+                best.recompute();
+                // educate across the new boundaries, then leave links synced
+                var prev_dist = best.distance;
+                while (true) {
+                    try best.localSearch();
+                    best.flushLinks();
+                    if (best.distance >= prev_dist) break;
+                    prev_dist = best.distance;
+                }
+            }
+        }
+    }
     if (params.subsolve_iters > 0) {
         // Route-pair sub-CVRP re-solve (see SisrParams.subsolve_iters). Pair
         // selection: rank route pairs by how many granular-neighbor links
@@ -578,6 +620,7 @@ const SisrSlot = struct {
     options: solver.SolveOptions,
     params: SisrParams,
     seed: u64,
+    chain_index: usize = 0,
     order: []usize, // parent-owned flat customer order (size n)
     ends: []usize, // parent-owned route-end boundaries (size n)
     nroutes: usize = 0,
@@ -590,7 +633,28 @@ fn sisrWorker(slot: *SisrSlot) void {
     defer arena.deinit();
     var opts = slot.options;
     opts.seed = slot.seed;
-    const res = solveCvrpSisr(arena.allocator(), slot.inst, opts, slot.params) catch {
+    // Per-chain matrix jitter (see SisrParams.jitter): chains beyond the
+    // first search a warped copy; selection cost is recounted on the true
+    // matrix below. Chain 0 always searches the true matrix.
+    var inst = slot.inst;
+    const jittered = slot.params.jitter > 0 and slot.chain_index > 0;
+    if (jittered) {
+        const dim = slot.inst.n + 1;
+        const jm = arena.allocator().alloc(u32, dim * dim) catch {
+            slot.ok = false;
+            return;
+        };
+        var jprng = std.Random.DefaultPrng.init(slot.seed ^ 0x71773E12);
+        const jrng = jprng.random();
+        for (0..dim * dim) |k| {
+            const w0 = slot.inst.matrix[k];
+            const u = jrng.float(f64) * 2.0 - 1.0;
+            const scaled = @as(f64, @floatFromInt(w0)) * (1.0 + slot.params.jitter * u);
+            jm[k] = if (w0 == 0) 0 else @max(1, @as(u32, @intFromFloat(@round(scaled))));
+        }
+        inst = .{ .n = slot.inst.n, .matrix = jm, .demand = slot.inst.demand, .capacity = slot.inst.capacity };
+    }
+    const res = solveCvrpSisr(arena.allocator(), inst, opts, slot.params) catch {
         slot.ok = false;
         return;
     };
@@ -602,7 +666,21 @@ fn sisrWorker(slot: *SisrSlot) void {
         slot.ends[ri] = w;
     }
     slot.nroutes = res.routes.len;
-    slot.cost = res.total_cost;
+    if (jittered) {
+        // recount on the true matrix so selection compares true costs
+        var true_cost: u64 = 0;
+        for (res.routes) |route| {
+            var prev: usize = 0;
+            for (route) |c| {
+                true_cost += slot.inst.d(prev, c);
+                prev = c;
+            }
+            true_cost += slot.inst.d(prev, 0);
+        }
+        slot.cost = true_cost;
+    } else {
+        slot.cost = res.total_cost;
+    }
     slot.ok = true;
 }
 
@@ -641,6 +719,7 @@ pub fn solveCvrpSisrParallel(allocator: std.mem.Allocator, inst: CvrpInstance, o
             .options = options,
             .params = chain_params,
             .seed = options.seed +% i,
+            .chain_index = i,
             .order = try allocator.alloc(usize, n),
             .ends = try allocator.alloc(usize, n),
         };
@@ -987,4 +1066,59 @@ test "CVRP SISR curl_rate: feasible, self-consistent, default bit-identical" {
     defer on.deinit();
     const checked = validate(inst, on.routes) orelse return error.TestInfeasibleResult;
     try std.testing.expectEqual(on.total_cost, checked);
+}
+
+test "CVRP SISR jitter: parallel feasible, default bit-identical" {
+    const allocator = std.testing.allocator;
+    const n = 60;
+    const dim = n + 1;
+    var prng = std.Random.DefaultPrng.init(0x717731);
+    const rng = prng.random();
+    const matrix = try allocator.alloc(u32, dim * dim);
+    defer allocator.free(matrix);
+    for (0..dim) |i| {
+        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 100, 1000);
+    }
+    const demand = try allocator.alloc(u32, dim);
+    defer allocator.free(demand);
+    demand[0] = 0;
+    for (1..dim) |i| demand[i] = rng.intRangeAtMost(u32, 1, 5);
+    const inst = CvrpInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 12 };
+    var off = try solveCvrpSisrParallel(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000 }, 2);
+    defer off.deinit();
+    var off2 = try solveCvrpSisrParallel(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000, .jitter = 0 }, 2);
+    defer off2.deinit();
+    try std.testing.expectEqual(off.total_cost, off2.total_cost);
+    var on = try solveCvrpSisrParallel(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000, .jitter = 0.005 }, 2);
+    defer on.deinit();
+    const checked = validate(inst, on.routes) orelse return error.TestInfeasibleResult;
+    try std.testing.expectEqual(on.total_cost, checked);
+}
+
+test "CVRP SISR resplit: never worse, feasible, default bit-identical" {
+    const allocator = std.testing.allocator;
+    const n = 60;
+    const dim = n + 1;
+    var prng = std.Random.DefaultPrng.init(0x2E5817);
+    const rng = prng.random();
+    const matrix = try allocator.alloc(u32, dim * dim);
+    defer allocator.free(matrix);
+    for (0..dim) |i| {
+        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 100);
+    }
+    const demand = try allocator.alloc(u32, dim);
+    defer allocator.free(demand);
+    demand[0] = 0;
+    for (1..dim) |i| demand[i] = rng.intRangeAtMost(u32, 1, 5);
+    const inst = CvrpInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 12 };
+    var off = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000 });
+    defer off.deinit();
+    var off2 = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000, .resplit = false });
+    defer off2.deinit();
+    try std.testing.expectEqual(off.total_cost, off2.total_cost);
+    var on = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000, .final_ls = true, .resplit = true });
+    defer on.deinit();
+    const checked = validate(inst, on.routes) orelse return error.TestInfeasibleResult;
+    try std.testing.expectEqual(on.total_cost, checked);
+    try std.testing.expect(on.total_cost <= off.total_cost);
 }
