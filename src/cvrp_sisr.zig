@@ -591,6 +591,8 @@ pub fn solveCvrpSisrParallel(allocator: std.mem.Allocator, inst: CvrpInstance, o
     var chain_params = params;
     chain_params.final_ls = false;
     chain_params.route_atsp = false;
+    chain_params.kicks = 0;
+    chain_params.subsolve_iters = 0;
     for (slots, 0..) |*s, i| {
         s.* = .{
             .inst = inst,
