@@ -18,7 +18,6 @@ const POP_CROSSOVER_N = cvrp_split.POP_CROSSOVER_N;
 const REGRET_MAX_N = cvrp_split.REGRET_MAX_N;
 const UCB_C = cvrp_split.UCB_C;
 
-
 // ---- SISR: single-solution ruin-and-recreate (Christiaens & Vanden Berghe 2020) -
 // HGS plateaus on large CVRP (X-n1001 ~2.78%) because a population cannot afford
 // enough generations at scale. SISR is the scale answer: one solution, millions of
@@ -97,6 +96,20 @@ pub const SisrParams = struct {
     // over chains can only drop. The serial engine ignores this knob (use
     // `kicks`). Default 0 = off = bit-identical.
     chain_kicks: usize = 0,
+    // Restart-to-best rounds: re-run the SAME t0->tf geometric schedule this
+    // many times, each round restarting the trajectory from the best-so-far
+    // with a full reheat. The geometric schedule stretches with iters and is
+    // measurably non-monotone in budget (5M can score worse than 4M); rounds
+    // spend extra budget as more restarts of the proven schedule shape
+    // instead, monotone by construction (best never regresses). Total
+    // ruin-recreate work = rounds * iters. Default 1 = bit-identical.
+    rounds: usize = 1,
+    // Curl-guided ruin: probability that a ruin center is picked by a 4-way
+    // tournament on one-way regret (how much the solution pays traversing
+    // this customer's arcs against the cheaper direction) instead of
+    // uniformly. Real road asymmetry is ~3/4 curl; this aims the ruin where
+    // the routes fight the direction field. Default 0 = bit-identical.
+    curl_rate: f64 = 0,
 };
 
 /// SISR solver for (symmetric or asymmetric) CVRP, uncapped fleet. Builds a feasible
@@ -165,7 +178,7 @@ pub fn solveCvrpSisr(allocator: std.mem.Allocator, inst: CvrpInstance, options: 
     const eff_lmax: usize = if (marathon_on) 13 else params.l_max;
     const eff_blink: f64 = if (marathon_on) 0.02 else params.blink;
     const eff_tf_factor: f64 = if (marathon_on) 0.001 else params.tf_factor;
-    var ctx = SisrCtx{ .present = present, .removed = removed, .rprev = rprev, .rroute = rroute, .ins = ins, .touched = touched, .rmark = rmark, .blink = eff_blink, .l_max = eff_lmax, .cbar = eff_cbar, .split_rate = eff_split, .split_alpha = params.split_alpha, .regret_rate = eff_regret };
+    var ctx = SisrCtx{ .present = present, .removed = removed, .rprev = rprev, .rroute = rroute, .ins = ins, .touched = touched, .rmark = rmark, .blink = eff_blink, .l_max = eff_lmax, .cbar = eff_cbar, .split_rate = eff_split, .split_alpha = params.split_alpha, .regret_rate = eff_regret, .curl_rate = params.curl_rate };
 
     var prng = std.Random.DefaultPrng.init(options.seed);
     const rng = prng.random();
@@ -184,49 +197,58 @@ pub fn solveCvrpSisr(allocator: std.mem.Allocator, inst: CvrpInstance, options: 
     var bt: f64 = 2;
 
     // In-place ruin+recreate with O(removed) rollback on reject (no snapshot copy).
-    var it: usize = 0;
-    while (it < iters) : (it += 1) {
-        const saved_dist = cur.distance;
-        const saved_nroutes = cur.nroutes;
-        var arm: usize = 0;
-        if (params.bandit) {
-            const ucb_plain = bq[0] + UCB_C * @sqrt(@log(bt) / bn[0]);
-            const ucb_split = bq[1] + UCB_C * @sqrt(@log(bt) / bn[1]);
-            arm = if (ucb_split > ucb_plain) 1 else 0;
-            ctx.force_split = @intCast(arm);
+    // rounds > 1: restart-to-best with full reheat (see SisrParams.rounds).
+    const rounds = @max(@as(usize, 1), params.rounds);
+    var round: usize = 0;
+    while (round < rounds) : (round += 1) {
+        if (round > 0) {
+            cur.copyLiveFrom(&best);
+            temp = t0;
         }
-        cur.sisrRuin(&ctx, rng);
-        const use_regret = ctx.regret_rate >= 1.0 or (ctx.regret_rate > 0 and rng.float(f64) < ctx.regret_rate);
-        if (use_regret) cur.sisrRecreateRegret(&ctx) else cur.sisrRecreate(&ctx, rng);
-        const dt = @as(i64, @intCast(cur.distance)) - @as(i64, @intCast(saved_dist));
-        if (params.bandit) {
-            const reward: f64 = if (dt < 0) 1 else 0;
-            bn[arm] += 1;
-            bt += 1;
-            bq[arm] += (reward - bq[arm]) / bn[arm];
-        }
-        // Threshold Accepting (Dueck & Scheuer): accept any move not worse than the
-        // current threshold `temp`. Deterministic — no exp(), no acceptance RNG draw —
-        // vs Metropolis exp(-dt/temp). Same geometric schedule drives the threshold.
-        const accept = @as(f64, @floatFromInt(dt)) < temp;
-        if (accept) {
-            if (cur.distance < best_dist) {
-                best.copyLiveFrom(&cur);
-                best_dist = cur.distance;
+        var it: usize = 0;
+        while (it < iters) : (it += 1) {
+            const saved_dist = cur.distance;
+            const saved_nroutes = cur.nroutes;
+            var arm: usize = 0;
+            if (params.bandit) {
+                const ucb_plain = bq[0] + UCB_C * @sqrt(@log(bt) / bn[0]);
+                const ucb_split = bq[1] + UCB_C * @sqrt(@log(bt) / bn[1]);
+                arm = if (ucb_split > ucb_plain) 1 else 0;
+                ctx.force_split = @intCast(arm);
             }
-        } else {
-            cur.sisrUndo(&ctx, saved_dist, saved_nroutes);
+            cur.sisrRuin(&ctx, rng);
+            const use_regret = ctx.regret_rate >= 1.0 or (ctx.regret_rate > 0 and rng.float(f64) < ctx.regret_rate);
+            if (use_regret) cur.sisrRecreateRegret(&ctx) else cur.sisrRecreate(&ctx, rng);
+            const dt = @as(i64, @intCast(cur.distance)) - @as(i64, @intCast(saved_dist));
+            if (params.bandit) {
+                const reward: f64 = if (dt < 0) 1 else 0;
+                bn[arm] += 1;
+                bt += 1;
+                bq[arm] += (reward - bq[arm]) / bn[arm];
+            }
+            // Threshold Accepting (Dueck & Scheuer): accept any move not worse than the
+            // current threshold `temp`. Deterministic — no exp(), no acceptance RNG draw —
+            // vs Metropolis exp(-dt/temp). Same geometric schedule drives the threshold.
+            const accept = @as(f64, @floatFromInt(dt)) < temp;
+            if (accept) {
+                if (cur.distance < best_dist) {
+                    best.copyLiveFrom(&cur);
+                    best_dist = cur.distance;
+                }
+            } else {
+                cur.sisrUndo(&ctx, saved_dist, saved_nroutes);
+            }
+            // Debug invariant: the live structure's true distance must match the value
+            // maintained incrementally through ruin/recreate (and restored by undo). Run
+            // every iteration in Debug so every reject+undo path is validated (tests are
+            // tiny-n); release builds skip it entirely.
+            if (builtin.mode == .Debug) {
+                const inc = cur.distance;
+                cur.flushLinks();
+                std.debug.assert(cur.distance == inc);
+            }
+            temp *= cf;
         }
-        // Debug invariant: the live structure's true distance must match the value
-        // maintained incrementally through ruin/recreate (and restored by undo). Run
-        // every iteration in Debug so every reject+undo path is validated (tests are
-        // tiny-n); release builds skip it entirely.
-        if (builtin.mode == .Debug) {
-            const inc = cur.distance;
-            cur.flushLinks();
-            std.debug.assert(cur.distance == inc);
-        }
-        temp *= cf;
     }
 
     if (params.final_ls or params.route_atsp or params.kicks > 0 or params.subsolve_iters > 0) {
@@ -900,4 +922,59 @@ test "CVRP SISR chain_kicks: parallel never worse, feasible, default bit-identic
     const checked = validate(inst, on.routes) orelse return error.TestInfeasibleResult;
     try std.testing.expectEqual(on.total_cost, checked);
     try std.testing.expect(on.total_cost <= off.total_cost);
+}
+
+test "CVRP SISR rounds: never worse than one round, feasible, default bit-identical" {
+    const allocator = std.testing.allocator;
+    const n = 60;
+    const dim = n + 1;
+    var prng = std.Random.DefaultPrng.init(0x20B1D5);
+    const rng = prng.random();
+    const matrix = try allocator.alloc(u32, dim * dim);
+    defer allocator.free(matrix);
+    for (0..dim) |i| {
+        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 100);
+    }
+    const demand = try allocator.alloc(u32, dim);
+    defer allocator.free(demand);
+    demand[0] = 0;
+    for (1..dim) |i| demand[i] = rng.intRangeAtMost(u32, 1, 5);
+    const inst = CvrpInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 12 };
+    var off = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000 });
+    defer off.deinit();
+    var one = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000, .rounds = 1 });
+    defer one.deinit();
+    try std.testing.expectEqual(off.total_cost, one.total_cost);
+    var on = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000, .rounds = 3 });
+    defer on.deinit();
+    const checked = validate(inst, on.routes) orelse return error.TestInfeasibleResult;
+    try std.testing.expectEqual(on.total_cost, checked);
+    try std.testing.expect(on.total_cost <= off.total_cost);
+}
+
+test "CVRP SISR curl_rate: feasible, self-consistent, default bit-identical" {
+    const allocator = std.testing.allocator;
+    const n = 60;
+    const dim = n + 1;
+    var prng = std.Random.DefaultPrng.init(0xC0217);
+    const rng = prng.random();
+    const matrix = try allocator.alloc(u32, dim * dim);
+    defer allocator.free(matrix);
+    for (0..dim) |i| {
+        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 100);
+    }
+    const demand = try allocator.alloc(u32, dim);
+    defer allocator.free(demand);
+    demand[0] = 0;
+    for (1..dim) |i| demand[i] = rng.intRangeAtMost(u32, 1, 5);
+    const inst = CvrpInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 12 };
+    var off = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000 });
+    defer off.deinit();
+    var off2 = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000, .curl_rate = 0 });
+    defer off2.deinit();
+    try std.testing.expectEqual(off.total_cost, off2.total_cost);
+    var on = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000, .curl_rate = 0.5 });
+    defer on.deinit();
+    const checked = validate(inst, on.routes) orelse return error.TestInfeasibleResult;
+    try std.testing.expectEqual(on.total_cost, checked);
 }
