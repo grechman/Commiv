@@ -646,6 +646,19 @@ n=1000 `... RB_KICKS=150 RB_SUBSOLVE=50000 RB_SUBSOLVE_PAIRS=4` (moscow: `_PAIRS
 n=2000 `... RB_KICKS=50 RB_SUBSOLVE=50000 RB_SUBSOLVE_PAIRS=2` (kick cost scales with
 n, so the count drops). Example: the nyc-1000 command above plus the n=1000 knobs
 → 91,305. PyVRP side: `pyvrp_road.py vendor/road/nyc-1000.road cvrp 24 12345` → 92,731.
+
+One more knob sits behind the ladder: `RB_CHAIN_KICKS=N` runs N kicks inside *each*
+parallel chain before winner selection, so selection picks the best of K refined
+trajectories instead of refining the best raw one — K chains' worth of kicked
+exploration for one chain's kick wall. It matters where kicks themselves have slack:
+nyc-100 + `RB_CHAIN_KICKS=300` reaches **32,285 / 32,286 / 32,333** (~4.3 s) — seed
+12345 lands on the same 32,285 PyVRP parks at (its 4 s and 5 s runs are identical:
+32,295 / 32,286 / 32,308), the first commiv run to touch that basin, now winning or
+tying 2 of 3 seeds head-to-head. nyc-1000 + `RB_CHAIN_KICKS=300` gives
+91,007 / 91,389 / 91,660 (−0.14 % mean) for ~+20 % wall — notably the *only* lever that
+converts extra wall into quality there, since more SISR iterations are non-monotone
+(5 M scores 91,762, worse than 4 M's 91,305). Berlin, Moscow, and nyc-2000 measured
+flat-to-crumbs (two nyc-2000 seeds bit-identical), so it stays off outside NYC ≤ 1000.
 The road-TW cells: `zig build twroadbench -Doptimize=ReleaseFast && python3
 tools/competitors/dump_windows.py nyc-2000 && TP_FILE=nyc-2000 TP_ITERS=800000
 TP_THREADS=3 TP_COMBO=1 TP_NBR=min TP_POLISH_EVERY=8 ./zig-out/bin/commiv-twroadbench`
