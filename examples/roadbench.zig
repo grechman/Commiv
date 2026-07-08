@@ -22,7 +22,8 @@ const commiv = @import("commiv");
 //      sum|min|out), RB_GK (neighbor-list size, 0 = auto), RB_FINAL_LS,
 //      RB_ROUTE_ATSP (post-run refiners, 1 = on), RB_KICKS (post-run
 //      perturbation rounds, 0 = off), RB_SUBSOLVE (route-pair re-solve
-//      iterations, 0 = off), RB_SUBSOLVE_PAIRS (default 8).
+//      iterations, 0 = off), RB_SUBSOLVE_PAIRS (default 8), RB_CHAIN_KICKS
+//      (per-chain kicks before winner selection, 0 = off).
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const env = init.environ_map;
@@ -66,6 +67,7 @@ pub fn main(init: std.process.Init) !void {
             .kicks = try std.fmt.parseInt(usize, env.get("RB_KICKS") orelse "0", 10),
             .subsolve_iters = try std.fmt.parseInt(usize, env.get("RB_SUBSOLVE") orelse "0", 10),
             .subsolve_pairs = try std.fmt.parseInt(usize, env.get("RB_SUBSOLVE_PAIRS") orelse "8", 10),
+            .chain_kicks = try std.fmt.parseInt(usize, env.get("RB_CHAIN_KICKS") orelse "0", 10),
         };
         const solve_opts = commiv.SolveOptions{
             .seed = seed,

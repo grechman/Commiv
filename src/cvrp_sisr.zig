@@ -88,6 +88,15 @@ pub const SisrParams = struct {
     // bit-identical.
     subsolve_iters: usize = 0,
     subsolve_pairs: usize = 8,
+    // In-chain kicks (parallel driver only): each of the K chains runs this
+    // many iterated kicks on its own best BEFORE winner selection. The kicks
+    // run concurrently across chains, so K chains' worth of kicked
+    // exploration costs one chain's kick wall, and selection then picks the
+    // best refined chain (best-of-refined beats refined-best). Guaranteed
+    // never worse: each chain's kicked result <= its raw result, so the min
+    // over chains can only drop. The serial engine ignores this knob (use
+    // `kicks`). Default 0 = off = bit-identical.
+    chain_kicks: usize = 0,
 };
 
 /// SISR solver for (symmetric or asymmetric) CVRP, uncapped fleet. Builds a feasible
@@ -591,8 +600,9 @@ pub fn solveCvrpSisrParallel(allocator: std.mem.Allocator, inst: CvrpInstance, o
     var chain_params = params;
     chain_params.final_ls = false;
     chain_params.route_atsp = false;
-    chain_params.kicks = 0;
+    chain_params.kicks = params.chain_kicks;
     chain_params.subsolve_iters = 0;
+    chain_params.chain_kicks = 0;
     for (slots, 0..) |*s, i| {
         s.* = .{
             .inst = inst,
@@ -858,6 +868,34 @@ test "CVRP SISR subsolve: never worse than without it, feasible, default bit-ide
     defer off2.deinit();
     try std.testing.expectEqual(off.total_cost, off2.total_cost);
     var on = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000, .subsolve_iters = 30000, .subsolve_pairs = 4 });
+    defer on.deinit();
+    const checked = validate(inst, on.routes) orelse return error.TestInfeasibleResult;
+    try std.testing.expectEqual(on.total_cost, checked);
+    try std.testing.expect(on.total_cost <= off.total_cost);
+}
+
+test "CVRP SISR chain_kicks: parallel never worse, feasible, default bit-identical" {
+    const allocator = std.testing.allocator;
+    const n = 60;
+    const dim = n + 1;
+    var prng = std.Random.DefaultPrng.init(0xC41C1);
+    const rng = prng.random();
+    const matrix = try allocator.alloc(u32, dim * dim);
+    defer allocator.free(matrix);
+    for (0..dim) |i| {
+        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 100);
+    }
+    const demand = try allocator.alloc(u32, dim);
+    defer allocator.free(demand);
+    demand[0] = 0;
+    for (1..dim) |i| demand[i] = rng.intRangeAtMost(u32, 1, 5);
+    const inst = CvrpInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 12 };
+    var off = try solveCvrpSisrParallel(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000 }, 2);
+    defer off.deinit();
+    var off2 = try solveCvrpSisrParallel(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000, .chain_kicks = 0 }, 2);
+    defer off2.deinit();
+    try std.testing.expectEqual(off.total_cost, off2.total_cost);
+    var on = try solveCvrpSisrParallel(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000, .chain_kicks = 20 }, 2);
     defer on.deinit();
     const checked = validate(inst, on.routes) orelse return error.TestInfeasibleResult;
     try std.testing.expectEqual(on.total_cost, checked);
