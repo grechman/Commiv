@@ -75,6 +75,7 @@ pub fn main(init: std.process.Init) !void {
             .reheat = try std.fmt.parseFloat(f64, env.get("RB_REHEAT") orelse "1"),
             .jitter = try std.fmt.parseFloat(f64, env.get("RB_JITTER") orelse "0"),
             .resplit = std.mem.eql(u8, env.get("RB_RESPLIT") orelse "0", "1"),
+            .spp = std.mem.eql(u8, env.get("RB_SPP") orelse "0", "1"),
         };
         const solve_opts = commiv.SolveOptions{
             .seed = seed,

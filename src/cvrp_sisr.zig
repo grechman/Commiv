@@ -129,6 +129,16 @@ pub const SisrParams = struct {
     // route count may change). Accept only on strict improvement, then
     // re-educate. Default off = bit-identical.
     resplit: bool = false,
+    // Route-pool set partitioning (parallel driver only): before refining,
+    // pool the routes of ALL chains and compose the cheapest exact cover
+    // (every customer exactly once) by branch-and-bound over the pooled
+    // columns. Chain errors are stochastic, so one chain's north side plus
+    // another's south side is often cheaper than either whole solution. Each
+    // chain's own partition is a feasible cover, so the composition is never
+    // worse than the winning chain; capacity holds because every pooled route
+    // was feasible in its chain. Node-capped; scored on the true matrix (so
+    // it composes with jitter). Default off = bit-identical.
+    spp: bool = false,
 };
 
 /// SISR solver for (symmetric or asymmetric) CVRP, uncapped fleet. Builds a feasible
@@ -743,6 +753,185 @@ pub fn solveCvrpSisrParallel(allocator: std.mem.Allocator, inst: CvrpInstance, o
     }
     const winner = best orelse return error.AllChainsFailed;
 
+    if (params.spp and k > 1) spp_blk: {
+        const words = (n + 63) / 64;
+        const RouteRef = struct { slot: usize, start: usize, end: usize, cost: u64 };
+        var pool: std.ArrayList(RouteRef) = .empty;
+        defer pool.deinit(allocator);
+        var pool_bits: std.ArrayList(u64) = .empty;
+        defer pool_bits.deinit(allocator);
+        for (slots, 0..) |s, si| {
+            if (!s.ok) continue;
+            var rstart: usize = 0;
+            for (0..s.nroutes) |ri| {
+                const rend = s.ends[ri];
+                if (rend > rstart) {
+                    var rc: u64 = 0;
+                    var prev: usize = 0;
+                    for (s.order[rstart..rend]) |c| {
+                        rc += inst.d(prev, c);
+                        prev = c;
+                    }
+                    rc += inst.d(prev, 0);
+                    try pool.append(allocator, .{ .slot = si, .start = rstart, .end = rend, .cost = rc });
+                    const base = pool_bits.items.len;
+                    try pool_bits.appendNTimes(allocator, 0, words);
+                    for (s.order[rstart..rend]) |c| {
+                        pool_bits.items[base + (c - 1) / 64] |= @as(u64, 1) << @intCast((c - 1) % 64);
+                    }
+                }
+                rstart = rend;
+            }
+        }
+        const nr_pool = pool.items.len;
+        if (nr_pool == 0) break :spp_blk;
+        // CSR candidate lists: for customer bit-index c (customer c+1), the
+        // pool routes containing it.
+        const cl_off = try allocator.alloc(usize, n + 1);
+        defer allocator.free(cl_off);
+        @memset(cl_off, 0);
+        for (pool.items, 0..) |_, r| {
+            const rb = pool_bits.items[r * words ..][0..words];
+            for (0..n) |c| {
+                if (rb[c / 64] & (@as(u64, 1) << @intCast(c % 64)) != 0) cl_off[c + 1] += 1;
+            }
+        }
+        for (1..n + 1) |c| cl_off[c] += cl_off[c - 1];
+        const cl = try allocator.alloc(usize, cl_off[n]);
+        defer allocator.free(cl);
+        const fill = try allocator.alloc(usize, n);
+        defer allocator.free(fill);
+        @memset(fill, 0);
+        for (pool.items, 0..) |_, r| {
+            const rb = pool_bits.items[r * words ..][0..words];
+            for (0..n) |c| {
+                if (rb[c / 64] & (@as(u64, 1) << @intCast(c % 64)) != 0) {
+                    cl[cl_off[c] + fill[c]] = r;
+                    fill[c] += 1;
+                }
+            }
+        }
+        // LB shares: share[c] = min over candidate routes of cost/len;
+        // route_share[r] = sum of shares of its customers.
+        const share = try allocator.alloc(f64, n);
+        defer allocator.free(share);
+        var total_share: f64 = 0;
+        for (0..n) |c| {
+            var mn: f64 = std.math.inf(f64);
+            for (cl[cl_off[c]..cl_off[c + 1]]) |r| {
+                const len = pool.items[r].end - pool.items[r].start;
+                const ratio = @as(f64, @floatFromInt(pool.items[r].cost)) / @as(f64, @floatFromInt(len));
+                if (ratio < mn) mn = ratio;
+            }
+            share[c] = mn;
+            total_share += mn;
+        }
+        const route_share = try allocator.alloc(f64, nr_pool);
+        defer allocator.free(route_share);
+        for (pool.items, 0..) |_, r| {
+            const rb = pool_bits.items[r * words ..][0..words];
+            var ssum: f64 = 0;
+            for (0..n) |c| {
+                if (rb[c / 64] & (@as(u64, 1) << @intCast(c % 64)) != 0) ssum += share[c];
+            }
+            route_share[r] = ssum;
+        }
+        const covered = try allocator.alloc(u64, words);
+        defer allocator.free(covered);
+        @memset(covered, 0);
+        const chosen = try allocator.alloc(usize, n);
+        defer allocator.free(chosen);
+        const best_chosen = try allocator.alloc(usize, n);
+        defer allocator.free(best_chosen);
+        const Ctx = struct {
+            pool: []const RouteRef,
+            bits: []const u64,
+            words: usize,
+            cl_off: []const usize,
+            cl: []const usize,
+            route_share: []const f64,
+            covered: []u64,
+            chosen: []usize,
+            best_chosen: []usize,
+            best_len: usize = 0,
+            best_cost: u64,
+            nodes: usize = 0,
+            n: usize,
+            total_share: f64,
+            fn dfs(ctx: *@This(), depth: usize, cost: u64, covered_share: f64) void {
+                ctx.nodes += 1;
+                if (ctx.nodes > 500_000) return;
+                var c: usize = ctx.n;
+                for (0..ctx.n) |cc| {
+                    if (ctx.covered[cc / 64] & (@as(u64, 1) << @intCast(cc % 64)) == 0) {
+                        c = cc;
+                        break;
+                    }
+                }
+                if (c == ctx.n) {
+                    if (cost < ctx.best_cost) {
+                        ctx.best_cost = cost;
+                        ctx.best_len = depth;
+                        @memcpy(ctx.best_chosen[0..depth], ctx.chosen[0..depth]);
+                    }
+                    return;
+                }
+                // LB prune (0.5 slack guards f64 rounding from cutting the true optimum)
+                if (@as(f64, @floatFromInt(cost)) + (ctx.total_share - covered_share) >= @as(f64, @floatFromInt(ctx.best_cost)) - 0.5) return;
+                for (ctx.cl[ctx.cl_off[c]..ctx.cl_off[c + 1]]) |r| {
+                    if (cost + ctx.pool[r].cost >= ctx.best_cost) continue;
+                    const rb = ctx.bits[r * ctx.words ..][0..ctx.words];
+                    var disjoint = true;
+                    for (0..ctx.words) |wi| {
+                        if (ctx.covered[wi] & rb[wi] != 0) {
+                            disjoint = false;
+                            break;
+                        }
+                    }
+                    if (!disjoint) continue;
+                    for (0..ctx.words) |wi| ctx.covered[wi] |= rb[wi];
+                    ctx.chosen[depth] = r;
+                    ctx.dfs(depth + 1, cost + ctx.pool[r].cost, covered_share + ctx.route_share[r]);
+                    for (0..ctx.words) |wi| ctx.covered[wi] &= ~rb[wi];
+                    if (ctx.nodes > 500_000) return;
+                }
+            }
+        };
+        var ctx = Ctx{
+            .pool = pool.items,
+            .bits = pool_bits.items,
+            .words = words,
+            .cl_off = cl_off,
+            .cl = cl,
+            .route_share = route_share,
+            .covered = covered,
+            .chosen = chosen,
+            .best_chosen = best_chosen,
+            .best_cost = slots[winner].cost,
+            .n = n,
+            .total_share = total_share,
+        };
+        ctx.dfs(0, 0, 0);
+        if (ctx.best_len > 0 and ctx.best_cost < slots[winner].cost) {
+            // Overwrite the winner slot with the composition. Copy through a
+            // temp buffer first: chosen routes may point INTO the winner
+            // slot's own order array.
+            const tmp = try allocator.alloc(usize, n);
+            defer allocator.free(tmp);
+            var w2: usize = 0;
+            for (ctx.best_chosen[0..ctx.best_len], 0..) |r, ri| {
+                const rr = pool.items[r];
+                const src = slots[rr.slot].order[rr.start..rr.end];
+                @memcpy(tmp[w2 .. w2 + src.len], src);
+                w2 += src.len;
+                slots[winner].ends[ri] = w2;
+            }
+            @memcpy(slots[winner].order[0..w2], tmp[0..w2]);
+            slots[winner].nroutes = ctx.best_len;
+            slots[winner].cost = ctx.best_cost;
+        }
+    }
+
     if (params.final_ls or params.route_atsp or params.kicks > 0 or params.subsolve_iters > 0) {
         const ws = slots[winner];
         var rsol = try Solution.fromFlat(allocator, inst, ws.order[0..n], ws.ends[0..ws.nroutes]);
@@ -1117,6 +1306,34 @@ test "CVRP SISR resplit: never worse, feasible, default bit-identical" {
     defer off2.deinit();
     try std.testing.expectEqual(off.total_cost, off2.total_cost);
     var on = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000, .final_ls = true, .resplit = true });
+    defer on.deinit();
+    const checked = validate(inst, on.routes) orelse return error.TestInfeasibleResult;
+    try std.testing.expectEqual(on.total_cost, checked);
+    try std.testing.expect(on.total_cost <= off.total_cost);
+}
+
+test "CVRP SISR spp: parallel never worse, feasible, default bit-identical" {
+    const allocator = std.testing.allocator;
+    const n = 60;
+    const dim = n + 1;
+    var prng = std.Random.DefaultPrng.init(0x5EB1);
+    const rng = prng.random();
+    const matrix = try allocator.alloc(u32, dim * dim);
+    defer allocator.free(matrix);
+    for (0..dim) |i| {
+        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 100);
+    }
+    const demand = try allocator.alloc(u32, dim);
+    defer allocator.free(demand);
+    demand[0] = 0;
+    for (1..dim) |i| demand[i] = rng.intRangeAtMost(u32, 1, 5);
+    const inst = CvrpInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 12 };
+    var off = try solveCvrpSisrParallel(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000 }, 2);
+    defer off.deinit();
+    var off2 = try solveCvrpSisrParallel(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000, .spp = false }, 2);
+    defer off2.deinit();
+    try std.testing.expectEqual(off.total_cost, off2.total_cost);
+    var on = try solveCvrpSisrParallel(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000, .spp = true }, 2);
     defer on.deinit();
     const checked = validate(inst, on.routes) orelse return error.TestInfeasibleResult;
     try std.testing.expectEqual(on.total_cost, checked);
