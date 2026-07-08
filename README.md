@@ -594,23 +594,58 @@ CVRP cells (`zig build roadbench -Doptimize=ReleaseFast` first):
 ./zig-out/bin/commiv-roadbench` → 91,639;
 `RB_FILES=nyc-2000 RB_ITERS=5000000 RB_THREADS=3 RB_SYM=0 RB_NBR=min RB_GK=40
 ./zig-out/bin/commiv-roadbench` → 133,815 (add `RB_FINAL_LS=1` → 133,677).
-`final_ls` is a post-run lever (both engines, also REST-less bench-only for now): one
-improvement-only local-search convergence on the returned best — the insertion-sort
-principle, a cheap refiner suited to nearly-optimal input. Never worse by construction,
-~free wall (≤2 s at n=2000), worth −0.05 % to −0.3 % depending on how converged the
-cell already is (biggest on small instances, crumbs where polish already ran).
-`route_atsp` (CVRP only, `RB_ROUTE_ATSP=1`) is the next refiner rung: each route's
-internal order re-solved as a standalone ATSP through the depot with the elite directed
-engine, alternated with `final_ls` drains until dry, memoized so re-sweeps skip
-untouched routes. Also never worse by construction (strict-improvement splice, verified
-by recount). 3-seed deltas on top of `final_ls`: nyc-1000 −0.29/−0.32/−0.30 %
-(91,346/91,472/91,793), nyc-2000 −0.15/−0.12/−0.32 % (133,472/133,451/133,588),
-berlin-1000 −0.10/−0.07/−0.18 % (109,075/109,560/109,395), moscow-1000
-−0.01/−0.08/−0.06 %, nyc-100 pulls the worst seed to the best-seed floor (32,328).
-Gain tracks route length (it reaches whole-route reorderings the relocate/2-opt
-vocabulary can't); cost is 1–5.5 s at n=1000–2000 — ~6 % of the nyc-2000 cell's wall,
-~4 % at any 60-second wall, but up to ~15 % of the shortest 20 s protocols, so it stays
-opt-in. Repro: append `RB_FINAL_LS=1 RB_ROUTE_ATSP=1` to any roadbench command above.
+### The refiner ladder
+
+The engine converges fast and then stalls; the ladder is a post-run pipeline of
+algorithms each suited to nearly-optimal input (the insertion-sort principle). It runs
+once, on the winning chain only, after best-of-K selection, and every stage keeps a
+change only on strict measured improvement — the pipeline is never worse than the raw
+run by construction. Four rungs, all default-off, off = bit-identical:
+
+- `final_ls` (both engines): improvement-only local-search convergence on the returned
+  best. The raw SISR loop never educates its own final answer; this does.
+- `route_atsp` (CVRP, `RB_ROUTE_ATSP=1`): each route's internal order re-solved as a
+  standalone depot-rooted ATSP by the elite directed engine, alternated with education
+  drains until dry. Sub-solves are read-only and fan out across the idle threads;
+  a memo skips routes unchanged since their last no-improvement solve. Reaches
+  whole-route reorderings the relocate/2-opt vocabulary can't — gain tracks route length.
+- `kicks` (CVRP, `RB_KICKS=N`): N deterministic zero-temperature perturbation rounds —
+  small ruin+recreate, full education drain, keep strict improvements only. The rung
+  that moves customers *between* routes; it broke the n=100 lock-in (nyc-100 seed 7
+  now 32,286, one unit off PyVRP's 32,285 optimum-basin result).
+- `subsolve` (CVRP, `RB_SUBSOLVE=iters`, `RB_SUBSOLVE_PAIRS=k`): adjacent route pairs
+  (ranked by granular cross-link count) extracted as standalone sub-CVRPs and re-solved
+  by a fresh seeded SISR; spliced back only if strictly cheaper with ≤2 vehicles. The
+  rung that moves *load* across route boundaries — it finally moved Moscow, the cell
+  every intra-route lever had left flat.
+
+Final 3-way comparison, 3 seeds (12345/7/99), PyVRP rerun at commiv's *full-pipeline*
+wall on the same machine (commiv 3 threads vs single-threaded PyVRP on one core, as
+everywhere in this README). "base" = same search config, ladder off:
+
+| cell | commiv base | commiv + ladder | PyVRP @ equal wall | mean gap vs PyVRP |
+|---|---|---|---|---:|
+| nyc-100 (1 M, min, ~3.7 s) | 32,468 / 32,328 / 32,412 | **32,333 / 32,286 / 32,356** | 32,295 / 32,286 / 32,308 @ 4 s | −0.09 % |
+| nyc-1000 (4 M, min, ~24 s) | 91,639 / 91,793 / 92,159 | **91,305 / 91,480 / 91,652** | 92,731 / 93,642 / 93,357 @ 24 s | **+1.93 %** |
+| nyc-2000 (5 M, min gk40, ~118 s) | 133,815 / 133,894 / 134,303 | **133,409 / 133,269 / 133,599** | 134,436 / 133,175 / 134,472 @ 121 s | **+0.45 %** |
+| berlin-1000 (4 M, marathon, ~30 s) | 109,181 / 109,637 / 109,601 | **109,086 / 109,450 / 109,373** | 109,392 / 108,470 / 109,822 @ 31 s | −0.07 % |
+| moscow-1000 (4 M, ~20 s) | 205,063 / 205,323 / 205,126 | **204,655 / 204,651 / 204,823** | 206,837 / 207,414 / 206,848 @ 20 s | **+1.13 %** |
+
+(Positive gap = commiv mean beats PyVRP mean.) The ladder is worth −0.16 % to −0.43 %
+on top of an already-converged run for 8–12 % wall at these protocols (2–4 % at a
+60-second wall). It flips nyc-2000 from a seed-level tie to a clear win, more than
+doubles the nyc-1000 and moscow margins, and closes most of the two remaining deficits:
+nyc-100 −0.33 % → −0.09 % (PyVRP parks at its optimum basin there) and berlin-1000
+−0.22 % → −0.07 % (2 of 3 seeds now commiv's; PyVRP's seed-7 run is the outlier that
+holds the mean). Moscow at PyVRP's 3× budget (203,190 @ 60 s) remains the one
+long-budget cell commiv doesn't reach.
+
+Ladder knobs per cell (append to the roadbench commands above): n=100
+`RB_FINAL_LS=1 RB_ROUTE_ATSP=1 RB_KICKS=300 RB_SUBSOLVE=30000 RB_SUBSOLVE_PAIRS=4`;
+n=1000 `... RB_KICKS=150 RB_SUBSOLVE=50000 RB_SUBSOLVE_PAIRS=4` (moscow: `_PAIRS=8`);
+n=2000 `... RB_KICKS=50 RB_SUBSOLVE=50000 RB_SUBSOLVE_PAIRS=2` (kick cost scales with
+n, so the count drops). Example: the nyc-1000 command above plus the n=1000 knobs
+→ 91,305. PyVRP side: `pyvrp_road.py vendor/road/nyc-1000.road cvrp 24 12345` → 92,731.
 The road-TW cells: `zig build twroadbench -Doptimize=ReleaseFast && python3
 tools/competitors/dump_windows.py nyc-2000 && TP_FILE=nyc-2000 TP_ITERS=800000
 TP_THREADS=3 TP_COMBO=1 TP_NBR=min TP_POLISH_EVERY=8 ./zig-out/bin/commiv-twroadbench`
