@@ -101,6 +101,7 @@ pub const internal = struct {
     pub const asymmetric = @import("asymmetric.zig");
     pub const vrp = @import("vrp.zig");
     pub const vrptw = @import("vrptw.zig");
+    pub const pdptw = @import("pdptw.zig");
 };
 
 test {
@@ -117,5 +118,6 @@ test {
     _ = @import("asymmetric.zig");
     _ = @import("vrp.zig");
     _ = @import("vrptw.zig");
+    _ = @import("pdptw.zig");
     _ = @import("capi.zig");
 }
