@@ -20,6 +20,7 @@ const parallel = internal.parallel;
 const asymmetric = internal.asymmetric;
 const vrp = internal.vrp;
 const vrptw = internal.vrptw;
+const pdptw = internal.pdptw;
 
 // ---- Parsing ----------------------------------------------------------------
 pub const parseTsplib = tsplib.parse;
@@ -78,6 +79,13 @@ pub const VrptwNbrKey = vrptw.NbrKey;
 pub const VrptwParams = vrptw.VrptwParams; // tuning for solveVrptw (rounds/restarts/veh_penalty)
 pub const VrptwHgsParams = vrptw.HgsParams;
 pub const validateVrptw = vrptw.validate; // feasibility + true-cost checker for a VrptwResult's routes
+
+// ---- PDPTW (pickup & delivery with time windows) ----------------------------
+pub const PdpInstance = pdptw.PdpInstance;
+pub const PdpResult = pdptw.PdpResult;
+pub const PdpParams = pdptw.PdpParams;
+pub const solvePdptw = pdptw.solvePdptw;
+pub const validatePdptw = pdptw.validate;
 
 // ---- Asymmetry analysis -----------------------------------------------------
 pub const conservativeness = asymmetric.conservativeness;

@@ -610,3 +610,609 @@ test "PDPTW validate: rejects unvisited, duplicate, and depot-in-route" {
         try std.testing.expectEqual(@as(?u64, null), validate(inst, routes[0..]));
     }
 }
+
+// ---------------------------------------------------------------------------
+// T4 — construction
+// ---------------------------------------------------------------------------
+
+const Sol = std.ArrayList(std.ArrayList(usize));
+
+fn freeSol(allocator: std.mem.Allocator, sol: *Sol) void {
+    for (sol.items) |*r| r.deinit(allocator);
+    sol.deinit(allocator);
+}
+
+fn collectPickups(allocator: std.mem.Allocator, inst: PdpInstance) ![]usize {
+    var out: std.ArrayList(usize) = .empty;
+    errdefer out.deinit(allocator);
+    const dim = inst.dim();
+    var c: usize = 1;
+    while (c < dim) : (c += 1) {
+        if (inst.is_pickup[c]) try out.append(allocator, c);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn solSlices(allocator: std.mem.Allocator, sol: *const Sol) ![][]const usize {
+    var out: std.ArrayList([]const usize) = .empty;
+    errdefer out.deinit(allocator);
+    for (sol.items) |r| {
+        if (r.items.len != 0) try out.append(allocator, r.items);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// Build the (len+2)-element candidate `route` with `p` inserted at gap `i` and `q`
+/// inserted at gap `j` (`j` measured in the array that already contains `p`, so
+/// `i < j`). `out` is cleared and filled; `i`/`j` are final positions since p's slot
+/// never moves when q is inserted after it.
+fn buildInsertion(allocator: std.mem.Allocator, out: *std.ArrayList(usize), route: []const usize, p: usize, q: usize, i: usize, j: usize) !void {
+    out.clearRetainingCapacity();
+    const len = route.len;
+    var oi: usize = 0;
+    var out_idx: usize = 0;
+    while (out_idx < len + 2) : (out_idx += 1) {
+        if (out_idx == i) {
+            try out.append(allocator, p);
+        } else if (out_idx == j) {
+            try out.append(allocator, q);
+        } else {
+            try out.append(allocator, route[oi]);
+            oi += 1;
+        }
+    }
+}
+
+fn construct(allocator: std.mem.Allocator, inst: PdpInstance, order: []const usize, pos: []usize) !Sol {
+    var sol: Sol = .empty;
+    errdefer freeSol(allocator, &sol);
+
+    var cand: std.ArrayList(usize) = .empty;
+    defer cand.deinit(allocator);
+
+    for (order) |p| {
+        const q = inst.pair_of[p];
+
+        var best_delta: i64 = 0;
+        var best_ri: ?usize = null;
+        var best_i: usize = 0;
+        var best_j: usize = 0;
+        var have_best = false;
+
+        for (sol.items, 0..) |route, ri| {
+            const c_old = routeCost(inst, route.items, pos) orelse unreachable;
+            const len = route.items.len;
+            var i: usize = 0;
+            while (i <= len) : (i += 1) {
+                var j: usize = i + 1;
+                while (j <= len + 1) : (j += 1) {
+                    try buildInsertion(allocator, &cand, route.items, p, q, i, j);
+                    const c_new = routeCost(inst, cand.items, pos) orelse continue;
+                    const delta = @as(i64, @intCast(c_new)) - @as(i64, @intCast(c_old));
+                    if (!have_best or delta < best_delta) {
+                        have_best = true;
+                        best_delta = delta;
+                        best_ri = ri;
+                        best_i = i;
+                        best_j = j;
+                    }
+                }
+            }
+        }
+
+        if (have_best) {
+            const ri = best_ri.?;
+            const route = &sol.items[ri];
+            var newr: std.ArrayList(usize) = .empty;
+            errdefer newr.deinit(allocator);
+            try buildInsertion(allocator, &newr, route.items, p, q, best_i, best_j);
+            route.deinit(allocator);
+            route.* = newr;
+        } else {
+            const pair = [_]usize{ p, q };
+            if (routeCost(inst, pair[0..], pos) == null) return error.InfeasibleInstance;
+            var newr: std.ArrayList(usize) = .empty;
+            errdefer newr.deinit(allocator);
+            try newr.append(allocator, p);
+            try newr.append(allocator, q);
+            try sol.append(allocator, newr);
+        }
+    }
+
+    return sol;
+}
+
+test "PDPTW construct: output passes validate on the hand fixture" {
+    const allocator = std.testing.allocator;
+    const f = fixture2();
+    const inst = f.inst(5);
+    const pos = try allocator.alloc(usize, inst.dim());
+    defer allocator.free(pos);
+    @memset(pos, 0);
+
+    const order = [_]usize{ 1, 2 };
+    var sol = try construct(allocator, inst, order[0..], pos);
+    defer freeSol(allocator, &sol);
+
+    const slices = try solSlices(allocator, &sol);
+    defer allocator.free(slices);
+
+    try std.testing.expect(validate(inst, slices) != null);
+}
+
+// ---------------------------------------------------------------------------
+// T5 — pair-relocate local search
+// ---------------------------------------------------------------------------
+
+/// Build `out` as `route` with both `p` and `q` removed (order preserved).
+fn buildRemoval(allocator: std.mem.Allocator, out: *std.ArrayList(usize), route: []const usize, p: usize, q: usize) !void {
+    out.clearRetainingCapacity();
+    for (route) |c| {
+        if (c == p or c == q) continue;
+        try out.append(allocator, c);
+    }
+}
+
+fn pairRelocate(allocator: std.mem.Allocator, inst: PdpInstance, sol: *Sol, pos: []usize, max_passes: usize) !void {
+    var base: std.ArrayList(usize) = .empty;
+    defer base.deinit(allocator);
+    var cand: std.ArrayList(usize) = .empty;
+    defer cand.deinit(allocator);
+    var newr: std.ArrayList(usize) = .empty;
+    defer newr.deinit(allocator);
+
+    var pass: usize = 0;
+    while (pass < max_passes) : (pass += 1) {
+        var applied = false;
+
+        ri_loop: for (sol.items, 0..) |route, ri| {
+            const c_ri = routeCost(inst, route.items, pos) orelse unreachable;
+
+            var pidx: usize = 0;
+            while (pidx < route.items.len) : (pidx += 1) {
+                const p = route.items[pidx];
+                if (!inst.is_pickup[p]) continue;
+                const q = inst.pair_of[p];
+
+                try buildRemoval(allocator, &base, route.items, p, q);
+                const c_base = routeCost(inst, base.items, pos) orelse continue;
+
+                for (sol.items, 0..) |rj_route, rj| {
+                    const target: []const usize = if (rj == ri) base.items else rj_route.items;
+                    const c_rj: u64 = if (rj == ri) c_ri else routeCost(inst, rj_route.items, pos) orelse unreachable;
+
+                    const len = target.len;
+                    var i: usize = 0;
+                    while (i <= len) : (i += 1) {
+                        var j: usize = i + 1;
+                        while (j <= len + 1) : (j += 1) {
+                            try buildInsertion(allocator, &cand, target, p, q, i, j);
+                            const c_new = routeCost(inst, cand.items, pos) orelse continue;
+
+                            const gain: i64 = if (rj == ri)
+                                @as(i64, @intCast(c_new)) - @as(i64, @intCast(c_ri))
+                            else
+                                (@as(i64, @intCast(c_base)) + @as(i64, @intCast(c_new))) -
+                                    (@as(i64, @intCast(c_ri)) + @as(i64, @intCast(c_rj)));
+
+                            if (gain < 0) {
+                                // apply: ri := base, rj := cand
+                                try newr.resize(allocator, base.items.len);
+                                @memcpy(newr.items, base.items);
+                                sol.items[ri].deinit(allocator);
+                                sol.items[ri] = newr;
+                                newr = .empty;
+
+                                try newr.resize(allocator, cand.items.len);
+                                @memcpy(newr.items, cand.items);
+                                sol.items[rj].deinit(allocator);
+                                sol.items[rj] = newr;
+                                newr = .empty;
+
+                                applied = true;
+                                break :ri_loop;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!applied) break;
+    }
+
+    // Drop empty routes once, at the very end.
+    var i: usize = 0;
+    while (i < sol.items.len) {
+        if (sol.items[i].items.len == 0) {
+            sol.items[i].deinit(allocator);
+            _ = sol.orderedRemove(i);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+test "PDPTW pairRelocate: never worsens the construction cost" {
+    const allocator = std.testing.allocator;
+    var seed: u64 = 1;
+    while (seed <= 29) : (seed += 1) {
+        var ri = try randomInstance(allocator, 5, seed, true);
+        defer ri.deinit(allocator);
+        const inst = ri.inst();
+
+        const pos = try allocator.alloc(usize, inst.dim());
+        defer allocator.free(pos);
+        @memset(pos, 0);
+
+        const pickups = try collectPickups(allocator, inst);
+        defer allocator.free(pickups);
+
+        const Ctx = struct {
+            inst: PdpInstance,
+            fn lessThan(ctx: @This(), a: usize, b: usize) bool {
+                if (ctx.inst.due[a] != ctx.inst.due[b]) return ctx.inst.due[a] < ctx.inst.due[b];
+                return a < b;
+            }
+        };
+        std.mem.sort(usize, pickups, Ctx{ .inst = inst }, Ctx.lessThan);
+
+        var sol = try construct(allocator, inst, pickups, pos);
+        defer freeSol(allocator, &sol);
+
+        const before_slices = try solSlices(allocator, &sol);
+        const before = validate(inst, before_slices).?;
+        allocator.free(before_slices);
+
+        try pairRelocate(allocator, inst, &sol, pos, 1000);
+
+        const after_slices = try solSlices(allocator, &sol);
+        defer allocator.free(after_slices);
+        const after = validate(inst, after_slices).?;
+
+        try std.testing.expect(after <= before);
+    }
+}
+
+test "PDPTW pairRelocate: output stays feasible on 50 random instances" {
+    const allocator = std.testing.allocator;
+    var seed: u64 = 1;
+    while (seed <= 50) : (seed += 1) {
+        var ri = try randomInstance(allocator, 5, seed, true);
+        defer ri.deinit(allocator);
+        const inst = ri.inst();
+
+        const pos = try allocator.alloc(usize, inst.dim());
+        defer allocator.free(pos);
+        @memset(pos, 0);
+
+        const pickups = try collectPickups(allocator, inst);
+        defer allocator.free(pickups);
+
+        const Ctx = struct {
+            inst: PdpInstance,
+            fn lessThan(ctx: @This(), a: usize, b: usize) bool {
+                if (ctx.inst.due[a] != ctx.inst.due[b]) return ctx.inst.due[a] < ctx.inst.due[b];
+                return a < b;
+            }
+        };
+        std.mem.sort(usize, pickups, Ctx{ .inst = inst }, Ctx.lessThan);
+
+        var sol = try construct(allocator, inst, pickups, pos);
+        defer freeSol(allocator, &sol);
+
+        try pairRelocate(allocator, inst, &sol, pos, 1000);
+
+        const slices = try solSlices(allocator, &sol);
+        defer allocator.free(slices);
+
+        try std.testing.expect(validate(inst, slices) != null);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// T6 — solver entry point
+// ---------------------------------------------------------------------------
+
+pub const PdpResult = struct {
+    allocator: std.mem.Allocator,
+    routes: [][]usize,
+    total_cost: u64,
+    vehicles: usize,
+
+    pub fn deinit(self: *PdpResult) void {
+        for (self.routes) |r| self.allocator.free(r);
+        self.allocator.free(self.routes);
+        self.* = undefined;
+    }
+};
+
+pub const PdpParams = struct {
+    seed: u64 = 1,
+    restarts: usize = 8,
+    max_ls_passes: usize = 1000,
+};
+
+fn copySolToRoutes(allocator: std.mem.Allocator, sol: *const Sol) ![][]usize {
+    var out: std.ArrayList([]usize) = .empty;
+    errdefer {
+        for (out.items) |r| allocator.free(r);
+        out.deinit(allocator);
+    }
+    for (sol.items) |r| {
+        if (r.items.len == 0) continue;
+        const copy = try allocator.dupe(usize, r.items);
+        errdefer allocator.free(copy);
+        try out.append(allocator, copy);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+pub fn solvePdptw(allocator: std.mem.Allocator, inst: PdpInstance, params: PdpParams) !PdpResult {
+    const dim = inst.dim();
+    const pos = try allocator.alloc(usize, dim);
+    defer allocator.free(pos);
+    @memset(pos, 0);
+
+    const pickups = try collectPickups(allocator, inst);
+    defer allocator.free(pickups);
+
+    const order0 = try allocator.dupe(usize, pickups);
+    defer allocator.free(order0);
+
+    const Ctx = struct {
+        inst: PdpInstance,
+        fn lessThan(ctx: @This(), a: usize, b: usize) bool {
+            if (ctx.inst.due[a] != ctx.inst.due[b]) return ctx.inst.due[a] < ctx.inst.due[b];
+            return a < b;
+        }
+    };
+    std.mem.sort(usize, order0, Ctx{ .inst = inst }, Ctx.lessThan);
+
+    var prng = std.Random.DefaultPrng.init(params.seed);
+    const rng = prng.random();
+
+    const order = try allocator.alloc(usize, order0.len);
+    defer allocator.free(order);
+
+    var best_routes: ?[][]usize = null;
+    errdefer if (best_routes) |br| {
+        for (br) |r| allocator.free(r);
+        allocator.free(br);
+    };
+    var best_cost: u64 = 0;
+
+    var k: usize = 0;
+    while (k < params.restarts) : (k += 1) {
+        @memcpy(order, order0);
+        if (k > 0) rng.shuffle(usize, order);
+
+        var sol = try construct(allocator, inst, order, pos);
+        defer freeSol(allocator, &sol);
+        try pairRelocate(allocator, inst, &sol, pos, params.max_ls_passes);
+
+        const slices = try solSlices(allocator, &sol);
+        defer allocator.free(slices);
+        const cost = validate(inst, slices) orelse return error.SolverProducedInfeasible;
+
+        if (best_routes == null or cost < best_cost) {
+            if (best_routes) |br| {
+                for (br) |r| allocator.free(r);
+                allocator.free(br);
+            }
+            best_routes = try copySolToRoutes(allocator, &sol);
+            best_cost = cost;
+        }
+    }
+
+    const routes = best_routes.?;
+    return .{
+        .allocator = allocator,
+        .routes = routes,
+        .total_cost = best_cost,
+        .vehicles = routes.len,
+    };
+}
+
+/// Naive segment cost for the brute-force optimum: pairing check (O(len^2)),
+/// prefix-load walk, forward-time walk, depot return. Returns null if infeasible.
+fn segCost(inst: PdpInstance, seg: []const usize) ?u64 {
+    if (seg.len == 0) return 0;
+
+    // pairing: every node's pair must also be in this segment
+    for (seg) |c| {
+        var found = false;
+        for (seg) |c2| {
+            if (c2 == inst.pair_of[c]) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return null;
+    }
+
+    // capacity: prefix load walk
+    var load: i64 = 0;
+    for (seg) |c| {
+        load += inst.demand_signed[c];
+        if (load < 0 or load > inst.capacity) return null;
+    }
+
+    // TW + distance
+    var t: u64 = 0;
+    var prev: usize = 0;
+    var cost: u64 = 0;
+    for (seg) |c| {
+        const arc = inst.d(prev, c);
+        const arrive = t + arc;
+        const start = @max(arrive, @as(u64, inst.ready[c]));
+        if (start > inst.due[c]) return null;
+        t = start + inst.service[c];
+        cost += arc;
+        prev = c;
+    }
+    const back = inst.d(prev, 0);
+    t += back;
+    cost += back;
+    if (t > inst.due[0]) return null;
+
+    return cost;
+}
+
+/// Exhaustive optimum for tiny instances (n_pairs <= 4). Test-only.
+fn bruteForceOptimum(allocator: std.mem.Allocator, inst: PdpInstance) !u64 {
+    const n = 2 * inst.n_pairs;
+    const perm = try allocator.alloc(usize, n);
+    defer allocator.free(perm);
+    const used = try allocator.alloc(bool, inst.dim());
+    defer allocator.free(used);
+    @memset(used, false);
+
+    var best: ?u64 = null;
+
+    const Rec = struct {
+        fn go(al: std.mem.Allocator, ins: PdpInstance, pm: []usize, us: []bool, depth: usize, bst: *?u64) void {
+            if (depth == pm.len) {
+                const mask_count = pm.len - 1;
+                var mask: usize = 0;
+                while (mask < (@as(usize, 1) << @intCast(mask_count))) : (mask += 1) {
+                    var total: u64 = 0;
+                    var feasible = true;
+                    var start: usize = 0;
+                    var i: usize = 0;
+                    while (i < mask_count) : (i += 1) {
+                        if ((mask >> @intCast(i)) & 1 == 1) {
+                            const seg = pm[start .. i + 1];
+                            const c = segCost(ins, seg) orelse {
+                                feasible = false;
+                                break;
+                            };
+                            total += c;
+                            start = i + 1;
+                        }
+                    }
+                    if (feasible) {
+                        const seg = pm[start..pm.len];
+                        const c = segCost(ins, seg) orelse continue;
+                        total += c;
+                        if (bst.* == null or total < bst.*.?) bst.* = total;
+                    }
+                }
+                return;
+            }
+            var c: usize = 1;
+            while (c < ins.dim()) : (c += 1) {
+                if (us[c]) continue;
+                if (!ins.is_pickup[c] and !us[ins.pair_of[c]]) continue;
+                us[c] = true;
+                pm[depth] = c;
+                go(al, ins, pm, us, depth + 1, bst);
+                us[c] = false;
+            }
+        }
+    };
+
+    Rec.go(allocator, inst, perm, used, 0, &best);
+    return best orelse error.InfeasibleInstance;
+}
+
+test "PDPTW solvePdptw: reported cost equals the validated cost" {
+    const allocator = std.testing.allocator;
+    var ri = try randomInstance(allocator, 6, 77, true);
+    defer ri.deinit(allocator);
+    const inst = ri.inst();
+
+    var res = try solvePdptw(allocator, inst, .{});
+    defer res.deinit();
+
+    const routes_const = try allocator.alloc([]const usize, res.routes.len);
+    defer allocator.free(routes_const);
+    for (res.routes, 0..) |r, i| routes_const[i] = r;
+
+    const vc = validate(inst, routes_const);
+    try std.testing.expect(vc != null);
+    try std.testing.expectEqual(vc.?, res.total_cost);
+    try std.testing.expectEqual(res.routes.len, res.vehicles);
+}
+
+test "PDPTW solvePdptw: never beats the brute-force optimum" {
+    const allocator = std.testing.allocator;
+
+    var seed: u64 = 1;
+    while (seed <= 10) : (seed += 1) {
+        var ri = try randomInstance(allocator, 3, seed, true);
+        defer ri.deinit(allocator);
+        const inst = ri.inst();
+
+        const opt = try bruteForceOptimum(allocator, inst);
+
+        var res = try solvePdptw(allocator, inst, .{ .restarts = 16 });
+        defer res.deinit();
+
+        try std.testing.expect(res.total_cost >= opt);
+    }
+
+    seed = 1;
+    while (seed <= 3) : (seed += 1) {
+        var ri = try randomInstance(allocator, 4, seed, true);
+        defer ri.deinit(allocator);
+        const inst = ri.inst();
+
+        const opt = try bruteForceOptimum(allocator, inst);
+
+        var res = try solvePdptw(allocator, inst, .{ .restarts = 16 });
+        defer res.deinit();
+
+        try std.testing.expect(res.total_cost >= opt);
+    }
+}
+
+test "PDPTW solvePdptw: feasible on the 10-pair fixture" {
+    const allocator = std.testing.allocator;
+    var ri = try randomInstance(allocator, 10, 2026, true);
+    defer ri.deinit(allocator);
+    const inst = ri.inst();
+
+    var res = try solvePdptw(allocator, inst, .{});
+    defer res.deinit();
+
+    const routes_const = try allocator.alloc([]const usize, res.routes.len);
+    defer allocator.free(routes_const);
+    for (res.routes, 0..) |r, i| routes_const[i] = r;
+
+    try std.testing.expect(validate(inst, routes_const) != null);
+}
+
+test "PDPTW construct: output passes validate on 50 random instances" {
+    const allocator = std.testing.allocator;
+    var seed: u64 = 1;
+    while (seed <= 50) : (seed += 1) {
+        var ri = try randomInstance(allocator, 5, seed, true);
+        defer ri.deinit(allocator);
+        const inst = ri.inst();
+
+        const pos = try allocator.alloc(usize, inst.dim());
+        defer allocator.free(pos);
+        @memset(pos, 0);
+
+        const pickups = try collectPickups(allocator, inst);
+        defer allocator.free(pickups);
+
+        const Ctx = struct {
+            inst: PdpInstance,
+            fn lessThan(ctx: @This(), a: usize, b: usize) bool {
+                if (ctx.inst.due[a] != ctx.inst.due[b]) return ctx.inst.due[a] < ctx.inst.due[b];
+                return a < b;
+            }
+        };
+        std.mem.sort(usize, pickups, Ctx{ .inst = inst }, Ctx.lessThan);
+
+        var sol = try construct(allocator, inst, pickups, pos);
+        defer freeSol(allocator, &sol);
+
+        const slices = try solSlices(allocator, &sol);
+        defer allocator.free(slices);
+
+        try std.testing.expect(validate(inst, slices) != null);
+    }
+}
