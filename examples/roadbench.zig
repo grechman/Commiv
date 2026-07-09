@@ -73,8 +73,6 @@ pub fn main(init: std.process.Init) !void {
             .rounds = try std.fmt.parseInt(usize, env.get("RB_ROUNDS") orelse "1", 10),
             .curl_rate = try std.fmt.parseFloat(f64, env.get("RB_CURL") orelse "0"),
             .reheat = try std.fmt.parseFloat(f64, env.get("RB_REHEAT") orelse "1"),
-            .jitter = try std.fmt.parseFloat(f64, env.get("RB_JITTER") orelse "0"),
-            .resplit = std.mem.eql(u8, env.get("RB_RESPLIT") orelse "0", "1"),
         };
         const solve_opts = commiv.SolveOptions{
             .seed = seed,
@@ -114,8 +112,8 @@ pub fn main(init: std.process.Init) !void {
         const pen = if (cost_sym == 0) 0.0 else 100.0 * (@as(f64, @floatFromInt(cost_sym)) - @as(f64, @floatFromInt(native.total_cost))) /
             @as(f64, @floatFromInt(native.total_cost));
         std.debug.print("{s},{},{d:.4},{d:.4},{d:.4},{},{},{d:.2},{},{d:.0}\n", .{
-            name,              dim,      cons.asym_magnitude, cons.curl_fraction, cons.mean_ratio,
-            native.total_cost, cost_sym, pen,                 native.routes.len,  ms,
+            name, dim, cons.asym_magnitude, cons.curl_fraction, cons.mean_ratio,
+            native.total_cost, cost_sym, pen, native.routes.len, ms,
         });
     }
 }
