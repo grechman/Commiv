@@ -223,7 +223,6 @@ pub const SisrCtx = struct {
     split_alpha: f64,
     force_split: i8 = -1, // bandit override per iteration: -1 = use split_rate, 0/1 = off/on
     regret_rate: f64 = 0, // resolved recreate strategy: P(use regret-2 this recreate)
-    curl_rate: f64 = 0, // see SisrParams.curl_rate
 };
 
 // Don't-look queue: a FIFO ring of customers awaiting (re-)examination, with an
@@ -1792,25 +1791,7 @@ pub const Solution = struct {
         const k_s = 1 + rng.uintLessThan(usize, ks_max); // [1, ks_max]
         ctx.nrem = 0;
         ctx.ntouched = 0;
-        var seed = 1 + rng.uintLessThan(usize, n);
-        if (ctx.curl_rate > 0 and rng.float(f64) < ctx.curl_rate) {
-            // Curl-guided center: 4-way tournament on one-way regret. No rng
-            // draws happen on the default path (short-circuit), so
-            // curl_rate = 0 stays bit-identical.
-            var best_reg: i64 = std.math.minInt(i64);
-            for (0..4) |_| {
-                const c = 1 + rng.uintLessThan(usize, n);
-                const p = self.prev[c];
-                const s = self.next[c];
-                const fwd = @as(i64, @intCast(self.inst.d(p, c) + self.inst.d(c, s)));
-                const rev = @as(i64, @intCast(self.inst.d(c, p) + self.inst.d(s, c)));
-                const reg = fwd - rev;
-                if (reg > best_reg) {
-                    best_reg = reg;
-                    seed = c;
-                }
-            }
-        }
+        const seed = 1 + rng.uintLessThan(usize, n);
         var done: usize = 0;
         if (self.sisrRuinAnchor(ctx, rng, seed, l_s_max)) done += 1;
         if (done < k_s) {

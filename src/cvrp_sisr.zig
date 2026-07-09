@@ -109,12 +109,6 @@ pub const SisrParams = struct {
     // (measured useless at n=1000: the trajectory wanders off and never
     // re-finds the basin); ~0.2-0.5 = warm restart that keeps the basin.
     reheat: f64 = 1.0,
-    // Curl-guided ruin: probability that a ruin center is picked by a 4-way
-    // tournament on one-way regret (how much the solution pays traversing
-    // this customer's arcs against the cheaper direction) instead of
-    // uniformly. Real road asymmetry is ~3/4 curl; this aims the ruin where
-    // the routes fight the direction field. Default 0 = bit-identical.
-    curl_rate: f64 = 0,
 };
 
 /// SISR solver for (symmetric or asymmetric) CVRP, uncapped fleet. Builds a feasible
@@ -183,7 +177,7 @@ pub fn solveCvrpSisr(allocator: std.mem.Allocator, inst: CvrpInstance, options: 
     const eff_lmax: usize = if (marathon_on) 13 else params.l_max;
     const eff_blink: f64 = if (marathon_on) 0.02 else params.blink;
     const eff_tf_factor: f64 = if (marathon_on) 0.001 else params.tf_factor;
-    var ctx = SisrCtx{ .present = present, .removed = removed, .rprev = rprev, .rroute = rroute, .ins = ins, .touched = touched, .rmark = rmark, .blink = eff_blink, .l_max = eff_lmax, .cbar = eff_cbar, .split_rate = eff_split, .split_alpha = params.split_alpha, .regret_rate = eff_regret, .curl_rate = params.curl_rate };
+    var ctx = SisrCtx{ .present = present, .removed = removed, .rprev = rprev, .rroute = rroute, .ins = ins, .touched = touched, .rmark = rmark, .blink = eff_blink, .l_max = eff_lmax, .cbar = eff_cbar, .split_rate = eff_split, .split_alpha = params.split_alpha, .regret_rate = eff_regret };
 
     var prng = std.Random.DefaultPrng.init(options.seed);
     const rng = prng.random();
@@ -960,31 +954,4 @@ test "CVRP SISR rounds: never worse than one round, feasible, default bit-identi
     const checked = validate(inst, on.routes) orelse return error.TestInfeasibleResult;
     try std.testing.expectEqual(on.total_cost, checked);
     try std.testing.expect(on.total_cost <= off.total_cost);
-}
-
-test "CVRP SISR curl_rate: feasible, self-consistent, default bit-identical" {
-    const allocator = std.testing.allocator;
-    const n = 60;
-    const dim = n + 1;
-    var prng = std.Random.DefaultPrng.init(0xC0217);
-    const rng = prng.random();
-    const matrix = try allocator.alloc(u32, dim * dim);
-    defer allocator.free(matrix);
-    for (0..dim) |i| {
-        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 100);
-    }
-    const demand = try allocator.alloc(u32, dim);
-    defer allocator.free(demand);
-    demand[0] = 0;
-    for (1..dim) |i| demand[i] = rng.intRangeAtMost(u32, 1, 5);
-    const inst = CvrpInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 12 };
-    var off = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000 });
-    defer off.deinit();
-    var off2 = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000, .curl_rate = 0 });
-    defer off2.deinit();
-    try std.testing.expectEqual(off.total_cost, off2.total_cost);
-    var on = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000, .curl_rate = 0.5 });
-    defer on.deinit();
-    const checked = validate(inst, on.routes) orelse return error.TestInfeasibleResult;
-    try std.testing.expectEqual(on.total_cost, checked);
 }

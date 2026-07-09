@@ -24,8 +24,8 @@ const commiv = @import("commiv");
 //      perturbation rounds, 0 = off), RB_SUBSOLVE (route-pair re-solve
 //      iterations, 0 = off), RB_SUBSOLVE_PAIRS (default 8), RB_CHAIN_KICKS
 //      (per-chain kicks before winner selection, 0 = off), RB_ROUNDS
-//      (restart-to-best schedule rounds, default 1), RB_CURL (curl-guided
-//      ruin probability, 0 = off).
+//      (restart-to-best schedule rounds, default 1), RB_REHEAT (round restart
+//      temperature fraction, default 1).
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const env = init.environ_map;
@@ -71,7 +71,6 @@ pub fn main(init: std.process.Init) !void {
             .subsolve_pairs = try std.fmt.parseInt(usize, env.get("RB_SUBSOLVE_PAIRS") orelse "8", 10),
             .chain_kicks = try std.fmt.parseInt(usize, env.get("RB_CHAIN_KICKS") orelse "0", 10),
             .rounds = try std.fmt.parseInt(usize, env.get("RB_ROUNDS") orelse "1", 10),
-            .curl_rate = try std.fmt.parseFloat(f64, env.get("RB_CURL") orelse "0"),
             .reheat = try std.fmt.parseFloat(f64, env.get("RB_REHEAT") orelse "1"),
         };
         const solve_opts = commiv.SolveOptions{
