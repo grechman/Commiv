@@ -25,9 +25,7 @@ const commiv = @import("commiv");
 //      iterations, 0 = off), RB_SUBSOLVE_PAIRS (default 8), RB_CHAIN_KICKS
 //      (per-chain kicks before winner selection, 0 = off), RB_ROUNDS
 //      (restart-to-best schedule rounds, default 1), RB_REHEAT (round restart
-//      temperature fraction, default 1), RB_CAP_PEN (penalty-admitting
-//      capacity search, 1 = on), RB_CAP_PEN_TARGET (target feasible fraction,
-//      default 0.25).
+//      temperature fraction, default 1).
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const env = init.environ_map;
@@ -74,8 +72,6 @@ pub fn main(init: std.process.Init) !void {
             .chain_kicks = try std.fmt.parseInt(usize, env.get("RB_CHAIN_KICKS") orelse "0", 10),
             .rounds = try std.fmt.parseInt(usize, env.get("RB_ROUNDS") orelse "1", 10),
             .reheat = try std.fmt.parseFloat(f64, env.get("RB_REHEAT") orelse "1"),
-            .cap_pen = std.mem.eql(u8, env.get("RB_CAP_PEN") orelse "0", "1"),
-            .cap_pen_target = try std.fmt.parseFloat(f64, env.get("RB_CAP_PEN_TARGET") orelse "0.25"),
         };
         const solve_opts = commiv.SolveOptions{
             .seed = seed,
