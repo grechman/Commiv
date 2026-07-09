@@ -659,7 +659,19 @@ tying 2 of 3 seeds head-to-head. nyc-1000 + `RB_CHAIN_KICKS=300` gives
 converts extra wall into quality there, since more SISR iterations are non-monotone
 (5 M scores 91,762, worse than 4 M's 91,305). Berlin, Moscow, and nyc-2000 measured
 flat-to-crumbs (two nyc-2000 seeds bit-identical), so it stays off outside NYC ≤ 1000.
-The road-TW cells: `zig build twroadbench -Doptimize=ReleaseFast && python3
+
+`RB_ROUNDS=N` (with `RB_REHEAT`, default full re-melt) re-runs the `t0→tf` schedule N
+times, each restart from the best-so-far. Its one honest use: the SISR schedule is
+non-monotone in budget (nyc-1000 5 M scores worse than 4 M), and past that point
+restarting the proven 4 M schedule beats stretching it at *equal compute* — nyc-1000
+2 × 4 M gives 91,479 / 91,684 vs a single 8 M run's 91,719 / 92,422 (2 seeds, equal
+wall). But it only helps at ≈2× wall for ≈0.3–0.8 %, and on budget-monotone cells like
+Moscow it's pure loss, so it stays opt-in and out of the deployment configs above. Four
+other levers explored the same round — curl-guided ruin, per-chain matrix jitter,
+route-pool set-partitioning, and giant-tour re-split — were built, measured across
+3 seeds at the deployment config, and removed as dead (all were either single-seed
+false positives or net-negative once the search was already converged). The road-TW
+cells: `zig build twroadbench -Doptimize=ReleaseFast && python3
 tools/competitors/dump_windows.py nyc-2000 && TP_FILE=nyc-2000 TP_ITERS=800000
 TP_THREADS=3 TP_COMBO=1 TP_NBR=min TP_POLISH_EVERY=8 ./zig-out/bin/commiv-twroadbench`
 → 215,026, 33 vehicles, ~123 s (PyVRP side: `pyvrp_road.py vendor/road/nyc-2000.road
