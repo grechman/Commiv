@@ -7,9 +7,10 @@ const std = @import("std");
 // or the per-node time window [ready, due] under free waiting. Travel time
 // is a directed distance matrix, so real asymmetric road times work
 // directly. Objective: minimize total directed travel distance over
-// feasible routes. This file currently provides only the instance type and
-// an independent feasibility/cost oracle (`validate`); the Lseg capacity
-// algebra and the construction/local-search solver land in later tasks.
+// feasible routes. Provides an independent feasibility/cost oracle
+// (`validate`), the Lseg prefix-load algebra, and a correctness-first solver
+// (`solvePdptw` = cheapest pair-insertion + pair-relocate local search,
+// multistart). Baseline engine: correct and validated, not SISR-grade fast.
 
 pub const PdpInstance = struct {
     n_pairs: usize,
@@ -982,8 +983,10 @@ pub fn solvePdptw(allocator: std.mem.Allocator, inst: PdpInstance, params: PdpPa
     };
     var best_cost: u64 = 0;
 
+    // restarts == 0 would leave best_routes null and crash the unwrap below.
+    const restarts = @max(params.restarts, 1);
     var k: usize = 0;
-    while (k < params.restarts) : (k += 1) {
+    while (k < restarts) : (k += 1) {
         @memcpy(order, order0);
         if (k > 0) rng.shuffle(usize, order);
 
@@ -999,6 +1002,9 @@ pub fn solvePdptw(allocator: std.mem.Allocator, inst: PdpInstance, params: PdpPa
             if (best_routes) |br| {
                 for (br) |r| allocator.free(r);
                 allocator.free(br);
+                // null before the fallible copy: on OOM the errdefer above
+                // would otherwise free this dangling pointer a second time.
+                best_routes = null;
             }
             best_routes = try copySolToRoutes(allocator, &sol);
             best_cost = cost;
@@ -1215,4 +1221,142 @@ test "PDPTW construct: output passes validate on 50 random instances" {
 
         try std.testing.expect(validate(inst, slices) != null);
     }
+}
+
+test "PDPTW solvePdptw: finds the single-route optimum on the hand fixture" {
+    // Kills a never-combine construction: one route per pair costs 101; the
+    // optimum merges both pairs into {1,2,4,3} for 57 (= brute force).
+    const allocator = std.testing.allocator;
+    const f = fixture2();
+    const inst = f.inst(5);
+    try std.testing.expectEqual(@as(u64, 57), try bruteForceOptimum(allocator, inst));
+    var res = try solvePdptw(allocator, inst, .{});
+    defer res.deinit();
+    try std.testing.expectEqual(@as(u64, 57), res.total_cost);
+    try std.testing.expectEqual(@as(usize, 1), res.vehicles);
+}
+
+test "PDPTW pairRelocate: strictly improves construction on known seeds" {
+    // Kills a no-op local search. These seeds were measured to have an
+    // improving pair-relocate move after construction (deterministic).
+    const allocator = std.testing.allocator;
+    for ([_]u64{ 1, 4, 5, 7, 8 }) |seed| {
+        var ri = try randomInstance(allocator, 5, seed, true);
+        defer ri.deinit(allocator);
+        const inst = ri.inst();
+
+        const pos = try allocator.alloc(usize, inst.dim());
+        defer allocator.free(pos);
+        @memset(pos, 0);
+
+        const pickups = try collectPickups(allocator, inst);
+        defer allocator.free(pickups);
+        const Ctx = struct {
+            inst: PdpInstance,
+            fn lessThan(ctx: @This(), a: usize, b: usize) bool {
+                if (ctx.inst.due[a] != ctx.inst.due[b]) return ctx.inst.due[a] < ctx.inst.due[b];
+                return a < b;
+            }
+        };
+        std.mem.sort(usize, pickups, Ctx{ .inst = inst }, Ctx.lessThan);
+
+        var sol = try construct(allocator, inst, pickups, pos);
+        defer freeSol(allocator, &sol);
+
+        const bs = try solSlices(allocator, &sol);
+        const before = validate(inst, bs).?;
+        allocator.free(bs);
+
+        try pairRelocate(allocator, inst, &sol, pos, 1000);
+
+        const as = try solSlices(allocator, &sol);
+        defer allocator.free(as);
+        const after = validate(inst, as).?;
+
+        try std.testing.expect(after < before);
+    }
+}
+
+test "PDPTW solvePdptw: quality floor vs brute optimum on 30 known seeds" {
+    // Regression floor, NOT an optimality guarantee: with default restarts the
+    // solver currently matches the brute-force optimum on 30/30 of these
+    // deterministic n_pairs=3 instances (restarts=1 scores only 27/30, so this
+    // floor also pins the restart machinery). >=29 leaves one instance of slack.
+    const allocator = std.testing.allocator;
+    var matches: usize = 0;
+    var seed: u64 = 1;
+    while (seed <= 30) : (seed += 1) {
+        var ri = try randomInstance(allocator, 3, seed, true);
+        defer ri.deinit(allocator);
+        const inst = ri.inst();
+        const opt = try bruteForceOptimum(allocator, inst);
+        var res = try solvePdptw(allocator, inst, .{});
+        defer res.deinit();
+        try std.testing.expect(res.total_cost >= opt);
+        if (res.total_cost == opt) matches += 1;
+    }
+    try std.testing.expect(matches >= 29);
+}
+
+test "PDPTW clock: waiting and service shift the schedule in all three checkers" {
+    // ready[2]=25 forces waiting (arrive at 2 at t=15), service[2]=4 delays
+    // departure. On route {1,2,4,3}: arrive at 4 at t = 25+4+8 = 37. A clock
+    // missing service gives 33, missing waiting 27, missing both 23 - so the
+    // due[4]=36 boundary rejects ONLY under the correct arithmetic, in
+    // validate, routeCost, and (via bruteForceOptimum) segCost alike.
+    const allocator = std.testing.allocator;
+    var f = fixture2();
+    f.ready[2] = 25;
+    f.service[2] = 4;
+
+    const pos = try allocator.alloc(usize, 5);
+    defer allocator.free(pos);
+    @memset(pos, 0);
+
+    const r = [_]usize{ 1, 2, 4, 3 };
+    const routes = [_][]const usize{r[0..]};
+
+    // boundary-feasible: start at 4 exactly at due[4]=37; cost excludes wait+service
+    f.due[4] = 37;
+    {
+        const inst = f.inst(5);
+        try std.testing.expectEqual(@as(?u64, 57), validate(inst, routes[0..]));
+        try std.testing.expectEqual(@as(?u64, 57), routeCost(inst, r[0..], pos));
+        try std.testing.expectEqual(@as(u64, 57), try bruteForceOptimum(allocator, inst));
+    }
+
+    // one unit tighter: infeasible under the true clock, feasible under any stub.
+    // The split {(1,3),(2,4)} also waits at 2 and reaches 4 at 37 > 36, so the
+    // whole instance is infeasible and segCost must prove it.
+    f.due[4] = 36;
+    {
+        const inst = f.inst(5);
+        try std.testing.expectEqual(@as(?u64, null), validate(inst, routes[0..]));
+        try std.testing.expectEqual(@as(?u64, null), routeCost(inst, r[0..], pos));
+        try std.testing.expectError(error.InfeasibleInstance, bruteForceOptimum(allocator, inst));
+    }
+
+    // depot-return leg carries the waiting+service delay: t back = 40+31 = 71
+    f.due[4] = 37;
+    f.due[0] = 71;
+    {
+        const inst = f.inst(5);
+        try std.testing.expectEqual(@as(?u64, 57), validate(inst, routes[0..]));
+        try std.testing.expectEqual(@as(?u64, 57), routeCost(inst, r[0..], pos));
+    }
+    f.due[0] = 70;
+    {
+        const inst = f.inst(5);
+        try std.testing.expectEqual(@as(?u64, null), validate(inst, routes[0..]));
+        try std.testing.expectEqual(@as(?u64, null), routeCost(inst, r[0..], pos));
+    }
+}
+
+test "PDPTW solvePdptw: restarts=0 is clamped, not a crash" {
+    const allocator = std.testing.allocator;
+    const f = fixture2();
+    const inst = f.inst(5);
+    var res = try solvePdptw(allocator, inst, .{ .restarts = 0 });
+    defer res.deinit();
+    try std.testing.expect(validate(inst, @ptrCast(res.routes)) != null);
 }
