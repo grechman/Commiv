@@ -109,6 +109,12 @@ pub const SisrParams = struct {
     // (measured useless at n=1000: the trajectory wanders off and never
     // re-finds the basin); ~0.2-0.5 = warm restart that keeps the basin.
     reheat: f64 = 1.0,
+    // Penalty-admitting capacity search (opt-in). When on, recreate may insert
+    // into overloaded routes, scored by an adaptive capacity penalty that
+    // targets `cap_pen_target` feasible-fraction; the returned best is always
+    // capacity-feasible. Default off = bit-identical (pen_coeff stays 0).
+    cap_pen: bool = false,
+    cap_pen_target: f64 = 0.25, // desired fraction of iterations ending feasible
 };
 
 /// SISR solver for (symmetric or asymmetric) CVRP, uncapped fleet. Builds a feasible
@@ -195,6 +201,27 @@ pub fn solveCvrpSisr(allocator: std.mem.Allocator, inst: CvrpInstance, options: 
     var bn = [2]f64{ 1, 1 };
     var bt: f64 = 2;
 
+    // Penalty-admitting capacity search (see SisrParams.cap_pen): initialise the
+    // capacity-penalty coefficient to the mean granular arc cost (mirrors
+    // cvrp_hgs.zig's infeasible-search init — a representative move scale), then
+    // steer it every 256 iterations toward cap_pen_target feasible-fraction. `best`
+    // is never searched under penalty, so best.pen_coeff stays 0 (its cap_excess
+    // is always 0 by the best-update gate below, so the penalty term is moot there).
+    if (params.cap_pen) {
+        var sum: u64 = 0;
+        var cnt: u64 = 0;
+        for (1..n + 1) |a| {
+            for (gran[(a - 1) * gk ..][0..gk]) |b| {
+                if (b == 0) continue;
+                sum += inst.d(a, b);
+                cnt += 1;
+            }
+        }
+        cur.pen_coeff = @max(@as(u64, 1), if (cnt > 0) sum / cnt else 1);
+    }
+    var window_n: u64 = 0;
+    var window_feas: u64 = 0;
+
     // In-place ruin+recreate with O(removed) rollback on reject (no snapshot copy).
     // rounds > 1: restart-to-best (see SisrParams.rounds/reheat). The restart
     // temperature interpolates the log range; the geometric decay is re-derived
@@ -213,6 +240,7 @@ pub fn solveCvrpSisr(allocator: std.mem.Allocator, inst: CvrpInstance, options: 
         while (it < iters) : (it += 1) {
             const saved_dist = cur.distance;
             const saved_nroutes = cur.nroutes;
+            const saved_cap_excess = cur.cap_excess;
             var arm: usize = 0;
             if (params.bandit) {
                 const ucb_plain = bq[0] + UCB_C * @sqrt(@log(bt) / bn[0]);
@@ -223,7 +251,15 @@ pub fn solveCvrpSisr(allocator: std.mem.Allocator, inst: CvrpInstance, options: 
             cur.sisrRuin(&ctx, rng);
             const use_regret = ctx.regret_rate >= 1.0 or (ctx.regret_rate > 0 and rng.float(f64) < ctx.regret_rate);
             if (use_regret) cur.sisrRecreateRegret(&ctx) else cur.sisrRecreate(&ctx, rng);
-            const dt = @as(i64, @intCast(cur.distance)) - @as(i64, @intCast(saved_dist));
+            // Acceptance metric: pure distance delta by default; under cap_pen, the
+            // penalized COST delta (distance + pen_coeff*cap_excess), so the SA
+            // schedule sees the true search objective, not just distance while
+            // overload floats free.
+            const dt: i64 = if (params.cap_pen)
+                (@as(i64, @intCast(cur.distance)) + @as(i64, @intCast(cur.pen_coeff)) * @as(i64, @intCast(cur.cap_excess))) -
+                    (@as(i64, @intCast(saved_dist)) + @as(i64, @intCast(cur.pen_coeff)) * @as(i64, @intCast(saved_cap_excess)))
+            else
+                @as(i64, @intCast(cur.distance)) - @as(i64, @intCast(saved_dist));
             if (params.bandit) {
                 const reward: f64 = if (dt < 0) 1 else 0;
                 bn[arm] += 1;
@@ -235,12 +271,16 @@ pub fn solveCvrpSisr(allocator: std.mem.Allocator, inst: CvrpInstance, options: 
             // vs Metropolis exp(-dt/temp). Same geometric schedule drives the threshold.
             const accept = @as(f64, @floatFromInt(dt)) < temp;
             if (accept) {
-                if (cur.distance < best_dist) {
+                // Under cap_pen, only a capacity-feasible cur can ever become best —
+                // guarantees the solver's returned best is always feasible even though
+                // cur itself wanders through overloaded states.
+                const eligible = if (params.cap_pen) cur.cap_excess == 0 else true;
+                if (eligible and cur.distance < best_dist) {
                     best.copyLiveFrom(&cur);
                     best_dist = cur.distance;
                 }
             } else {
-                cur.sisrUndo(&ctx, saved_dist, saved_nroutes);
+                cur.sisrUndo(&ctx, saved_dist, saved_nroutes, saved_cap_excess);
             }
             // Debug invariant: the live structure's true distance must match the value
             // maintained incrementally through ruin/recreate (and restored by undo). Run
@@ -248,8 +288,28 @@ pub fn solveCvrpSisr(allocator: std.mem.Allocator, inst: CvrpInstance, options: 
             // tiny-n); release builds skip it entirely.
             if (builtin.mode == .Debug) {
                 const inc = cur.distance;
+                const inc_capx = cur.cap_excess;
                 cur.flushLinks();
                 std.debug.assert(cur.distance == inc);
+                std.debug.assert(cur.cap_excess == inc_capx);
+            }
+            // Adaptive capacity penalty (see SisrParams.cap_pen_target): every 256
+            // iterations, steer pen_coeff toward the target feasible-fraction of
+            // iterations ending feasible (cur.cap_excess == 0, post accept/undo).
+            if (params.cap_pen) {
+                window_n += 1;
+                if (cur.cap_excess == 0) window_feas += 1;
+                if (window_n >= 256) {
+                    const frac = @as(f64, @floatFromInt(window_feas)) / @as(f64, @floatFromInt(window_n));
+                    if (frac < params.cap_pen_target) {
+                        cur.pen_coeff = @max(cur.pen_coeff + 1, @as(u64, @intFromFloat(@as(f64, @floatFromInt(cur.pen_coeff)) * 1.2)));
+                    } else {
+                        cur.pen_coeff = @max(@as(u64, 1), @as(u64, @intFromFloat(@as(f64, @floatFromInt(cur.pen_coeff)) * 0.875)));
+                    }
+                    cur.pen_coeff = std.math.clamp(cur.pen_coeff, 1, @as(u64, 1) << 33);
+                    window_n = 0;
+                    window_feas = 0;
+                }
             }
             temp *= cf;
         }
@@ -954,4 +1014,36 @@ test "CVRP SISR rounds: never worse than one round, feasible, default bit-identi
     const checked = validate(inst, on.routes) orelse return error.TestInfeasibleResult;
     try std.testing.expectEqual(on.total_cost, checked);
     try std.testing.expect(on.total_cost <= off.total_cost);
+}
+
+test "CVRP SISR cap_pen: default off bit-identical, on feasible on tight capacity" {
+    const allocator = std.testing.allocator;
+    const n = 60;
+    const dim = n + 1;
+    var prng = std.Random.DefaultPrng.init(0xCA9E1);
+    const rng = prng.random();
+    const matrix = try allocator.alloc(u32, dim * dim);
+    defer allocator.free(matrix);
+    for (0..dim) |i| {
+        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 100);
+    }
+    const demand = try allocator.alloc(u32, dim);
+    defer allocator.free(demand);
+    demand[0] = 0;
+    for (1..dim) |i| demand[i] = rng.intRangeAtMost(u32, 1, 5);
+    // Tight capacity: overload is tempting, so cap_pen actually gets exercised.
+    const inst = CvrpInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 8 };
+    var off = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000 });
+    defer off.deinit();
+    var off2 = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000, .cap_pen = false });
+    defer off2.deinit();
+    try std.testing.expectEqual(off.total_cost, off2.total_cost);
+    try std.testing.expectEqual(off.routes.len, off2.routes.len);
+    for (off.routes, off2.routes) |a, b| try std.testing.expectEqualSlices(usize, a, b);
+    // Not a monotone refiner (infeasible detours can leave a worse local basin
+    // than the feasible-only search), so no on <= off assertion — just feasible.
+    var on = try solveCvrpSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 20000, .cap_pen = true });
+    defer on.deinit();
+    const checked = validate(inst, on.routes) orelse return error.TestInfeasibleResult;
+    try std.testing.expectEqual(on.total_cost, checked);
 }

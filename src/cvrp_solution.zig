@@ -11,6 +11,13 @@ const FLEET_PENALTY = cvrp_split.FLEET_PENALTY;
 const GATE_PEN = cvrp_split.GATE_PEN;
 const capExcess = cvrp_split.capExcess;
 
+/// capExcess as an unsigned overload amount (always >= 0 in practice; capExcess
+/// never returns negative). Used to maintain Solution.cap_excess (u64) via
+/// wrapping delta arithmetic in the splice primitives below.
+inline fn capExcessU(load: u32, cap: u32) u64 {
+    return @intCast(capExcess(load, cap));
+}
+
 pub fn solveCvrpImpl(allocator: std.mem.Allocator, inst: CvrpInstance, options: solver.SolveOptions, rounds: usize, restarts: usize, max_vehicles: usize) !CvrpResult {
     const n = inst.n;
     if (inst.demand.len != n + 1 or inst.matrix.len != (std.math.mul(usize, n + 1, n + 1) catch return error.InvalidInstance)) return error.InvalidInstance;
@@ -928,7 +935,9 @@ pub const Solution = struct {
         const nx = self.next[u];
         if (p == 0) self.head[r] = nx else self.next[p] = nx;
         if (nx == 0) self.tail[r] = p else self.prev[nx] = p;
+        const old_l = self.load[r];
         self.load[r] -= self.inst.demand[u];
+        self.cap_excess = self.cap_excess -% capExcessU(old_l, self.inst.capacity) +% capExcessU(self.load[r], self.inst.capacity);
     }
 
     /// Insert customer u into route r between adjacent nodes a and b (0 = depot
@@ -939,7 +948,9 @@ pub const Solution = struct {
         if (a == 0) self.head[r] = u else self.next[a] = u;
         if (b == 0) self.tail[r] = u else self.prev[b] = u;
         self.rof[u] = r;
+        const old_l = self.load[r];
         self.load[r] += self.inst.demand[u];
+        self.cap_excess = self.cap_excess -% capExcessU(old_l, self.inst.capacity) +% capExcessU(self.load[r], self.inst.capacity);
     }
 
     /// Splice the contiguous block first..last (internal links intact) out.
@@ -949,7 +960,9 @@ pub const Solution = struct {
         const nx = self.next[last];
         if (p == 0) self.head[r] = nx else self.next[p] = nx;
         if (nx == 0) self.tail[r] = p else self.prev[nx] = p;
+        const old_l = self.load[r];
         self.load[r] -= seg_demand;
+        self.cap_excess = self.cap_excess -% capExcessU(old_l, self.inst.capacity) +% capExcessU(self.load[r], self.inst.capacity);
     }
 
     /// Insert block first..last between a and b in route r; set rof of all nodes.
@@ -964,7 +977,9 @@ pub const Solution = struct {
             if (c == last) break;
             c = self.next[c];
         }
+        const old_l = self.load[r];
         self.load[r] += seg_demand;
+        self.cap_excess = self.cap_excess -% capExcessU(old_l, self.inst.capacity) +% capExcessU(self.load[r], self.inst.capacity);
     }
 
     /// Reverse segment x..last (inclusive) within one route (2-opt apply).
@@ -1628,6 +1643,7 @@ pub const Solution = struct {
         @memcpy(self.load, o.load);
         self.nroutes = o.nroutes;
         self.distance = o.distance;
+        self.cap_excess = o.cap_excess;
     }
 
     /// Grab a route slot for a brand-new single-customer route: reuse the first
@@ -1803,18 +1819,33 @@ pub const Solution = struct {
         for (ctx.touched[0..ctx.ntouched]) |r| ctx.rmark[r] = false;
     }
 
-    /// Full-route scan fallback: cheapest feasible gap over all non-empty routes.
-    fn sisrFullScan(self: *const Solution, c: usize, dem: u32, cap: u32, best: *i64, ba: *usize, bb: *usize, br: *usize) bool {
+    /// Full-route scan fallback: cheapest gap over all non-empty routes. When
+    /// pen_coeff == 0 (hard feasibility gate — the default off path), only
+    /// capacity-feasible gaps are considered (bit-identical to before this
+    /// knob existed). When pen_coeff > 0 (cap_pen search), overloaded routes
+    /// are admitted too, scored by the capacity-penalty delta folded into the
+    /// selection key `best`; `best_dd` reports the WINNING candidate's pure
+    /// distance delta (never the penalty), so callers can add it straight onto
+    /// self.distance (cap_excess, maintained by linkInsert/Remove, separately
+    /// carries the overload state).
+    fn sisrFullScan(self: *const Solution, c: usize, dem: u32, cap: u32, best: *i64, best_dd: *i64, ba: *usize, bb: *usize, br: *usize) bool {
         var found = false;
         for (0..self.nroutes) |r| {
             if (self.head[r] == 0) continue;
-            if (self.load[r] + dem > cap) continue;
+            var pen: i64 = 0;
+            if (self.pen_coeff == 0) {
+                if (self.load[r] + dem > cap) continue;
+            } else {
+                pen = @as(i64, @intCast(self.pen_coeff)) * (capExcess(self.load[r] + dem, cap) - capExcess(self.load[r], cap));
+            }
             var a: usize = 0;
             var node = self.head[r];
             while (true) {
-                const delta = self.dd(a, c) + self.dd(c, node) - self.dd(a, node);
-                if (delta < best.*) {
-                    best.* = delta;
+                const dd_raw = self.dd(a, c) + self.dd(c, node) - self.dd(a, node);
+                const key = dd_raw + pen;
+                if (key < best.*) {
+                    best.* = key;
+                    best_dd.* = dd_raw;
                     ba.* = a;
                     bb.* = node;
                     br.* = r;
@@ -1831,6 +1862,15 @@ pub const Solution = struct {
     /// SISR recreate: greedy cheapest-insertion with blinks, granular candidate
     /// set (gaps adjacent to each removed customer's present k-nearest), full-scan
     /// fallback, new route as last resort. Hard-to-place (high demand) first.
+    /// Capacity-admitting (self.pen_coeff > 0): candidate selection folds the
+    /// capacity-penalty delta into the comparison key (best/bany), but
+    /// self.distance is only ever incremented by the chosen candidate's PURE
+    /// distance delta (tracked in parallel as best_dd/bany_dd) — cap_excess
+    /// (maintained incrementally by linkInsert/linkRemove) carries the overload
+    /// state, so distance always stays the true travel distance. pen_coeff == 0
+    /// (the default) keeps the exact `continue`-gated feasible-only path, and
+    /// every key collapses to its dd (pen==0), so this is bit-identical to
+    /// before this knob existed.
     pub fn sisrRecreate(self: *Solution, ctx: *SisrCtx, rng: std.Random) void {
         const cap = self.inst.capacity;
         // Insert in demand-desc order (hard-to-place first), but keep ctx.removed in
@@ -1844,12 +1884,14 @@ pub const Solution = struct {
         }.lt);
         for (rem) |c| {
             const dem = self.inst.demand[c];
-            var best: i64 = std.math.maxInt(i64); // blinked choice
+            var best: i64 = std.math.maxInt(i64); // blinked choice: selection key (dist+pen)
+            var best_dd: i64 = 0; // blinked choice: pure distance delta
             var ba: usize = 0;
             var bb: usize = 0;
             var br: usize = 0;
             var found = false;
-            var bany: i64 = std.math.maxInt(i64); // unblinked feasible backup
+            var bany: i64 = std.math.maxInt(i64); // unblinked feasible backup: selection key
+            var bany_dd: i64 = 0; // unblinked feasible backup: pure distance delta
             var aa: usize = 0;
             var ab: usize = 0;
             var ar: usize = 0;
@@ -1857,34 +1899,45 @@ pub const Solution = struct {
             for (self.gran[(c - 1) * self.gk ..][0..self.gk]) |m| {
                 if (m == 0 or !ctx.present[m]) continue;
                 const r = self.rof[m];
-                if (self.load[r] + dem > cap) continue;
+                var pen: i64 = 0;
+                if (self.pen_coeff == 0) {
+                    if (self.load[r] + dem > cap) continue;
+                } else {
+                    pen = @as(i64, @intCast(self.pen_coeff)) * (capExcess(self.load[r] + dem, cap) - capExcess(self.load[r], cap));
+                }
                 const p = self.prev[m];
                 const nx = self.next[m];
                 const d1 = self.dd(p, c) + self.dd(c, m) - self.dd(p, m);
                 const d2 = self.dd(m, c) + self.dd(c, nx) - self.dd(m, nx);
-                if (d1 < bany) {
-                    bany = d1;
+                const k1 = d1 + pen;
+                const k2 = d2 + pen;
+                if (k1 < bany) {
+                    bany = k1;
+                    bany_dd = d1;
                     aa = p;
                     ab = m;
                     ar = r;
                     anyf = true;
                 }
-                if (rng.float(f64) >= ctx.blink and d1 < best) {
-                    best = d1;
+                if (rng.float(f64) >= ctx.blink and k1 < best) {
+                    best = k1;
+                    best_dd = d1;
                     ba = p;
                     bb = m;
                     br = r;
                     found = true;
                 }
-                if (d2 < bany) {
-                    bany = d2;
+                if (k2 < bany) {
+                    bany = k2;
+                    bany_dd = d2;
                     aa = m;
                     ab = nx;
                     ar = r;
                     anyf = true;
                 }
-                if (rng.float(f64) >= ctx.blink and d2 < best) {
-                    best = d2;
+                if (rng.float(f64) >= ctx.blink and k2 < best) {
+                    best = k2;
+                    best_dd = d2;
                     ba = m;
                     bb = nx;
                     br = r;
@@ -1893,21 +1946,22 @@ pub const Solution = struct {
             }
             if (!found and anyf) {
                 best = bany;
+                best_dd = bany_dd;
                 ba = aa;
                 bb = ab;
                 br = ar;
                 found = true;
             }
-            if (!found) found = self.sisrFullScan(c, dem, cap, &best, &ba, &bb, &br);
+            if (!found) found = self.sisrFullScan(c, dem, cap, &best, &best_dd, &ba, &bb, &br);
             if (!found) {
                 br = self.sisrOpenRoute();
                 ba = 0;
                 bb = 0;
-                best = self.dd(0, c) + self.dd(c, 0);
+                best_dd = self.dd(0, c) + self.dd(c, 0);
             }
             self.linkInsert(c, br, ba, bb);
             ctx.present[c] = true;
-            self.distance = @intCast(@as(i64, @intCast(self.distance)) + best);
+            self.distance = @intCast(@as(i64, @intCast(self.distance)) + best_dd);
         }
     }
 
@@ -1916,6 +1970,11 @@ pub const Solution = struct {
     /// regret most if we defer it. Deterministic (no blink). O(rem^2 * gk) vs greedy's
     /// O(rem * gk): stronger per-recreate, but fewer iterations at equal wall — this
     /// is the experiment. Records insertion order into ctx.ins (rem) for undo.
+    /// Capacity-admitting (self.pen_coeff > 0): c1/c2 (and the regret they drive)
+    /// are selection keys (dist+pen); c1_dd/pick_c1_dd track the pure distance
+    /// delta of the winning slot, which is what self.distance is incremented by
+    /// (same dd/key split rationale as sisrRecreate). pen_coeff == 0 keeps the
+    /// exact `continue`-gated feasible-only path, bit-identical.
     pub fn sisrRecreateRegret(self: *Solution, ctx: *SisrCtx) void {
         const cap = self.inst.capacity;
         const rem = ctx.ins[0..ctx.nrem];
@@ -1926,6 +1985,7 @@ pub const Solution = struct {
             var pick: usize = i;
             var pick_reg: i64 = std.math.minInt(i64);
             var pick_c1: i64 = 0;
+            var pick_c1_dd: i64 = 0;
             var pick_a: usize = 0;
             var pick_b: usize = 0;
             var pick_r: usize = 0;
@@ -1933,8 +1993,9 @@ pub const Solution = struct {
             for (i..rem.len) |j| {
                 const c = rem[j];
                 const dem = self.inst.demand[c];
-                var c1: i64 = std.math.maxInt(i64); // best feasible insertion cost
-                var c2: i64 = std.math.maxInt(i64); // 2nd-best feasible insertion cost
+                var c1: i64 = std.math.maxInt(i64); // best feasible insertion cost (dist+pen key)
+                var c1_dd: i64 = 0; // pure distance delta of the c1 winner
+                var c2: i64 = std.math.maxInt(i64); // 2nd-best feasible insertion cost (dist+pen key)
                 var a1: usize = 0;
                 var b1: usize = 0;
                 var r1: usize = 0;
@@ -1942,41 +2003,53 @@ pub const Solution = struct {
                 for (self.gran[(c - 1) * self.gk ..][0..self.gk]) |m| {
                     if (m == 0 or !ctx.present[m]) continue;
                     const r = self.rof[m];
-                    if (self.load[r] + dem > cap) continue;
+                    var pen: i64 = 0;
+                    if (self.pen_coeff == 0) {
+                        if (self.load[r] + dem > cap) continue;
+                    } else {
+                        pen = @as(i64, @intCast(self.pen_coeff)) * (capExcess(self.load[r] + dem, cap) - capExcess(self.load[r], cap));
+                    }
                     const p = self.prev[m];
                     const nx = self.next[m];
                     const d1 = self.dd(p, c) + self.dd(c, m) - self.dd(p, m);
                     const d2 = self.dd(m, c) + self.dd(c, nx) - self.dd(m, nx);
-                    if (d1 < c1) {
+                    const k1 = d1 + pen;
+                    const k2 = d2 + pen;
+                    if (k1 < c1) {
                         c2 = c1;
-                        c1 = d1;
+                        c1 = k1;
+                        c1_dd = d1;
                         a1 = p;
                         b1 = m;
                         r1 = r;
                         any = true;
-                    } else if (d1 < c2) c2 = d1;
-                    if (d2 < c1) {
+                    } else if (k1 < c2) c2 = k1;
+                    if (k2 < c1) {
                         c2 = c1;
-                        c1 = d2;
+                        c1 = k2;
+                        c1_dd = d2;
                         a1 = m;
                         b1 = nx;
                         r1 = r;
                         any = true;
-                    } else if (d2 < c2) c2 = d2;
+                    } else if (k2 < c2) c2 = k2;
                 }
                 var newroute = false;
                 if (!any) {
                     var fb: i64 = std.math.maxInt(i64);
+                    var fb_dd: i64 = 0;
                     var fa: usize = 0;
                     var fbb: usize = 0;
                     var fr: usize = 0;
-                    if (self.sisrFullScan(c, dem, cap, &fb, &fa, &fbb, &fr)) {
+                    if (self.sisrFullScan(c, dem, cap, &fb, &fb_dd, &fa, &fbb, &fr)) {
                         c1 = fb;
+                        c1_dd = fb_dd;
                         a1 = fa;
                         b1 = fbb;
                         r1 = fr;
                     } else {
                         c1 = @intCast(self.dd(0, c) + self.dd(c, 0));
+                        c1_dd = c1;
                         newroute = true;
                     }
                 }
@@ -1990,6 +2063,7 @@ pub const Solution = struct {
                     pick = j;
                     pick_reg = reg;
                     pick_c1 = c1;
+                    pick_c1_dd = c1_dd;
                     pick_a = a1;
                     pick_b = b1;
                     pick_r = r1;
@@ -2007,7 +2081,7 @@ pub const Solution = struct {
             }
             self.linkInsert(c, br, ba, bb);
             ctx.present[c] = true;
-            self.distance = @intCast(@as(i64, @intCast(self.distance)) + pick_c1);
+            self.distance = @intCast(@as(i64, @intCast(self.distance)) + pick_c1_dd);
             // Record insertion order (move picked into slot i) so undo can unwind it.
             rem[pick] = rem[i];
             rem[i] = c;
@@ -2018,9 +2092,12 @@ pub const Solution = struct {
     /// (1) undo recreate: remove the inserted customers in reverse insertion order;
     /// (2) undo ruin: re-insert each removed customer after its original predecessor,
     /// forward in removal order (rebuilds every string — strings are in distinct
-    /// routes, so order between them is immaterial). distance/nroutes are restored
-    /// from the caller's saved scalars (nroutes drops any routes recreate appended).
-    pub fn sisrUndo(self: *Solution, ctx: *SisrCtx, saved_dist: u64, saved_nroutes: usize) void {
+    /// routes, so order between them is immaterial). distance/nroutes/cap_excess are
+    /// restored from the caller's saved scalars (nroutes drops any routes recreate
+    /// appended; cap_excess would otherwise be left desynced by the linkRemove/
+    /// linkInsert calls above, which each maintain it incrementally but only relative
+    /// to the sequence they're called in, not the pre-iteration baseline).
+    pub fn sisrUndo(self: *Solution, ctx: *SisrCtx, saved_dist: u64, saved_nroutes: usize, saved_cap_excess: u64) void {
         var j = ctx.nrem;
         while (j > 0) {
             j -= 1;
@@ -2035,6 +2112,7 @@ pub const Solution = struct {
         }
         self.distance = saved_dist;
         self.nroutes = saved_nroutes;
+        self.cap_excess = saved_cap_excess;
     }
 
     pub fn toResult(self: *const Solution, allocator: std.mem.Allocator) !CvrpResult {
