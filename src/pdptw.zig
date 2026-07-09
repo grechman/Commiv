@@ -264,7 +264,7 @@ fn fixture2() Fixture2 {
 // Random-instance generator (test helper)
 // ---------------------------------------------------------------------------
 
-const RandInst = struct {
+pub const RandInst = struct {
     matrix: []u32,
     pair_of: []usize,
     is_pickup: []bool,
@@ -274,7 +274,7 @@ const RandInst = struct {
     service: []u32,
     n_pairs: usize,
 
-    fn inst(self: *const RandInst) PdpInstance {
+    pub fn inst(self: *const RandInst) PdpInstance {
         return .{
             .n_pairs = self.n_pairs,
             .matrix = self.matrix,
@@ -288,7 +288,7 @@ const RandInst = struct {
         };
     }
 
-    fn deinit(self: *RandInst, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *RandInst, allocator: std.mem.Allocator) void {
         allocator.free(self.matrix);
         allocator.free(self.pair_of);
         allocator.free(self.is_pickup);
@@ -305,7 +305,8 @@ const RandInst = struct {
 /// ready = 0, due = horizon for all (TW off) when `tw == false`;
 /// otherwise windows derived from a feasible reference schedule so at least one
 /// feasible solution provably exists.
-fn randomInstance(allocator: std.mem.Allocator, n_pairs: usize, seed: u64, tw: bool) !RandInst {
+// pub only so pdptw_probe.zig can reach it; test-grade helper, not API.
+pub fn randomInstance(allocator: std.mem.Allocator, n_pairs: usize, seed: u64, tw: bool) !RandInst {
     var prng = std.Random.DefaultPrng.init(seed);
     const rng = prng.random();
 
@@ -930,7 +931,7 @@ pub const PdpResult = struct {
 
 pub const PdpParams = struct {
     seed: u64 = 1,
-    restarts: usize = 8,
+    restarts: usize = 8, // 0 is treated as 1
     max_ls_passes: usize = 1000,
 };
 
@@ -1066,7 +1067,8 @@ fn segCost(inst: PdpInstance, seg: []const usize) ?u64 {
 }
 
 /// Exhaustive optimum for tiny instances (n_pairs <= 4). Test-only.
-fn bruteForceOptimum(allocator: std.mem.Allocator, inst: PdpInstance) !u64 {
+// pub only so pdptw_probe.zig can reach it; test-grade helper, not API.
+pub fn bruteForceOptimum(allocator: std.mem.Allocator, inst: PdpInstance) !u64 {
     const n = 2 * inst.n_pairs;
     const perm = try allocator.alloc(usize, n);
     defer allocator.free(perm);
@@ -1077,7 +1079,7 @@ fn bruteForceOptimum(allocator: std.mem.Allocator, inst: PdpInstance) !u64 {
     var best: ?u64 = null;
 
     const Rec = struct {
-        fn go(al: std.mem.Allocator, ins: PdpInstance, pm: []usize, us: []bool, depth: usize, bst: *?u64) void {
+        fn go(ins: PdpInstance, pm: []usize, us: []bool, depth: usize, bst: *?u64) void {
             if (depth == pm.len) {
                 const mask_count = pm.len - 1;
                 var mask: usize = 0;
@@ -1112,13 +1114,13 @@ fn bruteForceOptimum(allocator: std.mem.Allocator, inst: PdpInstance) !u64 {
                 if (!ins.is_pickup[c] and !us[ins.pair_of[c]]) continue;
                 us[c] = true;
                 pm[depth] = c;
-                go(al, ins, pm, us, depth + 1, bst);
+                go(ins, pm, us, depth + 1, bst);
                 us[c] = false;
             }
         }
     };
 
-    Rec.go(allocator, inst, perm, used, 0, &best);
+    Rec.go(inst, perm, used, 0, &best);
     return best orelse error.InfeasibleInstance;
 }
 
@@ -1359,4 +1361,74 @@ test "PDPTW solvePdptw: restarts=0 is clamped, not a crash" {
     var res = try solvePdptw(allocator, inst, .{ .restarts = 0 });
     defer res.deinit();
     try std.testing.expect(validate(inst, @ptrCast(res.routes)) != null);
+}
+
+/// randomInstance, then nonzero service times and dropoff ready-windows that
+/// force waiting. Reference solution (one route {p,q} per pair) stays feasible
+/// by construction: due is derived from its schedule including wait + service.
+fn randomInstanceClocked(allocator: std.mem.Allocator, n_pairs: usize, seed: u64) !RandInst {
+    var ri = try randomInstance(allocator, n_pairs, seed, true);
+    var prng = std.Random.DefaultPrng.init(seed ^ 0xC10C);
+    const rng = prng.random();
+    const slack: u32 = 40;
+    const inst = ri.inst();
+    for (1..n_pairs + 1) |i| {
+        const p = i;
+        const q = n_pairs + i;
+        ri.service[p] = rng.intRangeAtMost(u32, 1, 10);
+        ri.service[q] = rng.intRangeAtMost(u32, 1, 10);
+        const arrive_p: u32 = @intCast(inst.d(0, p));
+        const arrive_q = arrive_p + ri.service[p] + @as(u32, @intCast(inst.d(p, q)));
+        ri.ready[q] = arrive_q + rng.intRangeAtMost(u32, 1, 15); // waiting always binds
+        ri.due[p] = arrive_p + slack;
+        ri.due[q] = ri.ready[q] + slack;
+    }
+    return ri;
+}
+
+test "PDPTW routeCost: agrees with validate under nonzero service and waiting" {
+    const allocator = std.testing.allocator;
+    var seed: u64 = 1;
+    while (seed <= 3) : (seed += 1) {
+        var ri = try randomInstanceClocked(allocator, 4, seed);
+        defer ri.deinit(allocator);
+        const inst = ri.inst();
+        const dim = inst.dim();
+
+        const pos = try allocator.alloc(usize, dim);
+        defer allocator.free(pos);
+        @memset(pos, 0);
+
+        // the guaranteed-feasible reference: one route {p, q} per pair, with
+        // routeCost and validate agreeing on it route by route and in total
+        var total: u64 = 0;
+        for (1..inst.n_pairs + 1) |i| {
+            const r = [_]usize{ i, inst.n_pairs + i };
+            const rc = routeCost(inst, r[0..], pos);
+            try std.testing.expect(rc != null);
+            total += rc.?;
+        }
+        const ref = [_][]const usize{ &.{ 1, 5 }, &.{ 2, 6 }, &.{ 3, 7 }, &.{ 4, 8 } };
+        try std.testing.expectEqual(@as(?u64, total), validate(inst, ref[0..]));
+
+        // differential on random full-permutation single routes
+        const perm = try allocator.alloc(usize, dim - 1);
+        defer allocator.free(perm);
+        for (0..dim - 1) |i| perm[i] = i + 1;
+        var prng = std.Random.DefaultPrng.init(seed *% 7919);
+        const rng = prng.random();
+        var saw_infeasible = false;
+        for (0..500) |_| {
+            rng.shuffle(usize, perm);
+            const routes = [_][]const usize{perm};
+            try std.testing.expectEqual(validate(inst, routes[0..]), routeCost(inst, perm, pos));
+            if (routeCost(inst, perm, pos) == null) saw_infeasible = true;
+        }
+        try std.testing.expect(saw_infeasible);
+    }
+}
+
+test {
+    // pull the probe into the compile graph so it can't silently rot
+    _ = @import("pdptw_probe.zig");
 }
