@@ -9,7 +9,7 @@ dependency-free, and built for directed (asymmetric) cost where the trip from A 
 is not the same as B to A.
 
 commiv solves the travelling-salesman and vehicle-routing families (TSP, ATSP, CVRP,
-ACVRP, VRPTW) to within a fraction of a percent of optimal, and it reads directed
+ACVRP, VRPTW, PDPTW) to within a fraction of a percent of optimal, and it reads directed
 travel-time matrices natively: one-way streets, turn penalties, congestion. The fast
 symmetric solvers everyone reaches for, FILO and HGS-CVRP, cannot ingest a directed
 matrix at all. commiv is built around that case.
@@ -284,6 +284,18 @@ returns `VrptwResult`
 - `solveVrptwHgs(allocator, inst, SolveOptions, VrptwHgsParams) !VrptwResult`.
 - `validateVrptw(inst, routes) ?u64` — independent capacity + time-window feasibility check;
   returns the recomputed cost, or null if infeasible.
+
+**PDPTW (pickup & delivery)** — build a `PdpInstance { n_pairs, matrix, capacity, pair_of,
+is_pickup, demand_signed, ready, due, service }`; returns `PdpResult`
+- `solvePdptwSisr(allocator, inst, PdpSisrParams)` — the engine: pair-atomic SISR. On the
+  Li & Lim 100-series it reproduces 52 of 56 best-known solutions exactly at 10 s per
+  instance, single thread (`zig build pdptwbench -Doptimize=ReleaseFast` then
+  `./zig-out/bin/commiv-pdptwbench 2>&1`). LKH-3 on the same matrices and wall reaches
+  feasibility on 37 of 56.
+- `solvePdptw(allocator, inst, PdpParams)` — correctness baseline (pair insertion +
+  pair relocate, brute-force-verified); use the SISR engine for real work.
+- `validatePdptw(inst, routes) ?u64` — independent pairing + precedence + capacity-prefix +
+  time-window feasibility check; returns the recomputed cost, or null if infeasible.
 
 **Asymmetry analysis**
 - `conservativeness(allocator, matrix, dim) !Conservativeness` runs a Helmholtz-Hodge
