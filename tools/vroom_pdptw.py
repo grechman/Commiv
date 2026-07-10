@@ -5,7 +5,7 @@
 # Usage: VROOM_BIN=... VROOM_TIME=10 python3 tools/vroom_pdptw.py "lc101,lr101"
 import json, math, os, subprocess, sys, time
 
-VENDOR = "vendor/pdptw"
+VENDOR = os.environ.get("VROOM_DIR", "vendor/pdptw")
 BIN = os.environ.get("VROOM_BIN", os.path.expanduser("~/cbench/vroom/bin/vroom"))
 T = int(os.environ.get("VROOM_TIME", "10"))
 SCALE = 1000
