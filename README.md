@@ -287,11 +287,25 @@ returns `VrptwResult`
 
 **PDPTW (pickup & delivery)** — build a `PdpInstance { n_pairs, matrix, capacity, pair_of,
 is_pickup, demand_signed, ready, due, service }`; returns `PdpResult`
-- `solvePdptwSisr(allocator, inst, PdpSisrParams)` — the engine: pair-atomic SISR. On the
-  Li & Lim 100-series it reproduces 52 of 56 best-known solutions exactly at 10 s per
-  instance, single thread (`zig build pdptwbench -Doptimize=ReleaseFast` then
-  `./zig-out/bin/commiv-pdptwbench 2>&1`). LKH-3 on the same matrices and wall reaches
-  feasibility on 37 of 56.
+- `solvePdptwSisr(allocator, inst, PdpSisrParams)` — the engine: pair-atomic SISR, with an
+  optional fleet cap + request bank (`max_vehicles`) for hierarchical vehicle minimization.
+  On the Li & Lim 100-series at 10 s per instance, single thread, all four solvers fed the
+  SAME integer matrix (`zig build pdptwbench -Doptimize=ReleaseFast` then
+  `PB_FLEET=1 ./zig-out/bin/commiv-pdptwbench 2>&1`):
+
+  | solver | complete | exact best-known | mean gap |
+  |---|---|---|---|
+  | commiv | 56/56 | 53/56 | 0.07% |
+  | VROOM 1.14 | 50/56 | 33/56 | 0.61% |
+  | LKH-3.0.14 | 37/56 | 26/56 | 0.42% |
+  | OR-Tools 9.15 | 23/56 | 11/56 | 4.94% |
+
+  Head-to-head (hierarchical objective, incomplete = loss): 21W/33T/2L vs VROOM,
+  30W/26T/0L vs LKH-3, 45W/11T/0L vs OR-Tools. Harnesses: `tools/lkh_pdptw/`,
+  `tools/vroom_pdptw.py`, `tools/ortools_pdptw.py`. PyVRP has no paired
+  pickup-delivery support (their issue #331).
+- `solvePdptwSisrFleetMin(allocator, inst, params, total_time_ms)` — vehicle-count descent
+  (uncapped run, then capped request-bank attempts, warm + cold, terminal polish).
 - `solvePdptw(allocator, inst, PdpParams)` — correctness baseline (pair insertion +
   pair relocate, brute-force-verified); use the SISR engine for real work.
 - `validatePdptw(inst, routes) ?u64` — independent pairing + precedence + capacity-prefix +
