@@ -617,14 +617,15 @@ test "PDPTW validate: rejects unvisited, duplicate, and depot-in-route" {
 // T4 — construction
 // ---------------------------------------------------------------------------
 
-const Sol = std.ArrayList(std.ArrayList(usize));
+pub const Sol = std.ArrayList(std.ArrayList(usize));
 
-fn freeSol(allocator: std.mem.Allocator, sol: *Sol) void {
+pub fn freeSol(allocator: std.mem.Allocator, sol: *Sol) void {
     for (sol.items) |*r| r.deinit(allocator);
     sol.deinit(allocator);
 }
 
-fn collectPickups(allocator: std.mem.Allocator, inst: PdpInstance) ![]usize {
+// pub for pdptw_sisr.zig / probes; not part of the stable API.
+pub fn collectPickups(allocator: std.mem.Allocator, inst: PdpInstance) ![]usize {
     var out: std.ArrayList(usize) = .empty;
     errdefer out.deinit(allocator);
     const dim = inst.dim();
@@ -665,7 +666,8 @@ fn buildInsertion(allocator: std.mem.Allocator, out: *std.ArrayList(usize), rout
     }
 }
 
-fn construct(allocator: std.mem.Allocator, inst: PdpInstance, order: []const usize, pos: []usize) !Sol {
+// pub for pdptw_sisr.zig (seed solution); not part of the stable API.
+pub fn construct(allocator: std.mem.Allocator, inst: PdpInstance, order: []const usize, pos: []usize) !Sol {
     var sol: Sol = .empty;
     errdefer freeSol(allocator, &sol);
 
@@ -1366,7 +1368,7 @@ test "PDPTW solvePdptw: restarts=0 is clamped, not a crash" {
 /// randomInstance, then nonzero service times and dropoff ready-windows that
 /// force waiting. Reference solution (one route {p,q} per pair) stays feasible
 /// by construction: due is derived from its schedule including wait + service.
-fn randomInstanceClocked(allocator: std.mem.Allocator, n_pairs: usize, seed: u64) !RandInst {
+pub fn randomInstanceClocked(allocator: std.mem.Allocator, n_pairs: usize, seed: u64) !RandInst {
     var ri = try randomInstance(allocator, n_pairs, seed, true);
     var prng = std.Random.DefaultPrng.init(seed ^ 0xC10C);
     const rng = prng.random();

@@ -21,6 +21,7 @@ const asymmetric = internal.asymmetric;
 const vrp = internal.vrp;
 const vrptw = internal.vrptw;
 const pdptw = internal.pdptw;
+const pdptw_sisr = internal.pdptw_sisr;
 
 // ---- Parsing ----------------------------------------------------------------
 pub const parseTsplib = tsplib.parse;
@@ -86,6 +87,8 @@ pub const PdpResult = pdptw.PdpResult;
 pub const PdpParams = pdptw.PdpParams;
 pub const solvePdptw = pdptw.solvePdptw;
 pub const validatePdptw = pdptw.validate;
+pub const solvePdptwSisr = pdptw_sisr.solvePdptwSisr; // flagship SISR engine for PDPTW
+pub const PdpSisrParams = pdptw_sisr.PdpSisrParams;
 
 // ---- Asymmetry analysis -----------------------------------------------------
 pub const conservativeness = asymmetric.conservativeness;
@@ -110,6 +113,7 @@ pub const internal = struct {
     pub const vrp = @import("vrp.zig");
     pub const vrptw = @import("vrptw.zig");
     pub const pdptw = @import("pdptw.zig");
+    pub const pdptw_sisr = @import("pdptw_sisr.zig");
 };
 
 test {
@@ -127,5 +131,6 @@ test {
     _ = @import("vrp.zig");
     _ = @import("vrptw.zig");
     _ = @import("pdptw.zig");
+    _ = @import("pdptw_sisr.zig");
     _ = @import("capi.zig");
 }
