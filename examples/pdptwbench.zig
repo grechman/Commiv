@@ -29,6 +29,12 @@ pub fn main(init: std.process.Init) !void {
     const seed = try std.fmt.parseInt(u64, env.get("PB_SEED") orelse "1", 10);
     const iters = try std.fmt.parseInt(usize, env.get("PB_ITERS") orelse "1000000000", 10);
     const veh_pen = try std.fmt.parseInt(u64, env.get("PB_VEH_PEN") orelse "10000000", 10);
+    const fleet_min = std.mem.eql(u8, env.get("PB_FLEET") orelse "0", "1");
+    const cap = try std.fmt.parseInt(usize, env.get("PB_CAP") orelse "0", 10); // fixed fleet target (bank mode)
+    const cbar = try std.fmt.parseFloat(f64, env.get("PB_CBAR") orelse "10");
+    const l_max = try std.fmt.parseInt(usize, env.get("PB_LMAX") orelse "10", 10);
+    const t0f = try std.fmt.parseFloat(f64, env.get("PB_T0") orelse "1");
+    const blink = try std.fmt.parseFloat(f64, env.get("PB_BLINK") orelse "0.01");
 
     std.debug.print("instance,n_pairs,bks_veh,veh,bks_dist,dist,gap_pct,ms\n", .{});
     var sum_gap: f64 = 0;
@@ -62,12 +68,27 @@ pub fn main(init: std.process.Init) !void {
         const bks_veh = bks.routes.len;
 
         const t0 = nanos();
-        var res = try commiv.solvePdptwSisr(allocator, inst, .{
+        const base_params = commiv.PdpSisrParams{
             .seed = seed,
             .iters = iters,
             .time_ms = time_ms,
             .veh_penalty = veh_pen,
-        });
+            .max_vehicles = cap,
+            .cbar = cbar,
+            .l_max = l_max,
+            .t0_factor = t0f,
+            .blink = blink,
+        };
+        var res = if (fleet_min)
+            try commiv.internal.pdptw_sisr.solvePdptwSisrFleetMin(allocator, inst, base_params, time_ms)
+        else
+            commiv.solvePdptwSisr(allocator, inst, base_params) catch |err| switch (err) {
+                error.NoCompleteSolution => {
+                    std.debug.print("{s},NO_COMPLETE_SOLUTION_AT_CAP_{d}\n", .{ name, cap });
+                    continue;
+                },
+                else => return err,
+            };
         defer res.deinit();
         const ms = (nanos() - t0) / 1_000_000;
 

@@ -31,6 +31,12 @@ pub const PdpSisrParams = struct {
     fleet_ruin_rate: f64 = 0.1, // chance to empty the smallest route per ruin (veh_penalty > 0 only)
     gk: usize = 20, // kNN list length per node
     nbr_key: NbrKey = .sum,
+    // Fleet cap (0 = uncapped). When set, recreate may not open a route past
+    // the cap; pairs with no feasible insertion sit in an unassigned pool
+    // (request bank) under a penalty that dominates everything else, and the
+    // engine keeps retrying them each iteration. The solve only reports
+    // solutions with an empty pool; error.NoCompleteSolution if none found.
+    max_vehicles: usize = 0,
 };
 
 pub const NbrKey = enum { sum, min, out };
@@ -108,6 +114,7 @@ const S = struct {
     snap_mark: std.ArrayList(u64) = .empty, // route -> snap generation
     snap_gen: u64 = 0,
     min_empty_hint: usize = 0,
+    n_unassigned: usize = 0, // pairs currently in the request bank (loc_route == NO_ROUTE)
     keep_buf: std.ArrayList(usize) = .empty, // scratch for removals
     drop_buf: []bool, // scratch: per-position removal flags (sized 2n)
 
@@ -206,6 +213,14 @@ const S = struct {
     /// Restore every snapshotted route; loc entries of their members are
     /// rebuilt after all installs (order-independent).
     fn rollback(s: *S, saved_cost: u64, saved_nonempty: usize) !void {
+        // Nodes sitting in a mutated route right now may not be in its
+        // restored content (a banked pair inserted this iteration): clear
+        // their loc first or they keep a stale position (index-out-of-range
+        // in the next ruin). Every mutation snapshots its route, so the snap
+        // set covers every membership change.
+        for (s.snaps.items) |sn| {
+            for (s.routes.items[sn.ri].items.items) |c| s.loc_route[c] = NO_ROUTE;
+        }
         for (s.snaps.items) |sn| {
             const r = &s.routes.items[sn.ri];
             const was_empty = r.items.items.len == 0;
@@ -299,7 +314,10 @@ const S = struct {
             if (s.drop_buf[c]) {
                 s.drop_buf[c] = false;
                 s.loc_route[c] = NO_ROUTE;
-                if (s.inst.is_pickup[c]) try s.removed.append(s.allocator, c);
+                if (s.inst.is_pickup[c]) {
+                    try s.removed.append(s.allocator, c);
+                    s.n_unassigned += 1;
+                }
             }
         }
         try s.install(ri, s.keep_buf.items);
@@ -378,6 +396,14 @@ const S = struct {
         const n_nodes = 2 * s.inst.n_pairs;
         s.generation += 1;
 
+        // request bank: unassigned pairs re-enter recreate every iteration
+        if (s.n_unassigned > s.removed.items.len) {
+            s.removed.clearRetainingCapacity();
+            for (1..s.inst.dim()) |c| {
+                if (s.inst.is_pickup[c] and s.loc_route[c] == NO_ROUTE) try s.removed.append(s.allocator, c);
+            }
+        }
+
         var seed_c = 1 + rng.uintLessThan(usize, n_nodes);
         if (s.veh_penalty > 0 and s.nonempty > 1 and rng.float(f64) < params.fleet_ruin_rate) {
             // Fleet-min ruin (vrptw.zig lever): empty the smallest route
@@ -454,8 +480,10 @@ const S = struct {
                 }
             }
 
+            const may_open = params.max_vehicles == 0 or s.nonempty < params.max_vehicles;
             const singleton: i64 = @intCast(s.inst.d(0, p) + s.inst.d(p, q) + s.inst.d(q, 0) + s.veh_penalty);
-            if (best_ri == NO_ROUTE or singleton < best_ins.delta) {
+            if (best_ri == NO_ROUTE and !may_open) continue; // stays in the request bank
+            if ((best_ri == NO_ROUTE or singleton < best_ins.delta) and may_open) {
                 const slot = if (empty_slot != NO_ROUTE) empty_slot else try s.addSlot();
                 try s.snapshot(slot);
                 s.keep_buf.clearRetainingCapacity();
@@ -465,6 +493,7 @@ const S = struct {
             } else {
                 try s.insertPair(best_ri, p, q, best_ins.a, best_ins.b);
             }
+            s.n_unassigned -= 1;
         }
         s.removed.clearRetainingCapacity();
     }
@@ -524,6 +553,14 @@ fn nanos() u64 {
 }
 
 pub fn solvePdptwSisr(allocator: std.mem.Allocator, inst: pdp.PdpInstance, params: PdpSisrParams) !pdp.PdpResult {
+    return solvePdptwSisrFrom(allocator, inst, params, &.{});
+}
+
+/// Same engine, seeded from `warm` routes instead of the construction heuristic
+/// (used by the fleet-min driver so capped descents keep the incumbent's
+/// packing instead of restarting cold). `warm` must be a feasible solution;
+/// pass empty for the normal cold start.
+pub fn solvePdptwSisrFrom(allocator: std.mem.Allocator, inst: pdp.PdpInstance, params: PdpSisrParams, warm: []const []const usize) !pdp.PdpResult {
     const n_nodes = 2 * inst.n_pairs;
     if (inst.n_pairs == 0) return error.InvalidInstance;
 
@@ -541,8 +578,20 @@ pub fn solvePdptwSisr(allocator: std.mem.Allocator, inst: pdp.PdpInstance, param
         }
     };
     std.mem.sort(usize, pickups, Ctx{ .inst = inst }, Ctx.lessThan);
-    var seed_sol = try pdp.construct(allocator, inst, pickups, pos);
+    var seed_sol: pdp.Sol = .empty;
     defer pdp.freeSol(allocator, &seed_sol);
+    if (warm.len == 0) {
+        pdp.freeSol(allocator, &seed_sol);
+        seed_sol = try pdp.construct(allocator, inst, pickups, pos);
+    } else {
+        if (pdp.validate(inst, warm) == null) return error.InvalidWarmStart;
+        for (warm) |r| {
+            var route: std.ArrayList(usize) = .empty;
+            errdefer route.deinit(allocator);
+            try route.appendSlice(allocator, r);
+            try seed_sol.append(allocator, route);
+        }
+    }
 
     const gk: usize = @min(if (params.gk == 0) @as(usize, 20) else params.gk, if (n_nodes > 1) n_nodes - 1 else 1);
     const gran = try buildNeighbors(allocator, inst, gk, params.nbr_key);
@@ -556,13 +605,34 @@ pub fn solvePdptwSisr(allocator: std.mem.Allocator, inst: pdp.PdpInstance, param
         try s.install(ri, r.items);
     }
 
-    var best = try s.toResult(allocator);
-    errdefer best.deinit();
+    // Under a fleet cap the seed may exceed it: empty the smallest surplus
+    // routes into the request bank before the loop starts.
+    if (params.max_vehicles > 0) {
+        while (s.nonempty > params.max_vehicles) {
+            var smallest: usize = NO_ROUTE;
+            var slen: usize = std.math.maxInt(usize);
+            for (s.routes.items, 0..) |r, i| {
+                const len = r.items.items.len;
+                if (len > 0 and len < slen) {
+                    smallest = i;
+                    slen = len;
+                }
+            }
+            if (smallest == NO_ROUTE) break;
+            _ = try s.removeStringPaired(smallest, 0, slen);
+        }
+        s.removed.clearRetainingCapacity(); // bank is re-derived each ruin
+    }
+
+    var best: ?pdp.PdpResult = if (s.n_unassigned == 0) try s.toResult(allocator) else null;
+    errdefer if (best) |*b| b.deinit();
     var best_cost = s.cost;
 
     var prng = std.Random.DefaultPrng.init(params.seed ^ 0x50_44_50_7457);
     const rng = prng.random();
 
+    // Request-bank penalty: dominates veh_penalty, which dominates distance.
+    const UNASSIGNED_PEN: u64 = 1_000_000_000;
     const seed_distance = s.cost - s.veh_penalty * s.nonempty;
     const unit = @as(f64, @floatFromInt(seed_distance)) / @as(f64, @floatFromInt(n_nodes));
     const t0 = @max(1e-9, params.t0_factor * unit);
@@ -577,20 +647,103 @@ pub fn solvePdptwSisr(allocator: std.mem.Allocator, inst: pdp.PdpInstance, param
         if (params.time_ms > 0 and it % 256 == 0 and (nanos() - t_start) / std.time.ns_per_ms >= params.time_ms) break;
         const saved_cost = s.cost;
         const saved_nonempty = s.nonempty;
+        const saved_unassigned = s.n_unassigned;
         s.beginIter();
         try s.ruin(params, rng);
         try s.recreate(params, rng);
-        const dt = @as(i64, @intCast(s.cost)) - @as(i64, @intCast(saved_cost));
+        const eff = s.cost + UNASSIGNED_PEN * @as(u64, @intCast(s.n_unassigned));
+        const saved_eff = saved_cost + UNASSIGNED_PEN * @as(u64, @intCast(saved_unassigned));
+        const dt = @as(i64, @intCast(eff)) - @as(i64, @intCast(saved_eff));
         if (@as(f64, @floatFromInt(dt)) < temp) {
-            if (s.cost < best_cost) {
+            if (s.n_unassigned == 0 and (best == null or s.cost < best_cost)) {
                 best_cost = s.cost;
-                best.deinit();
+                if (best) |*b| b.deinit();
                 best = try s.toResult(allocator);
             }
         } else {
             try s.rollback(saved_cost, saved_nonempty);
+            s.n_unassigned = saved_unassigned;
         }
         temp *= cf;
+    }
+    return best orelse error.NoCompleteSolution;
+}
+
+/// Hierarchical fleet minimization (the Li & Lim objective): one uncapped run
+/// finds a starting fleet size, then capped runs with a request bank walk the
+/// vehicle count down while time remains. Each success becomes the incumbent;
+/// the first failed cap stops the descent. total_time_ms is split: half for
+/// the uncapped run, the rest per descent attempt.
+pub fn solvePdptwSisrFleetMin(allocator: std.mem.Allocator, inst: pdp.PdpInstance, params: PdpSisrParams, total_time_ms: u64) !pdp.PdpResult {
+    var p0 = params;
+    p0.time_ms = @max(total_time_ms * 2 / 5, 1);
+    p0.max_vehicles = 0;
+    var best = try solvePdptwSisr(allocator, inst, p0);
+    errdefer best.deinit();
+
+    const t_start = nanos();
+    var target: usize = best.vehicles;
+    descent: while (target > 1) {
+        target -= 1;
+        const spent = (nanos() - t_start) / std.time.ns_per_ms;
+        const budget = total_time_ms * 3 / 5;
+        if (spent + 500 >= budget) break;
+        var pk = params;
+        pk.max_vehicles = target;
+        // half the remaining descent budget per attempt; the terminal polish
+        // below gets whatever is left when an attempt fails
+        pk.time_ms = @max((budget - spent) / 2, 500);
+        // Packing into a below-natural fleet needs bigger ruins than distance
+        // polishing (measured on lc103/lc109: cbar 10 fails at 120 s where
+        // cbar 16 succeeds in 30 s).
+        pk.cbar = @max(pk.cbar, 16.0);
+        pk.l_max = @max(pk.l_max, 16);
+        const warm = try allocator.alloc([]const usize, best.routes.len);
+        defer allocator.free(warm);
+        for (best.routes, 0..) |r, i| warm[i] = r;
+        // Warm start keeps the incumbent's packing but can trap the descent
+        // in its basin (a tight K+1 solution leaves no slack for the banked
+        // pairs); a cold construct starts looser. Try warm, then cold.
+        pk.time_ms = @max(pk.time_ms / 2, 250);
+        var res = solvePdptwSisrFrom(allocator, inst, pk, warm) catch |err| switch (err) {
+            error.NoCompleteSolution => blk: {
+                break :blk solvePdptwSisr(allocator, inst, pk) catch |err2| switch (err2) {
+                    error.NoCompleteSolution => break :descent,
+                    else => return err2,
+                };
+            },
+            else => return err,
+        };
+        if (res.vehicles <= target) {
+            best.deinit();
+            best = res;
+        } else {
+            res.deinit();
+            break :descent;
+        }
+    }
+
+    // terminal polish: whatever time remains, warm-started at the final fleet
+    const spent = (nanos() - t_start) / std.time.ns_per_ms;
+    const p0_ms = @min(p0.time_ms, total_time_ms);
+    if (spent + p0_ms + 500 < total_time_ms) {
+        var pp = params;
+        pp.max_vehicles = best.vehicles;
+        pp.time_ms = total_time_ms - p0_ms - spent;
+        pp.seed = params.seed +% 0x9E3779B97F4A7C15;
+        const warm = try allocator.alloc([]const usize, best.routes.len);
+        defer allocator.free(warm);
+        for (best.routes, 0..) |r, i| warm[i] = r;
+        var res = solvePdptwSisrFrom(allocator, inst, pp, warm) catch |err| switch (err) {
+            error.NoCompleteSolution => return best,
+            else => return err,
+        };
+        if (res.vehicles <= best.vehicles and res.total_cost < best.total_cost) {
+            best.deinit();
+            best = res;
+        } else {
+            res.deinit();
+        }
     }
     return best;
 }
@@ -721,6 +874,73 @@ test "PDPTW SISR: clocked instances stay feasible" {
         const inst = ri.inst();
         var res = try solvePdptwSisr(allocator, inst, .{ .seed = seed, .iters = 1500 });
         defer res.deinit();
+        const rc = try allocator.alloc([]const usize, res.routes.len);
+        defer allocator.free(rc);
+        for (res.routes, 0..) |r, i| rc[i] = r;
+        const vc = pdp.validate(inst, rc) orelse return error.Infeasible;
+        try std.testing.expectEqual(vc, res.total_cost);
+    }
+}
+
+test "PDPTW SISR: fleet cap succeeds at the uncapped count and fails at 1" {
+    const allocator = std.testing.allocator;
+    var ri = try pdp.randomInstance(allocator, 8, 3, true);
+    defer ri.deinit(allocator);
+    const inst = ri.inst();
+
+    var free_run = try solvePdptwSisr(allocator, inst, .{ .seed = 3, .iters = 2000, .veh_penalty = 10_000_000 });
+    defer free_run.deinit();
+
+    // same cap as the uncapped result: must succeed with <= that many routes
+    var capped = try solvePdptwSisr(allocator, inst, .{ .seed = 3, .iters = 2000, .veh_penalty = 10_000_000, .max_vehicles = free_run.vehicles });
+    defer capped.deinit();
+    try std.testing.expect(capped.vehicles <= free_run.vehicles);
+    const rc = try allocator.alloc([]const usize, capped.routes.len);
+    defer allocator.free(rc);
+    for (capped.routes, 0..) |r, i| rc[i] = r;
+    const vc = pdp.validate(inst, rc) orelse return error.Infeasible;
+    try std.testing.expectEqual(vc, capped.total_cost);
+
+    // one vehicle cannot serve 8 pairs under these windows
+    try std.testing.expectError(error.NoCompleteSolution, solvePdptwSisr(allocator, inst, .{ .seed = 3, .iters = 300, .veh_penalty = 10_000_000, .max_vehicles = 1 }));
+}
+
+test "PDPTW SISR: fleet-min driver output validates and never exceeds uncapped" {
+    const allocator = std.testing.allocator;
+    var ri = try pdp.randomInstance(allocator, 8, 7, true);
+    defer ri.deinit(allocator);
+    const inst = ri.inst();
+    var free_run = try solvePdptwSisr(allocator, inst, .{ .seed = 7, .iters = 2000, .veh_penalty = 10_000_000 });
+    defer free_run.deinit();
+    var res = try solvePdptwSisrFleetMin(allocator, inst, .{ .seed = 7, .iters = 100_000_000, .veh_penalty = 10_000_000 }, 2000);
+    defer res.deinit();
+    try std.testing.expect(res.vehicles <= free_run.vehicles);
+    const rc = try allocator.alloc([]const usize, res.routes.len);
+    defer allocator.free(rc);
+    for (res.routes, 0..) |r, i| rc[i] = r;
+    const vc = pdp.validate(inst, rc) orelse return error.Infeasible;
+    try std.testing.expectEqual(vc, res.total_cost);
+}
+
+test "PDPTW SISR: capped run below the natural fleet churns the bank without corruption" {
+    // Regression for the stale-loc rollback bug: a banked pair inserted in a
+    // rejected iteration kept its old position and the next ruin indexed past
+    // the route end (debug: integer overflow; ReleaseFast: segfault).
+    const allocator = std.testing.allocator;
+    var seed: u64 = 1;
+    while (seed <= 5) : (seed += 1) {
+        var ri = try pdp.randomInstanceClocked(allocator, 10, seed);
+        defer ri.deinit(allocator);
+        const inst = ri.inst();
+        var free_run = try solvePdptwSisr(allocator, inst, .{ .seed = seed, .iters = 800, .veh_penalty = 10_000_000 });
+        const target = if (free_run.vehicles > 1) free_run.vehicles - 1 else 1;
+        free_run.deinit();
+        var res = solvePdptwSisr(allocator, inst, .{ .seed = seed, .iters = 4000, .veh_penalty = 10_000_000, .max_vehicles = target }) catch |err| switch (err) {
+            error.NoCompleteSolution => continue, // legal outcome; the point is not crashing
+            else => return err,
+        };
+        defer res.deinit();
+        try std.testing.expect(res.vehicles <= target);
         const rc = try allocator.alloc([]const usize, res.routes.len);
         defer allocator.free(rc);
         for (res.routes, 0..) |r, i| rc[i] = r;
