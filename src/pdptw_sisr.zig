@@ -28,6 +28,7 @@ pub const PdpSisrParams = struct {
     t0_factor: f64 = 1.0, // initial threshold = t0 * (seed distance / n_nodes)
     tf_factor: f64 = 0.01, // final threshold factor
     veh_penalty: u64 = 0, // per-route cost bias toward fewer vehicles
+    fleet_ruin_rate: f64 = 0.1, // chance to empty the smallest route per ruin (veh_penalty > 0 only)
     gk: usize = 20, // kNN list length per node
     nbr_key: NbrKey = .sum,
 };
@@ -377,7 +378,28 @@ const S = struct {
         const n_nodes = 2 * s.inst.n_pairs;
         s.generation += 1;
 
-        const seed_c = 1 + rng.uintLessThan(usize, n_nodes);
+        var seed_c = 1 + rng.uintLessThan(usize, n_nodes);
+        if (s.veh_penalty > 0 and s.nonempty > 1 and rng.float(f64) < params.fleet_ruin_rate) {
+            // Fleet-min ruin (vrptw.zig lever): empty the smallest route
+            // outright; its pairs reinsert into the slack the strings below
+            // open around them, and veh_penalty settles it in acceptance.
+            // Emptying a whole route always passes the removal gate (the
+            // remainder is empty), so this cannot be rejected.
+            var smallest: usize = NO_ROUTE;
+            var slen: usize = std.math.maxInt(usize);
+            for (s.routes.items, 0..) |r, i| {
+                const len = r.items.items.len;
+                if (len > 0 and len < slen) {
+                    smallest = i;
+                    slen = len;
+                }
+            }
+            if (smallest != NO_ROUTE) {
+                seed_c = s.routes.items[smallest].items.items[rng.uintLessThan(usize, slen)];
+                s.ruin_mark.items[smallest] = s.generation;
+                _ = try s.removeStringPaired(smallest, 0, slen);
+            }
+        }
         const avg_len = @max(@as(usize, 1), n_nodes / @max(@as(usize, 1), @max(s.nonempty, 1)));
         const ls_max = @max(@as(usize, 1), @min(params.l_max, avg_len));
         const ks_max = @max(@as(usize, 1), @as(usize, @intFromFloat((4.0 * params.cbar) / (1.0 + @as(f64, @floatFromInt(ls_max))))));
