@@ -1016,8 +1016,8 @@ pub fn solvePdptwSisrFleetMin(allocator: std.mem.Allocator, inst: pdp.PdpInstanc
 }
 
 // Worker slot for the parallel fleet-min driver: one independent SISR run per
-// thread, results flattened into parent-owned buffers (workers allocate from
-// their own arena, so nothing crosses threads except these slices).
+// thread, results flattened into parent-owned buffers (nothing crosses threads
+// except these slices).
 const FmTask = struct {
     inst: pdp.PdpInstance,
     params: PdpSisrParams,
@@ -1031,12 +1031,14 @@ const FmTask = struct {
 };
 
 fn fmWorker(t: *FmTask) void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const res = solvePdptwSisrFrom(arena.allocator(), t.inst, t.params, t.warm) catch {
+    // Not an arena: the engine's per-iteration churn (route snapshots, squeeze
+    // undo copies) is alloc/free-balanced, and an arena retains all of it —
+    // measured 2.8 GB RSS in 5 minutes at hour-long walls.
+    var res = solvePdptwSisrFrom(std.heap.smp_allocator, t.inst, t.params, t.warm) catch {
         t.ok = false;
         return;
     };
+    defer res.deinit();
     var w: usize = 0;
     for (res.routes, 0..) |route, ri| {
         @memcpy(t.order[w .. w + route.len], route);
