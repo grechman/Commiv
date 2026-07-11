@@ -1015,6 +1015,91 @@ pub fn solvePdptwSisrFleetMin(allocator: std.mem.Allocator, inst: pdp.PdpInstanc
     return best;
 }
 
+/// Enterprise pinned-fleet driver: find the best solution using at most
+/// `pin` vehicles, spending the whole budget on that goal. Route: short
+/// uncapped warm-up (finds a packing basin), descent from the warm-up fleet
+/// down to `pin` (warm then cold per step, like fleet-min, but a failed
+/// attempt RETRIES with fresh seeds while budget remains instead of giving
+/// up), then all remaining time polishes distance at the pinned cap, warm
+/// from the incumbent. Returns error.NoCompleteSolution if `pin` vehicles
+/// were never reached within the budget.
+pub fn solvePdptwSisrPinned(allocator: std.mem.Allocator, inst: pdp.PdpInstance, params: PdpSisrParams, total_time_ms: u64, pin: usize) !pdp.PdpResult {
+    const t_start = nanos();
+    var p0 = params;
+    p0.time_ms = @max(total_time_ms * @min(@as(u64, params.fleet_p0_pct), 90) / 100, 1);
+    p0.max_vehicles = 0;
+    var best = try solvePdptwSisr(allocator, inst, p0);
+    errdefer best.deinit();
+
+    // Descent toward pin. Unlike fleet-min, a failed target is retried with a
+    // fresh seed while budget remains: reaching pin is the whole objective,
+    // so giving up on the first failure would waste the rest of the budget.
+    // Half the time left to the 85% mark per attempt (half warm, half cold):
+    // attempt SIZE beats retry count for hard packing (measured: a cold run
+    // that fails in 27 s can succeed in 120 s), so retries shrink
+    // geometrically rather than staying small.
+    var seed = params.seed;
+    const descent_limit = total_time_ms * 85 / 100;
+    while (best.vehicles > pin and best.vehicles > 1) {
+        const spent = (nanos() - t_start) / std.time.ns_per_ms;
+        if (spent + 500 >= descent_limit) break;
+        const target = best.vehicles - 1;
+        var pk = params;
+        pk.seed = seed;
+        pk.max_vehicles = target;
+        pk.cbar = @max(pk.cbar, 16.0);
+        pk.l_max = @max(pk.l_max, 16);
+        pk.eject = true;
+        pk.time_ms = @max((descent_limit - spent) / 2, 2000) / 2;
+        const warm = try allocator.alloc([]const usize, best.routes.len);
+        defer allocator.free(warm);
+        for (best.routes, 0..) |r, i| warm[i] = r;
+        var res = solvePdptwSisrFrom(allocator, inst, pk, warm) catch |err| switch (err) {
+            error.NoCompleteSolution => solvePdptwSisr(allocator, inst, pk) catch |err2| switch (err2) {
+                error.NoCompleteSolution => {
+                    seed +%= 0x9E3779B97F4A7C15;
+                    continue;
+                },
+                else => return err2,
+            },
+            else => return err,
+        };
+        if (res.vehicles <= target) {
+            best.deinit();
+            best = res;
+        } else {
+            res.deinit();
+            seed +%= 0x9E3779B97F4A7C15;
+        }
+    }
+    if (best.vehicles > pin) return error.NoCompleteSolution;
+
+    // Final polish: all remaining time at the pinned cap, warm from the
+    // incumbent. veh_penalty stays as given so hierarchical cost ordering is
+    // preserved.
+    const spent = (nanos() - t_start) / std.time.ns_per_ms;
+    if (spent + 500 < total_time_ms) {
+        var pp = params;
+        pp.max_vehicles = pin;
+        pp.time_ms = total_time_ms - spent;
+        pp.seed = seed +% 0x9E3779B97F4A7C15;
+        const warm = try allocator.alloc([]const usize, best.routes.len);
+        defer allocator.free(warm);
+        for (best.routes, 0..) |r, i| warm[i] = r;
+        var res = solvePdptwSisrFrom(allocator, inst, pp, warm) catch |err| switch (err) {
+            error.NoCompleteSolution => return best,
+            else => return err,
+        };
+        if (res.vehicles <= pin and (res.vehicles < best.vehicles or res.total_cost < best.total_cost)) {
+            best.deinit();
+            best = res;
+        } else {
+            res.deinit();
+        }
+    }
+    return best;
+}
+
 // Worker slot for the parallel fleet-min driver: one independent SISR run per
 // thread, results flattened into parent-owned buffers (nothing crosses threads
 // except these slices).
@@ -1499,6 +1584,74 @@ test "PDPTW SISR swap kick: off by default leaves engine bit-identical" {
     var a = try solvePdptwSisr(allocator, inst, .{ .seed = 9, .iters = 3000, .veh_penalty = 10_000_000 });
     defer a.deinit();
     var b = try solvePdptwSisr(allocator, inst, .{ .seed = 9, .iters = 3000, .veh_penalty = 10_000_000, .swap_kick = 0 });
+    defer b.deinit();
+    try std.testing.expectEqual(a.total_cost, b.total_cost);
+    try std.testing.expectEqual(a.vehicles, b.vehicles);
+}
+
+test "PDPTW SISR pinned: reaches pin at natural fleet" {
+    const allocator = std.testing.allocator;
+    var ri = try pdp.randomInstance(allocator, 8, 3, true);
+    defer ri.deinit(allocator);
+    const inst = ri.inst();
+    var free_run = try solvePdptwSisr(allocator, inst, .{ .seed = 3, .iters = 2000, .veh_penalty = 10_000_000 });
+    defer free_run.deinit();
+    var res = try solvePdptwSisrPinned(allocator, inst, .{ .seed = 3, .iters = 100_000_000, .veh_penalty = 10_000_000 }, 1500, free_run.vehicles);
+    defer res.deinit();
+    try std.testing.expect(res.vehicles <= free_run.vehicles);
+    const rc = try allocator.alloc([]const usize, res.routes.len);
+    defer allocator.free(rc);
+    for (res.routes, 0..) |r, i| rc[i] = r;
+    const vc = pdp.validate(inst, rc) orelse return error.Infeasible;
+    try std.testing.expectEqual(vc, res.total_cost);
+}
+
+test "PDPTW SISR pinned: pin above natural returns immediately-valid result" {
+    const allocator = std.testing.allocator;
+    var ri = try pdp.randomInstance(allocator, 10, 7, true);
+    defer ri.deinit(allocator);
+    const inst = ri.inst();
+    var free_run = try solvePdptwSisr(allocator, inst, .{ .seed = 7, .iters = 2000, .veh_penalty = 10_000_000 });
+    defer free_run.deinit();
+    var res = try solvePdptwSisrPinned(allocator, inst, .{ .seed = 7, .iters = 100_000_000, .veh_penalty = 10_000_000 }, 1000, free_run.vehicles + 3);
+    defer res.deinit();
+    try std.testing.expect(res.vehicles <= free_run.vehicles + 3);
+    const rc = try allocator.alloc([]const usize, res.routes.len);
+    defer allocator.free(rc);
+    for (res.routes, 0..) |r, i| rc[i] = r;
+    const vc = pdp.validate(inst, rc) orelse return error.Infeasible;
+    try std.testing.expectEqual(vc, res.total_cost);
+}
+
+test "PDPTW SISR pinned: impossible pin errors" {
+    const allocator = std.testing.allocator;
+    // n_pairs=20: the smallest size where these random tight-TW instances
+    // need 3+ vehicles (12..16 pairs pack into 2)
+    var ri = try pdp.randomInstance(allocator, 20, 1, true);
+    defer ri.deinit(allocator);
+    const inst = ri.inst();
+    // honesty gate: this instance genuinely needs several vehicles, so pin=1
+    // is out of reach for the descent no matter the seed
+    var free_run = try solvePdptwSisr(allocator, inst, .{ .seed = 1, .iters = 2000, .veh_penalty = 10_000_000 });
+    defer free_run.deinit();
+    try std.testing.expect(free_run.vehicles >= 3);
+    try std.testing.expectError(error.NoCompleteSolution, solvePdptwSisrPinned(allocator, inst, .{ .seed = 1, .iters = 100_000_000, .veh_penalty = 10_000_000 }, 800, 1));
+}
+
+test "PDPTW SISR pinned: deterministic for a fixed seed" {
+    // iters-bounded (600 iters on 10 pairs finishes far inside every phase's
+    // wall cap), so the time-based phase splits never bind and two calls walk
+    // identical trajectories.
+    const allocator = std.testing.allocator;
+    var ri = try pdp.randomInstance(allocator, 10, 42, true);
+    defer ri.deinit(allocator);
+    const inst = ri.inst();
+    const params = PdpSisrParams{ .seed = 7, .iters = 600, .veh_penalty = 10_000_000 };
+    var free_run = try solvePdptwSisr(allocator, inst, .{ .seed = 7, .iters = 600, .veh_penalty = 10_000_000 });
+    defer free_run.deinit();
+    var a = try solvePdptwSisrPinned(allocator, inst, params, 2000, free_run.vehicles);
+    defer a.deinit();
+    var b = try solvePdptwSisrPinned(allocator, inst, params, 2000, free_run.vehicles);
     defer b.deinit();
     try std.testing.expectEqual(a.total_cost, b.total_cost);
     try std.testing.expectEqual(a.vehicles, b.vehicles);
