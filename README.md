@@ -319,15 +319,26 @@ is_pickup, demand_signed, ready, due, service }`; returns `PdpResult`
   at one-sixth of the wall commiv already holds nearly all its fleet results and is
   within 0.2-1.3% of its own final distance.
 
-  Two opt-in levers on top (measured, off by default): `PB_GRAN=2` gates dropoff-gap
-  evaluation to kNN neighbourhoods on long routes during uncapped search (auto-off
-  above 8 routes, under 24 nodes, or while a fleet cap is active) — on the 200-series
-  it is fleet 2W/0L and distance 8W/0L vs the baseline (lr2_2_3 16.75% -> exact BKS,
-  lr2_2_8 record fleet cracked; mean gap at record fleet 1.92% -> 0.91%), recommended
-  at n>=200 only (one seed-marginal lr211 fleet loss at n=100). `PB_THREADS=3` runs
-  the fleet-min descent as parallel waves (`solvePdptwSisrFleetMinParallel`: warm +
-  cold + deeper-cap probe per wave, seed-diverse uncapped and polish phases) — on the
-  six hardest n=1000 cells it saves 1-2 vehicles on four of six at identical wall.
+  Opt-in levers on top (all measured, all off by default):
+  - `PB_EJECT=1` (`eject`): GES-style squeeze fallback (Nagata & Kobayashi) in capped
+    runs — a banked pair with no feasible insertion is inserted at the least-violating
+    position and one resident pair is ejected to restore feasibility, steered by
+    ejection counters. With this on, the 100-series reaches the record fleet on
+    **56/56 at 10 s** (lc103 and lc109 cracked; the only remaining n=100 gaps are three
+    distance cells: lc103 +2.1%, lc104 +0.5%, lc109 +2.2%). Also cracks lrc1_2_8's
+    record at n=200. No effect on deep (5+ vehicle) misses at n=1000.
+  - `PB_GRAN=2` (`gran_gaps`): dropoff-gap evaluation gated to kNN neighbourhoods on
+    long routes during uncapped search (auto-off above 8 routes, under 24 nodes, or
+    while a fleet cap is active) — 200-series fleet 2W/0L, distance 8W/0L vs baseline
+    (lr2_2_3 16.75% -> exact BKS; record-fleet mean gap 1.92% -> 0.91%). Recommended
+    n>=200 only (seed-marginal lr211 fleet loss at n=100). Combining with eject at
+    n=200 churns (fleet 4W/4L) — pick one per regime.
+  - `PB_THREADS=3`: parallel fleet-min waves (`solvePdptwSisrFleetMinParallel`) —
+    saves 1-2 vehicles on four of the six hardest n=1000 cells at identical wall.
+  - `PB_SWAP=N` (`swap_kick`): SWAP*-shaped inter-route pair exchange every N
+    iterations — marginal (one 400-series hairline improved, lc104 unmoved).
+  - `PB_P0` (`fleet_p0_pct`): uncapped-phase share of the fleet-min budget — front-
+    loading (15%) measured a wash on hard n=1000 cells; default 40.
   The snapshot-rollback undo journal was profiled and measured dead (rollback+snapshot
   = 0.3-2.3% of wall; the insertion scan is 46-88%).
 - `solvePdptwSisrFleetMin(allocator, inst, params, total_time_ms)` — vehicle-count descent
