@@ -13,7 +13,10 @@ Ours, same instances and wall:
     PB_FILES=lc101,lr101,lrc101 PB_TIME_MS=10000 ./zig-out/bin/commiv-pdptwbench 2>&1
 
 Requires ~/cbench/LKH-3.0.14/LKH. 2026-07-10 result at 10 s equal wall,
-single thread both: commiv 56/56 feasible, 52/56 exact BKS; LKH 37/56 feasible,
-0 cells better than commiv. At 60 s LKH recovers 6 of its 19 misses (13 still
-infeasible); its forced-9-vehicle lc103 run (1068.6) is the single cell that
-hierarchically beats commiv's 10-vehicle 827.9.
+single thread both: commiv 56/56 feasible, 53/56 exact BKS (fleet-min driver,
+PB_FLEET=1); LKH 37/56 feasible, 26/56 exact, 0 cells better than commiv.
+At 60 s LKH recovers 6 of its 19 misses (13 still infeasible). Its former
+lone hierarchical win (forced-9-vehicle lc103) is gone: commiv's fleet
+cap + request bank reaches the 9-vehicle records on lc103/lc109 too.
+Not extended past n=100: LKH already fails feasibility on most 100-series
+cells, and it only degrades with size.

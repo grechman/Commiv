@@ -304,6 +304,20 @@ is_pickup, demand_signed, ready, due, service }`; returns `PdpResult`
   30W/26T/0L vs LKH-3, 45W/11T/0L vs OR-Tools. Harnesses: `tools/lkh_pdptw/`,
   `tools/vroom_pdptw.py`, `tools/ortools_pdptw.py`. PyVRP has no paired
   pickup-delivery support (their issue #331).
+
+  Scale (Li & Lim 200-1000, all 296 instances with published BKS routes, equal wall
+  30/60/90/120/180 s by size, single thread, same matrix; `PB_DIR=vendor/pdptw/<size>`):
+  commiv serves every request on 296/296. VROOM capped at the record fleet completes
+  only 64/296 (hierarchical 259W/21T/16L for commiv); VROOM in fleet-min mode
+  (`VROOM_FLEETMIN=1`, per-vehicle fixed cost, 2x fleet available) completes everything
+  but finds a strictly smaller fleet than commiv on 4/296 vs commiv's 197/296
+  (hierarchical 251W/21T/24L for commiv). At the record fleet commiv's distance gap vs
+  BKS is 0.2-2.3% by size; where it misses the record it is short by 1-4 vehicles
+  (records embody hours-days of historical compute). All 16 capped-mode losses are
+  same-fleet distance edges: 13 hairline (<=0.2%) on the easiest clustered family
+  (lc1_x_5/6/7), 3 real (4-15%) on long-route lr2 200-series cells. Anytime profile:
+  at one-sixth of the wall commiv already holds nearly all its fleet results and is
+  within 0.2-1.3% of its own final distance.
 - `solvePdptwSisrFleetMin(allocator, inst, params, total_time_ms)` — vehicle-count descent
   (uncapped run, then capped request-bank attempts, warm + cold, terminal polish).
 - `solvePdptw(allocator, inst, PdpParams)` — correctness baseline (pair insertion +
