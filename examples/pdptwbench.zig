@@ -20,11 +20,11 @@ pub fn main(init: std.process.Init) !void {
     const dir = env.get("PB_DIR") orelse "vendor/pdptw";
     const files = env.get("PB_FILES") orelse
         "lc101,lc102,lc103,lc104,lc105,lc106,lc107,lc108,lc109," ++
-        "lc201,lc202,lc203,lc204,lc205,lc206,lc207,lc208," ++
-        "lr101,lr102,lr103,lr104,lr105,lr106,lr107,lr108,lr109,lr110,lr111,lr112," ++
-        "lr201,lr202,lr203,lr204,lr205,lr206,lr207,lr208,lr209,lr210,lr211," ++
-        "lrc101,lrc102,lrc103,lrc104,lrc105,lrc106,lrc107,lrc108," ++
-        "lrc201,lrc202,lrc203,lrc204,lrc205,lrc206,lrc207,lrc208";
+            "lc201,lc202,lc203,lc204,lc205,lc206,lc207,lc208," ++
+            "lr101,lr102,lr103,lr104,lr105,lr106,lr107,lr108,lr109,lr110,lr111,lr112," ++
+            "lr201,lr202,lr203,lr204,lr205,lr206,lr207,lr208,lr209,lr210,lr211," ++
+            "lrc101,lrc102,lrc103,lrc104,lrc105,lrc106,lrc107,lrc108," ++
+            "lrc201,lrc202,lrc203,lrc204,lrc205,lrc206,lrc207,lrc208";
     const time_ms = try std.fmt.parseInt(u64, env.get("PB_TIME_MS") orelse "10000", 10);
     const seed = try std.fmt.parseInt(u64, env.get("PB_SEED") orelse "1", 10);
     const iters = try std.fmt.parseInt(usize, env.get("PB_ITERS") orelse "1000000000", 10);
@@ -35,6 +35,8 @@ pub fn main(init: std.process.Init) !void {
     const l_max = try std.fmt.parseInt(usize, env.get("PB_LMAX") orelse "10", 10);
     const t0f = try std.fmt.parseFloat(f64, env.get("PB_T0") orelse "1");
     const blink = try std.fmt.parseFloat(f64, env.get("PB_BLINK") orelse "0.01");
+    const n_threads = try std.fmt.parseInt(usize, env.get("PB_THREADS") orelse "1", 10); // >1: parallel fleet-min waves
+    const gran_gaps = try std.fmt.parseInt(u2, env.get("PB_GRAN") orelse "0", 10); // granular gaps mask: 1 pickup, 2 dropoff, 3 both
 
     std.debug.print("instance,n_pairs,bks_veh,veh,bks_dist,dist,gap_pct,ms\n", .{});
     var sum_gap: f64 = 0;
@@ -78,8 +80,11 @@ pub fn main(init: std.process.Init) !void {
             .l_max = l_max,
             .t0_factor = t0f,
             .blink = blink,
+            .gran_gaps = gran_gaps,
         };
-        var res = if (fleet_min)
+        var res = if (fleet_min and n_threads > 1)
+            try commiv.internal.pdptw_sisr.solvePdptwSisrFleetMinParallel(allocator, inst, base_params, time_ms, n_threads)
+        else if (fleet_min)
             try commiv.internal.pdptw_sisr.solvePdptwSisrFleetMin(allocator, inst, base_params, time_ms)
         else
             commiv.solvePdptwSisr(allocator, inst, base_params) catch |err| switch (err) {
@@ -109,9 +114,8 @@ pub fn main(init: std.process.Init) !void {
         sum_gap += gap;
         count += 1;
         std.debug.print("{s},{d},{d},{d},{d:.3},{d:.3},{d:.2},{d}\n", .{
-            name,                                              inst.n_pairs, bks_veh, res.vehicles,
-            @as(f64, @floatFromInt(bks_dist)) / 1000.0,        @as(f64, @floatFromInt(res.total_cost)) / 1000.0,
-            gap,                                               ms,
+            name,                                       inst.n_pairs,                                     bks_veh, res.vehicles,
+            @as(f64, @floatFromInt(bks_dist)) / 1000.0, @as(f64, @floatFromInt(res.total_cost)) / 1000.0, gap,     ms,
         });
     }
     if (count > 0) {

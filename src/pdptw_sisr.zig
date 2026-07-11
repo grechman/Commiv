@@ -37,6 +37,18 @@ pub const PdpSisrParams = struct {
     // engine keeps retrying them each iteration. The solve only reports
     // solutions with an empty pool; error.NoCompleteSolution if none found.
     max_vehicles: usize = 0,
+    // Granular gap restriction for whole-pair insertion: on routes with at
+    // least `gran_gap_min_len` nodes, only pickup gaps adjacent to a kNN
+    // neighbour of p (route ends always allowed) are scanned, and dropoff
+    // gaps not adjacent to a kNN neighbour of q are walked but not evaluated
+    // (the adjacent b == a gap is always evaluated). Cuts the O(L^2) recreate
+    // scan on long routes; off by default until measured.
+    gran_gaps: u2 = 0, // bit 0: gate pickup gaps; bit 1: gate dropoff evals (the measured win)
+    gran_gap_min_len: usize = 24,
+    // Granular gating only pays in the few-long-routes regime (lr2-style);
+    // with many routes it starves fleet consolidation (measured n=1000 lr2:
+    // fleet 19 -> 23). Auto-off above this route count.
+    gran_max_routes: usize = 8,
 };
 
 pub const NbrKey = enum { sum, min, out };
@@ -117,6 +129,9 @@ const S = struct {
     n_unassigned: usize = 0, // pairs currently in the request bank (loc_route == NO_ROUTE)
     keep_buf: std.ArrayList(usize) = .empty, // scratch for removals
     drop_buf: []bool, // scratch: per-position removal flags (sized 2n)
+    nbr_mark_p: []u64, // granular gaps: node -> stamp of last kNN(p) marking
+    nbr_mark_q: []u64,
+    nbr_gen: u64 = 0,
 
     fn init(allocator: std.mem.Allocator, inst: pdp.PdpInstance, veh_penalty: u64, gran: []const usize, gk: usize) !S {
         const dim = inst.dim();
@@ -129,10 +144,14 @@ const S = struct {
             .loc_route = try allocator.alloc(usize, dim),
             .loc_pos = try allocator.alloc(usize, dim),
             .drop_buf = try allocator.alloc(bool, dim),
+            .nbr_mark_p = try allocator.alloc(u64, dim),
+            .nbr_mark_q = try allocator.alloc(u64, dim),
         };
         @memset(s.loc_route, NO_ROUTE);
         @memset(s.loc_pos, 0);
         @memset(s.drop_buf, false);
+        @memset(s.nbr_mark_p, 0);
+        @memset(s.nbr_mark_q, 0);
         return s;
     }
 
@@ -142,6 +161,8 @@ const S = struct {
         s.allocator.free(s.loc_route);
         s.allocator.free(s.loc_pos);
         s.allocator.free(s.drop_buf);
+        s.allocator.free(s.nbr_mark_p);
+        s.allocator.free(s.nbr_mark_q);
         s.removed.deinit(s.allocator);
         s.cand_mark.deinit(s.allocator);
         s.ruin_mark.deinit(s.allocator);
@@ -332,7 +353,8 @@ const S = struct {
     /// freshened prefix/suffix arrays + an incremental middle segment.
     /// Time-warp and load violations are monotone under rightward extension,
     /// so an infeasible middle prunes the rest of its `b` loop.
-    fn evalPairInsert(s: *S, ri: usize, p: usize, q: usize, blink: f64, rng: std.Random) ?Ins {
+    fn evalPairInsert(s: *S, ri: usize, p: usize, q: usize, params: PdpSisrParams, rng: std.Random) ?Ins {
+        const blink = params.blink;
         const inst = s.inst;
         const r = &s.routes.items[ri];
         const it = r.items.items;
@@ -341,7 +363,34 @@ const S = struct {
         const q_t = Tws.client(inst, q);
         const q_l = pdp.Lseg.node(inst, q);
 
+        // Granular gate: marks are the UNION of kNN(p) and kNN(q) (a gap
+        // near the dropoff's neighbours is a fine pickup spot too, and vice
+        // versa). If the route holds fewer than 4 marked nodes the gate is
+        // dropped for this route: too sparse a mark set cannot consolidate
+        // (measured: n=1000 lr2 fleet blows 19 -> 30 without the fallback).
+        // Never gate while a fleet cap is active: capped repacking (descent
+        // attempts, polish) needs the awkward insertions the gate skips
+        // (measured: lrc2 200-series loses a vehicle on 2/7 cells otherwise).
+        var granular = params.gran_gaps != 0 and params.max_vehicles == 0 and
+            L >= params.gran_gap_min_len and s.nonempty <= params.gran_max_routes;
+        var genp: u64 = 0;
+        if (granular) {
+            s.nbr_gen += 1;
+            genp = s.nbr_gen;
+            for (0..s.gk) |ti| {
+                const np = s.gran[(p - 1) * s.gk + ti];
+                if (np != 0) s.nbr_mark_p[np] = genp;
+                const nq = s.gran[(q - 1) * s.gk + ti];
+                if (nq != 0) s.nbr_mark_p[nq] = genp;
+            }
+            var hits: usize = 0;
+            for (it) |c| hits += @intFromBool(s.nbr_mark_p[c] == genp);
+            if (hits < 4) granular = false;
+        }
+
         for (0..L + 1) |a| {
+            if (granular and (params.gran_gaps & 1) != 0 and a != 0 and a != L and
+                s.nbr_mark_p[it[a - 1]] != genp and s.nbr_mark_p[it[a]] != genp) continue;
             const prev_a: usize = if (a == 0) 0 else it[a - 1];
             // middle segment: pre[a] + p, extended one node per b step
             var m_t = Tws.merge(r.pre_t.items[a], @intCast(inst.d(prev_a, p)), Tws.client(inst, p));
@@ -356,6 +405,8 @@ const S = struct {
                 blk: {
                     if (rng.float(f64) < blink) break :blk;
                     const nxt: usize = if (b == L) 0 else it[b];
+                    if (granular and (params.gran_gaps & 2) != 0 and b != a and b != L and
+                        s.nbr_mark_p[last] != genp and s.nbr_mark_p[nxt] != genp) break :blk;
                     const f1 = Tws.merge(m_t, @intCast(inst.d(last, q)), q_t);
                     const f2 = Tws.merge(f1, @intCast(inst.d(q, nxt)), r.suf_t.items[b]);
                     if (f2.tw != 0) break :blk;
@@ -472,7 +523,7 @@ const S = struct {
                     if (s.cand_mark.items[ri] == s.generation) continue;
                     s.cand_mark.items[ri] = s.generation;
                     try s.freshen(ri);
-                    const ins = s.evalPairInsert(ri, p, q, params.blink, rng) orelse continue;
+                    const ins = s.evalPairInsert(ri, p, q, params, rng) orelse continue;
                     if (best_ri == NO_ROUTE or ins.delta < best_ins.delta) {
                         best_ri = ri;
                         best_ins = ins;
@@ -748,6 +799,186 @@ pub fn solvePdptwSisrFleetMin(allocator: std.mem.Allocator, inst: pdp.PdpInstanc
     return best;
 }
 
+// Worker slot for the parallel fleet-min driver: one independent SISR run per
+// thread, results flattened into parent-owned buffers (workers allocate from
+// their own arena, so nothing crosses threads except these slices).
+const FmTask = struct {
+    inst: pdp.PdpInstance,
+    params: PdpSisrParams,
+    warm: []const []const usize = &.{},
+    order: []usize, // parent-owned, flat route nodes
+    ends: []usize, // parent-owned, route end offsets
+    nroutes: usize = 0,
+    dist: u64 = 0,
+    veh: usize = 0,
+    ok: bool = false,
+};
+
+fn fmWorker(t: *FmTask) void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const res = solvePdptwSisrFrom(arena.allocator(), t.inst, t.params, t.warm) catch {
+        t.ok = false;
+        return;
+    };
+    var w: usize = 0;
+    for (res.routes, 0..) |route, ri| {
+        @memcpy(t.order[w .. w + route.len], route);
+        w += route.len;
+        t.ends[ri] = w;
+    }
+    t.nroutes = res.routes.len;
+    t.veh = res.vehicles;
+    t.dist = res.total_cost;
+    t.ok = true;
+}
+
+fn fmWave(allocator: std.mem.Allocator, tasks: []FmTask) !void {
+    const ths = try allocator.alloc(std.Thread, tasks.len);
+    defer allocator.free(ths);
+    var spawned: usize = 0;
+    for (tasks, 0..) |*t, i| {
+        ths[i] = std.Thread.spawn(.{}, fmWorker, .{t}) catch break;
+        spawned += 1;
+    }
+    for (tasks[spawned..]) |*t| fmWorker(t);
+    for (ths[0..spawned]) |th| th.join();
+}
+
+fn fmSlotResult(allocator: std.mem.Allocator, t: FmTask) !pdp.PdpResult {
+    const routes = try allocator.alloc([]usize, t.nroutes);
+    var filled: usize = 0;
+    errdefer {
+        for (routes[0..filled]) |r| allocator.free(r);
+        allocator.free(routes);
+    }
+    var start: usize = 0;
+    for (0..t.nroutes) |ri| {
+        routes[ri] = try allocator.dupe(usize, t.order[start..t.ends[ri]]);
+        filled += 1;
+        start = t.ends[ri];
+    }
+    return .{ .allocator = allocator, .routes = routes, .total_cost = t.dist, .vehicles = t.veh };
+}
+
+/// Parallel fleet minimization: each descent step runs `threads` independent
+/// capped attempts as one wave (warm incumbent, cold restarts, plus one
+/// deeper-cap probe), so one wave's wall buys several serial attempts and a
+/// success can skip a vehicle. Phase 1 (uncapped) and the terminal polish run
+/// as seed-diverse waves too. threads <= 1 is exactly the serial driver.
+/// Deterministic for a fixed (seed, threads).
+pub fn solvePdptwSisrFleetMinParallel(allocator: std.mem.Allocator, inst: pdp.PdpInstance, params: PdpSisrParams, total_time_ms: u64, threads: usize) !pdp.PdpResult {
+    const cpus = std.Thread.getCpuCount() catch 1;
+    const k = if (threads == 0) @max(@as(usize, 1), cpus -| 1) else threads;
+    if (k <= 1 or inst.n_pairs == 0) return solvePdptwSisrFleetMin(allocator, inst, params, total_time_ms);
+    const n2 = 2 * inst.n_pairs;
+    const SEED_STRIDE: u64 = 0x9E3779B97F4A7C15;
+
+    const tasks = try allocator.alloc(FmTask, k);
+    defer allocator.free(tasks);
+    var bufs_alloc: usize = 0;
+    defer for (tasks[0..bufs_alloc]) |t| {
+        allocator.free(t.order);
+        allocator.free(t.ends);
+    };
+    for (tasks) |*t| {
+        t.* = .{
+            .inst = inst,
+            .params = params,
+            .order = try allocator.alloc(usize, n2),
+            .ends = try allocator.alloc(usize, inst.n_pairs),
+        };
+        bufs_alloc += 1;
+    }
+    const warm_buf = try allocator.alloc([]const usize, inst.n_pairs);
+    defer allocator.free(warm_buf);
+
+    // phase 1: seed-diverse uncapped wave
+    for (tasks, 0..) |*t, i| {
+        t.params = params;
+        t.params.max_vehicles = 0;
+        t.params.time_ms = @max(total_time_ms * 2 / 5, 1);
+        t.params.seed = params.seed +% @as(u64, @intCast(i)) *% SEED_STRIDE;
+        t.warm = &.{};
+        t.ok = false;
+    }
+    try fmWave(allocator, tasks);
+    var best: ?pdp.PdpResult = null;
+    errdefer if (best) |*b| b.deinit();
+    var win: ?usize = null;
+    for (tasks, 0..) |t, i| {
+        if (!t.ok) continue;
+        if (win == null or t.veh < tasks[win.?].veh or (t.veh == tasks[win.?].veh and t.dist < tasks[win.?].dist)) win = i;
+    }
+    best = try fmSlotResult(allocator, tasks[win orelse return error.NoCompleteSolution]);
+
+    // phase 2: descent waves
+    const t_start = nanos();
+    var wave_no: u64 = 0;
+    descent: while (best.?.vehicles > 1) {
+        const target = best.?.vehicles - 1;
+        const spent = (nanos() - t_start) / std.time.ns_per_ms;
+        const budget = total_time_ms * 3 / 5;
+        if (spent + 500 >= budget) break;
+        wave_no += 1;
+        for (best.?.routes, 0..) |r, i| warm_buf[i] = r;
+        const warm = warm_buf[0..best.?.routes.len];
+        for (tasks, 0..) |*t, i| {
+            t.params = params;
+            t.params.time_ms = @max((budget - spent) / 2, 500);
+            t.params.cbar = @max(t.params.cbar, 16.0);
+            t.params.l_max = @max(t.params.l_max, 16);
+            t.params.seed = params.seed +% wave_no *% 0xD1B54A32D192ED03 +% @as(u64, @intCast(i)) *% SEED_STRIDE;
+            // slot 0 warm at K-1, last slot probes K-2 cold, the rest cold at K-1
+            const deeper = k >= 3 and i == k - 1 and target > 1;
+            t.params.max_vehicles = if (deeper) target - 1 else target;
+            t.warm = if (i == 0) warm else &.{};
+            t.ok = false;
+        }
+        try fmWave(allocator, tasks);
+        win = null;
+        for (tasks, 0..) |t, i| {
+            if (!t.ok or t.veh > target) continue;
+            if (win == null or t.veh < tasks[win.?].veh or (t.veh == tasks[win.?].veh and t.dist < tasks[win.?].dist)) win = i;
+        }
+        const w = win orelse break :descent;
+        const res = try fmSlotResult(allocator, tasks[w]);
+        best.?.deinit();
+        best = res;
+    }
+
+    // phase 3: seed-diverse warm polish at the final fleet
+    const spent = (nanos() - t_start) / std.time.ns_per_ms;
+    const p0_ms = @min(@max(total_time_ms * 2 / 5, 1), total_time_ms);
+    if (spent + p0_ms + 500 < total_time_ms) {
+        for (best.?.routes, 0..) |r, i| warm_buf[i] = r;
+        const warm = warm_buf[0..best.?.routes.len];
+        for (tasks, 0..) |*t, i| {
+            t.params = params;
+            t.params.max_vehicles = best.?.vehicles;
+            t.params.time_ms = total_time_ms - p0_ms - spent;
+            t.params.seed = params.seed +% 0xA0761D6478BD642F +% @as(u64, @intCast(i)) *% SEED_STRIDE;
+            t.warm = warm;
+            t.ok = false;
+        }
+        try fmWave(allocator, tasks);
+        win = null;
+        for (tasks, 0..) |t, i| {
+            if (!t.ok or t.veh > best.?.vehicles) continue;
+            if (win == null or t.veh < tasks[win.?].veh or (t.veh == tasks[win.?].veh and t.dist < tasks[win.?].dist)) win = i;
+        }
+        if (win) |w| {
+            const t = tasks[w];
+            if (t.veh < best.?.vehicles or (t.veh == best.?.vehicles and t.dist < best.?.total_cost)) {
+                const res = try fmSlotResult(allocator, t);
+                best.?.deinit();
+                best = res;
+            }
+        }
+    }
+    return best.?;
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -903,6 +1134,30 @@ test "PDPTW SISR: fleet cap succeeds at the uncapped count and fails at 1" {
 
     // one vehicle cannot serve 8 pairs under these windows
     try std.testing.expectError(error.NoCompleteSolution, solvePdptwSisr(allocator, inst, .{ .seed = 3, .iters = 300, .veh_penalty = 10_000_000, .max_vehicles = 1 }));
+}
+
+test "PDPTW SISR: parallel fleet-min validates, deterministic, threads=1 == serial" {
+    const allocator = std.testing.allocator;
+    var ri = try pdp.randomInstance(allocator, 8, 11, true);
+    defer ri.deinit(allocator);
+    const inst = ri.inst();
+    const params = PdpSisrParams{ .seed = 11, .iters = 100_000_000, .veh_penalty = 10_000_000 };
+
+    var a = try solvePdptwSisrFleetMinParallel(allocator, inst, params, 1500, 3);
+    defer a.deinit();
+    const rc = try allocator.alloc([]const usize, a.routes.len);
+    defer allocator.free(rc);
+    for (a.routes, 0..) |r, i| rc[i] = r;
+    const vc = pdp.validate(inst, rc) orelse return error.Infeasible;
+    try std.testing.expectEqual(vc, a.total_cost);
+
+    // threads <= 1 must be exactly the serial driver
+    var s1 = try solvePdptwSisrFleetMinParallel(allocator, inst, params, 800, 1);
+    defer s1.deinit();
+    var s2 = try solvePdptwSisrFleetMin(allocator, inst, params, 800);
+    defer s2.deinit();
+    try std.testing.expectEqual(s2.vehicles, s1.vehicles);
+    try std.testing.expectEqual(s2.total_cost, s1.total_cost);
 }
 
 test "PDPTW SISR: fleet-min driver output validates and never exceeds uncapped" {
