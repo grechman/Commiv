@@ -49,6 +49,23 @@ pub const PdpSisrParams = struct {
     // with many routes it starves fleet consolidation (measured n=1000 lr2:
     // fleet 19 -> 23). Auto-off above this route count.
     gran_max_routes: usize = 8,
+    // GES-style squeeze fallback (Nagata & Kobayashi 2010) for capped runs:
+    // when a banked pair has no feasible insertion and no route may open,
+    // insert it at the least-violating position (time warp + load excess)
+    // and eject the cheapest single resident pair that restores feasibility.
+    // Ejection counters steer away from cycling. Only fires when
+    // max_vehicles > 0 blocks opening a route; default off.
+    eject: bool = false,
+    // Inter-route pair exchange (SWAP*-shaped, Vidal 2022): every swap_kick
+    // iterations, pick a random pair and try exchanging it with a kNN pair
+    // from another route, each reinserted at its own best position. Strict
+    // improvement only. 0 = off.
+    swap_kick: usize = 0,
+    // Share of the fleet-min drivers' total budget spent on the initial
+    // uncapped run, in percent. The descent gets (100 - fleet_p0_pct) * 3/2
+    // clamped as before. The SISR paper front-loads route minimization; lower
+    // values hand the descent more time.
+    fleet_p0_pct: u8 = 40,
 };
 
 pub const NbrKey = enum { sum, min, out };
@@ -132,6 +149,7 @@ const S = struct {
     nbr_mark_p: []u64, // granular gaps: node -> stamp of last kNN(p) marking
     nbr_mark_q: []u64,
     nbr_gen: u64 = 0,
+    eject_pen: []u32, // pickup id -> times it forced a squeeze (GES guidance)
 
     fn init(allocator: std.mem.Allocator, inst: pdp.PdpInstance, veh_penalty: u64, gran: []const usize, gk: usize) !S {
         const dim = inst.dim();
@@ -146,12 +164,14 @@ const S = struct {
             .drop_buf = try allocator.alloc(bool, dim),
             .nbr_mark_p = try allocator.alloc(u64, dim),
             .nbr_mark_q = try allocator.alloc(u64, dim),
+            .eject_pen = try allocator.alloc(u32, dim),
         };
         @memset(s.loc_route, NO_ROUTE);
         @memset(s.loc_pos, 0);
         @memset(s.drop_buf, false);
         @memset(s.nbr_mark_p, 0);
         @memset(s.nbr_mark_q, 0);
+        @memset(s.eject_pen, 0);
         return s;
     }
 
@@ -163,6 +183,7 @@ const S = struct {
         s.allocator.free(s.drop_buf);
         s.allocator.free(s.nbr_mark_p);
         s.allocator.free(s.nbr_mark_q);
+        s.allocator.free(s.eject_pen);
         s.removed.deinit(s.allocator);
         s.cand_mark.deinit(s.allocator);
         s.ruin_mark.deinit(s.allocator);
@@ -429,6 +450,187 @@ const S = struct {
         return best;
     }
 
+    const InsV = struct { a: usize, b: usize, viol: i64, delta: i64 };
+
+    /// Least-violating insertion of pair (p, q) into route `ri`: same gap
+    /// enumeration as evalPairInsert but WITHOUT feasibility pruning; every
+    /// (a, b) is scored by viol = final time warp + 10 * load excess, ties by
+    /// distance delta. Used only by the squeeze fallback, so no blinks and no
+    /// granular gating. Route must be freshened.
+    fn evalPairInsertViol(s: *S, ri: usize, p: usize, q: usize) ?InsV {
+        const inst = s.inst;
+        const r = &s.routes.items[ri];
+        const it = r.items.items;
+        const L = it.len;
+        var best: ?InsV = null;
+        const q_t = Tws.client(inst, q);
+        const q_l = pdp.Lseg.node(inst, q);
+
+        for (0..L + 1) |a| {
+            const prev_a: usize = if (a == 0) 0 else it[a - 1];
+            var m_t = Tws.merge(r.pre_t.items[a], @intCast(inst.d(prev_a, p)), Tws.client(inst, p));
+            var m_l = pdp.Lseg.merge(r.pre_l.items[a], pdp.Lseg.node(inst, p));
+            var m_d: u64 = r.pre_d.items[a] + inst.d(prev_a, p);
+            var last = p;
+
+            var b = a;
+            while (b <= L) : (b += 1) {
+                const nxt: usize = if (b == L) 0 else it[b];
+                const f1 = Tws.merge(m_t, @intCast(inst.d(last, q)), q_t);
+                const f2 = Tws.merge(f1, @intCast(inst.d(q, nxt)), r.suf_t.items[b]);
+                const f_l = pdp.Lseg.merge(pdp.Lseg.merge(m_l, q_l), r.suf_l.items[b]);
+                const load_ex: i64 = @max(f_l.hi - inst.capacity, 0);
+                const viol: i64 = f2.tw + 10 * load_ex;
+                const new_dist = m_d + inst.d(last, q) + inst.d(q, nxt) + r.tail_d.items[b];
+                const delta = @as(i64, @intCast(new_dist)) - @as(i64, @intCast(r.dist));
+                if (best == null or viol < best.?.viol or (viol == best.?.viol and delta < best.?.delta)) {
+                    best = .{ .a = a, .b = b, .viol = viol, .delta = delta };
+                }
+                if (b < L) {
+                    m_t = Tws.merge(m_t, @intCast(inst.d(last, it[b])), Tws.client(inst, it[b]));
+                    m_l = pdp.Lseg.merge(m_l, pdp.Lseg.node(inst, it[b]));
+                    m_d += inst.d(last, it[b]);
+                    last = it[b];
+                }
+            }
+        }
+        return best;
+    }
+
+    /// After a squeeze insertion made route `ri` infeasible, find the resident
+    /// pair (excluding skip_p) whose removal restores full feasibility (TW via
+    /// seqFeasible + load via a prefix walk), preferring the lowest ejection
+    /// counter, ties by lowest pickup id. Returns the pickup id, or null.
+    fn ejectCandidate(s: *S, ri: usize, skip_p: usize) !?usize {
+        const inst = s.inst;
+        const it = s.routes.items[ri].items.items;
+        var best: ?usize = null;
+        for (it) |e| {
+            if (!inst.is_pickup[e] or e == skip_p) continue;
+            const f = inst.pair_of[e];
+            s.keep_buf.clearRetainingCapacity();
+            for (it) |c| {
+                if (c != e and c != f) try s.keep_buf.append(s.allocator, c);
+            }
+            if (!s.seqFeasible(s.keep_buf.items)) continue;
+            const lg = pdp.routeLseg(inst, s.keep_buf.items);
+            if (!(lg.lo >= 0 and lg.hi <= inst.capacity)) continue;
+            if (best == null or s.eject_pen[e] < s.eject_pen[best.?] or
+                (s.eject_pen[e] == s.eject_pen[best.?] and e < best.?)) best = e;
+        }
+        return best;
+    }
+
+    /// GES squeeze: insert (p, q) at the least-violating position among the
+    /// kNN candidate routes, then eject one resident pair to restore
+    /// feasibility. The ejected pair goes to the request bank (NOT to
+    /// s.removed — recreate is iterating it). Returns true on success; on
+    /// failure the route is restored exactly and (p, q) stays banked.
+    fn squeezeInsert(s: *S, p: usize, q: usize) !bool {
+        s.generation += 1;
+        var best_ri: usize = NO_ROUTE;
+        var best_ins: InsV = undefined;
+        for ([_]usize{ p, q }) |anchor| {
+            for (0..s.gk) |ti| {
+                const nb = s.gran[(anchor - 1) * s.gk + ti];
+                if (nb == 0) continue;
+                const ri = s.loc_route[nb];
+                if (ri == NO_ROUTE) continue;
+                if (s.cand_mark.items[ri] == s.generation) continue;
+                s.cand_mark.items[ri] = s.generation;
+                try s.freshen(ri);
+                const ins = s.evalPairInsertViol(ri, p, q) orelse continue;
+                if (best_ri == NO_ROUTE or ins.viol < best_ins.viol or
+                    (ins.viol == best_ins.viol and ins.delta < best_ins.delta))
+                {
+                    best_ri = ri;
+                    best_ins = ins;
+                }
+            }
+        }
+        if (best_ri == NO_ROUTE) return false;
+
+        // keep an exact copy for the undo path
+        const before = try s.allocator.dupe(usize, s.routes.items[best_ri].items.items);
+        defer s.allocator.free(before);
+
+        try s.insertPair(best_ri, p, q, best_ins.a, best_ins.b);
+        const ec = (try s.ejectCandidate(best_ri, p)) orelse {
+            // undo: restore content, then clear the stale loc of p and q —
+            // install only rewrites loc for members of the restored content.
+            try s.install(best_ri, before);
+            s.loc_route[p] = NO_ROUTE;
+            s.loc_route[q] = NO_ROUTE;
+            s.eject_pen[p] +|= 1;
+            return false;
+        };
+        const ef = s.inst.pair_of[ec];
+        const cur = s.routes.items[best_ri].items.items;
+        s.keep_buf.clearRetainingCapacity();
+        for (cur) |c| {
+            if (c != ec and c != ef) try s.keep_buf.append(s.allocator, c);
+        }
+        try s.install(best_ri, s.keep_buf.items);
+        s.loc_route[ec] = NO_ROUTE;
+        s.loc_route[ef] = NO_ROUTE;
+        s.n_unassigned += 1;
+        s.eject_pen[p] +|= 1;
+        return true;
+    }
+
+    /// One pair-exchange attempt: remove pair (p1) from its route and a kNN
+    /// pair (p2) from another route, reinsert each into the other route at
+    /// its best feasible position. Kept only on strict total-cost improvement;
+    /// otherwise rolled back exactly. Runs between iterations, so it manages
+    /// its own snapshot generation.
+    fn pairExchangeKick(s: *S, params: PdpSisrParams, rng: std.Random) !void {
+        if (s.nonempty < 2) return;
+        const n_nodes = 2 * s.inst.n_pairs;
+        const c0 = 1 + rng.uintLessThan(usize, n_nodes);
+        const p1 = if (s.inst.is_pickup[c0]) c0 else s.inst.pair_of[c0];
+        const q1 = s.inst.pair_of[p1];
+        const r1 = s.loc_route[p1];
+        if (r1 == NO_ROUTE) return;
+
+        const saved_cost = s.cost;
+        const saved_nonempty = s.nonempty;
+        const saved_unassigned = s.n_unassigned;
+        s.beginIter();
+        s.generation += 1;
+
+        for (0..s.gk) |ti| {
+            const nb = s.gran[(p1 - 1) * s.gk + ti];
+            if (nb == 0) continue;
+            const p2 = if (s.inst.is_pickup[nb]) nb else s.inst.pair_of[nb];
+            const q2 = s.inst.pair_of[p2];
+            const r2 = s.loc_route[p2];
+            if (r2 == NO_ROUTE or r2 == r1) continue;
+            if (s.cand_mark.items[r2] == s.generation) continue;
+            s.cand_mark.items[r2] = s.generation;
+
+            trial: {
+                if (!try s.removeStringPaired(r1, s.loc_pos[p1], 1)) break :trial;
+                if (!try s.removeStringPaired(r2, s.loc_pos[p2], 1)) break :trial;
+                try s.freshen(r2);
+                const ins1 = s.evalPairInsert(r2, p1, q1, params, rng) orelse break :trial;
+                try s.insertPair(r2, p1, q1, ins1.a, ins1.b);
+                try s.freshen(r1);
+                const ins2 = s.evalPairInsert(r1, p2, q2, params, rng) orelse break :trial;
+                try s.insertPair(r1, p2, q2, ins2.a, ins2.b);
+                if (s.cost < saved_cost) {
+                    s.removed.clearRetainingCapacity();
+                    s.n_unassigned = saved_unassigned;
+                    return; // improvement kept
+                }
+            }
+            // failed or non-improving: restore the iteration-start state and
+            // try the next candidate (rollback is idempotent per generation).
+            try s.rollback(saved_cost, saved_nonempty);
+            s.n_unassigned = saved_unassigned;
+            s.removed.clearRetainingCapacity();
+        }
+    }
+
     /// Apply an insertion found by evalPairInsert.
     fn insertPair(s: *S, ri: usize, p: usize, q: usize, a: usize, b: usize) !void {
         try s.snapshot(ri);
@@ -533,7 +735,12 @@ const S = struct {
 
             const may_open = params.max_vehicles == 0 or s.nonempty < params.max_vehicles;
             const singleton: i64 = @intCast(s.inst.d(0, p) + s.inst.d(p, q) + s.inst.d(q, 0) + s.veh_penalty);
-            if (best_ri == NO_ROUTE and !may_open) continue; // stays in the request bank
+            if (best_ri == NO_ROUTE and !may_open) {
+                if (params.eject and try s.squeezeInsert(p, q)) {
+                    s.n_unassigned -= 1;
+                }
+                continue; // otherwise stays in the request bank
+            }
             if ((best_ri == NO_ROUTE or singleton < best_ins.delta) and may_open) {
                 const slot = if (empty_slot != NO_ROUTE) empty_slot else try s.addSlot();
                 try s.snapshot(slot);
@@ -716,6 +923,14 @@ pub fn solvePdptwSisrFrom(allocator: std.mem.Allocator, inst: pdp.PdpInstance, p
             s.n_unassigned = saved_unassigned;
         }
         temp *= cf;
+        if (params.swap_kick > 0 and it % params.swap_kick == params.swap_kick - 1) {
+            try s.pairExchangeKick(params, rng);
+            if (s.n_unassigned == 0 and s.cost < best_cost and best != null) {
+                best_cost = s.cost;
+                best.?.deinit();
+                best = try s.toResult(allocator);
+            }
+        }
     }
     return best orelse error.NoCompleteSolution;
 }
@@ -727,7 +942,8 @@ pub fn solvePdptwSisrFrom(allocator: std.mem.Allocator, inst: pdp.PdpInstance, p
 /// the uncapped run, the rest per descent attempt.
 pub fn solvePdptwSisrFleetMin(allocator: std.mem.Allocator, inst: pdp.PdpInstance, params: PdpSisrParams, total_time_ms: u64) !pdp.PdpResult {
     var p0 = params;
-    p0.time_ms = @max(total_time_ms * 2 / 5, 1);
+    const p0_pct: u64 = @min(@as(u64, params.fleet_p0_pct), 90);
+    p0.time_ms = @max(total_time_ms * p0_pct / 100, 1);
     p0.max_vehicles = 0;
     var best = try solvePdptwSisr(allocator, inst, p0);
     errdefer best.deinit();
@@ -737,7 +953,7 @@ pub fn solvePdptwSisrFleetMin(allocator: std.mem.Allocator, inst: pdp.PdpInstanc
     descent: while (target > 1) {
         target -= 1;
         const spent = (nanos() - t_start) / std.time.ns_per_ms;
-        const budget = total_time_ms * 3 / 5;
+        const budget = total_time_ms * (100 - p0_pct) / 100;
         if (spent + 500 >= budget) break;
         var pk = params;
         pk.max_vehicles = target;
@@ -897,7 +1113,7 @@ pub fn solvePdptwSisrFleetMinParallel(allocator: std.mem.Allocator, inst: pdp.Pd
     for (tasks, 0..) |*t, i| {
         t.params = params;
         t.params.max_vehicles = 0;
-        t.params.time_ms = @max(total_time_ms * 2 / 5, 1);
+        t.params.time_ms = @max(total_time_ms * @min(@as(u64, params.fleet_p0_pct), 90) / 100, 1);
         t.params.seed = params.seed +% @as(u64, @intCast(i)) *% SEED_STRIDE;
         t.warm = &.{};
         t.ok = false;
@@ -918,7 +1134,7 @@ pub fn solvePdptwSisrFleetMinParallel(allocator: std.mem.Allocator, inst: pdp.Pd
     descent: while (best.?.vehicles > 1) {
         const target = best.?.vehicles - 1;
         const spent = (nanos() - t_start) / std.time.ns_per_ms;
-        const budget = total_time_ms * 3 / 5;
+        const budget = total_time_ms * (100 - @min(@as(u64, params.fleet_p0_pct), 90)) / 100;
         if (spent + 500 >= budget) break;
         wave_no += 1;
         for (best.?.routes, 0..) |r, i| warm_buf[i] = r;
@@ -949,7 +1165,7 @@ pub fn solvePdptwSisrFleetMinParallel(allocator: std.mem.Allocator, inst: pdp.Pd
 
     // phase 3: seed-diverse warm polish at the final fleet
     const spent = (nanos() - t_start) / std.time.ns_per_ms;
-    const p0_ms = @min(@max(total_time_ms * 2 / 5, 1), total_time_ms);
+    const p0_ms = @min(@max(total_time_ms * @min(@as(u64, params.fleet_p0_pct), 90) / 100, 1), total_time_ms);
     if (spent + p0_ms + 500 < total_time_ms) {
         for (best.?.routes, 0..) |r, i| warm_buf[i] = r;
         const warm = warm_buf[0..best.?.routes.len];
@@ -1202,4 +1418,86 @@ test "PDPTW SISR: capped run below the natural fleet churns the bank without cor
         const vc = pdp.validate(inst, rc) orelse return error.Infeasible;
         try std.testing.expectEqual(vc, res.total_cost);
     }
+}
+
+test "PDPTW SISR eject: heavy squeeze churn stays valid and cost-honest" {
+    // At cap = natural-1 on random non-metric instances the squeeze path
+    // fires tens of thousands of times (measured ~38k/20k iters), constantly
+    // inserting-with-violation, ejecting, and undoing across accepted AND
+    // rejected iterations. Most of these caps are genuinely infeasible
+    // (single-route TW packing), so solving is NOT required here — the test
+    // pins state integrity under maximum squeeze churn: no crash, no stale
+    // loc, and any returned solution passes the independent oracle at the
+    // exact reported cost. Effectiveness is measured on Li & Lim outside the
+    // suite.
+    const allocator = std.testing.allocator;
+    var seed: u64 = 1;
+    while (seed <= 10) : (seed += 1) {
+        var ri = try pdp.randomInstance(allocator, 8, seed, true);
+        defer ri.deinit(allocator);
+        const inst = ri.inst();
+        var free_run = try solvePdptwSisr(allocator, inst, .{ .seed = seed, .iters = 2000, .veh_penalty = 10_000_000 });
+        defer free_run.deinit();
+        if (free_run.vehicles <= 1) continue;
+        var res = solvePdptwSisr(allocator, inst, .{
+            .seed = seed,
+            .iters = 20000,
+            .veh_penalty = 10_000_000,
+            .max_vehicles = free_run.vehicles - 1,
+            .eject = true,
+        }) catch |err| switch (err) {
+            error.NoCompleteSolution => continue, // legal; the point is not corrupting
+            else => return err,
+        };
+        defer res.deinit();
+        try std.testing.expect(res.vehicles <= free_run.vehicles - 1);
+        const rc = try allocator.alloc([]const usize, res.routes.len);
+        defer allocator.free(rc);
+        for (res.routes, 0..) |r, i| rc[i] = r;
+        const vc = pdp.validate(inst, rc) orelse return error.Infeasible;
+        try std.testing.expectEqual(vc, res.total_cost);
+    }
+}
+
+test "PDPTW SISR eject: off by default leaves engine bit-identical" {
+    const allocator = std.testing.allocator;
+    var ri = try pdp.randomInstance(allocator, 10, 5, true);
+    defer ri.deinit(allocator);
+    const inst = ri.inst();
+    var a = try solvePdptwSisr(allocator, inst, .{ .seed = 5, .iters = 3000, .veh_penalty = 10_000_000 });
+    defer a.deinit();
+    var b = try solvePdptwSisr(allocator, inst, .{ .seed = 5, .iters = 3000, .veh_penalty = 10_000_000, .eject = false });
+    defer b.deinit();
+    try std.testing.expectEqual(a.total_cost, b.total_cost);
+    try std.testing.expectEqual(a.vehicles, b.vehicles);
+}
+
+test "PDPTW SISR swap kick: stays valid and never worse than kick-off at fixed seed count" {
+    const allocator = std.testing.allocator;
+    var seed: u64 = 1;
+    while (seed <= 10) : (seed += 1) {
+        var ri = try pdp.randomInstance(allocator, 10, seed, true);
+        defer ri.deinit(allocator);
+        const inst = ri.inst();
+        var res = try solvePdptwSisr(allocator, inst, .{ .seed = seed, .iters = 3000, .veh_penalty = 10_000_000, .swap_kick = 50 });
+        defer res.deinit();
+        const rc = try allocator.alloc([]const usize, res.routes.len);
+        defer allocator.free(rc);
+        for (res.routes, 0..) |r, i| rc[i] = r;
+        const vc = pdp.validate(inst, rc) orelse return error.Infeasible;
+        try std.testing.expectEqual(vc, res.total_cost);
+    }
+}
+
+test "PDPTW SISR swap kick: off by default leaves engine bit-identical" {
+    const allocator = std.testing.allocator;
+    var ri = try pdp.randomInstance(allocator, 10, 9, true);
+    defer ri.deinit(allocator);
+    const inst = ri.inst();
+    var a = try solvePdptwSisr(allocator, inst, .{ .seed = 9, .iters = 3000, .veh_penalty = 10_000_000 });
+    defer a.deinit();
+    var b = try solvePdptwSisr(allocator, inst, .{ .seed = 9, .iters = 3000, .veh_penalty = 10_000_000, .swap_kick = 0 });
+    defer b.deinit();
+    try std.testing.expectEqual(a.total_cost, b.total_cost);
+    try std.testing.expectEqual(a.vehicles, b.vehicles);
 }

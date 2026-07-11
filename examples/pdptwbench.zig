@@ -37,6 +37,9 @@ pub fn main(init: std.process.Init) !void {
     const blink = try std.fmt.parseFloat(f64, env.get("PB_BLINK") orelse "0.01");
     const n_threads = try std.fmt.parseInt(usize, env.get("PB_THREADS") orelse "1", 10); // >1: parallel fleet-min waves
     const gran_gaps = try std.fmt.parseInt(u2, env.get("PB_GRAN") orelse "0", 10); // granular gaps mask: 1 pickup, 2 dropoff, 3 both
+    const eject = std.mem.eql(u8, env.get("PB_EJECT") orelse "0", "1"); // GES squeeze fallback in capped runs
+    const swap_kick = try std.fmt.parseInt(usize, env.get("PB_SWAP") orelse "0", 10); // pair-exchange kick period (0 = off)
+    const p0_pct = try std.fmt.parseInt(u8, env.get("PB_P0") orelse "40", 10); // uncapped phase % of fleet-min budget
 
     std.debug.print("instance,n_pairs,bks_veh,veh,bks_dist,dist,gap_pct,ms\n", .{});
     var sum_gap: f64 = 0;
@@ -81,6 +84,9 @@ pub fn main(init: std.process.Init) !void {
             .t0_factor = t0f,
             .blink = blink,
             .gran_gaps = gran_gaps,
+            .eject = eject,
+            .swap_kick = swap_kick,
+            .fleet_p0_pct = p0_pct,
         };
         var res = if (fleet_min and n_threads > 1)
             try commiv.internal.pdptw_sisr.solvePdptwSisrFleetMinParallel(allocator, inst, base_params, time_ms, n_threads)
