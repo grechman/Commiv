@@ -318,6 +318,18 @@ is_pickup, demand_signed, ready, due, service }`; returns `PdpResult`
   (lc1_x_5/6/7), 3 real (4-15%) on long-route lr2 200-series cells. Anytime profile:
   at one-sixth of the wall commiv already holds nearly all its fleet results and is
   within 0.2-1.3% of its own final distance.
+
+  Two opt-in levers on top (measured, off by default): `PB_GRAN=2` gates dropoff-gap
+  evaluation to kNN neighbourhoods on long routes during uncapped search (auto-off
+  above 8 routes, under 24 nodes, or while a fleet cap is active) — on the 200-series
+  it is fleet 2W/0L and distance 8W/0L vs the baseline (lr2_2_3 16.75% -> exact BKS,
+  lr2_2_8 record fleet cracked; mean gap at record fleet 1.92% -> 0.91%), recommended
+  at n>=200 only (one seed-marginal lr211 fleet loss at n=100). `PB_THREADS=3` runs
+  the fleet-min descent as parallel waves (`solvePdptwSisrFleetMinParallel`: warm +
+  cold + deeper-cap probe per wave, seed-diverse uncapped and polish phases) — on the
+  six hardest n=1000 cells it saves 1-2 vehicles on four of six at identical wall.
+  The snapshot-rollback undo journal was profiled and measured dead (rollback+snapshot
+  = 0.3-2.3% of wall; the insertion scan is 46-88%).
 - `solvePdptwSisrFleetMin(allocator, inst, params, total_time_ms)` — vehicle-count descent
   (uncapped run, then capped request-bank attempts, warm + cold, terminal polish).
 - `solvePdptw(allocator, inst, PdpParams)` — correctness baseline (pair insertion +
