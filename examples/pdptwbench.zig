@@ -41,8 +41,9 @@ pub fn main(init: std.process.Init) !void {
     const swap_kick = try std.fmt.parseInt(usize, env.get("PB_SWAP") orelse "0", 10); // pair-exchange kick period (0 = off)
     const p0_pct = try std.fmt.parseInt(u8, env.get("PB_P0") orelse "40", 10); // uncapped phase % of fleet-min budget
     const pin_mode = std.mem.eql(u8, env.get("PB_PIN") orelse "0", "1"); // pinned-fleet driver: pin = PB_CAP, or BKS fleet if unset
+    const time_pen = try std.fmt.parseInt(u64, env.get("PB_TIMEPEN") orelse "0", 10); // money mode: cost per time unit of route duration
 
-    std.debug.print("instance,n_pairs,bks_veh,veh,bks_dist,dist,gap_pct,ms\n", .{});
+    std.debug.print("instance,n_pairs,bks_veh,veh,bks_dist,dist,gap_pct,ms,dur,wait\n", .{});
     var sum_gap: f64 = 0;
     var count: usize = 0;
     var veh_wins: usize = 0;
@@ -88,6 +89,7 @@ pub fn main(init: std.process.Init) !void {
             .eject = eject,
             .swap_kick = swap_kick,
             .fleet_p0_pct = p0_pct,
+            .time_penalty = time_pen,
         };
         var res = if (pin_mode) blk: {
             const pin: usize = if (cap > 0) cap else bks_veh;
@@ -129,9 +131,19 @@ pub fn main(init: std.process.Init) !void {
         if (res.vehicles < bks_veh) veh_wins += 1 else if (res.vehicles == bks_veh) veh_ties += 1 else veh_losses += 1;
         sum_gap += gap;
         count += 1;
-        std.debug.print("{s},{d},{d},{d},{d:.3},{d:.3},{d:.2},{d}\n", .{
-            name,                                       inst.n_pairs,                                     bks_veh, res.vehicles,
-            @as(f64, @floatFromInt(bks_dist)) / 1000.0, @as(f64, @floatFromInt(res.total_cost)) / 1000.0, gap,     ms,
+        // duration = departure-time-optimized (Tws algebra); wait = the part
+        // of duration that is neither driving nor service
+        var dur_total: u64 = 0;
+        var service_total: u64 = 0;
+        for (res.routes) |r| {
+            dur_total += commiv.internal.pdptw_sisr.routeDuration(inst, r);
+            for (r) |c| service_total += inst.service[c];
+        }
+        const wait_total = dur_total - res.total_cost - service_total;
+        std.debug.print("{s},{d},{d},{d},{d:.3},{d:.3},{d:.2},{d},{d:.3},{d:.3}\n", .{
+            name,                                        inst.n_pairs,                                     bks_veh, res.vehicles,
+            @as(f64, @floatFromInt(bks_dist)) / 1000.0,  @as(f64, @floatFromInt(res.total_cost)) / 1000.0, gap,     ms,
+            @as(f64, @floatFromInt(dur_total)) / 1000.0, @as(f64, @floatFromInt(wait_total)) / 1000.0,
         });
     }
     if (count > 0) {

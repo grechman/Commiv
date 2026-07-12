@@ -66,6 +66,13 @@ pub const PdpSisrParams = struct {
     // clamped as before. The SISR paper front-loads route minimization; lower
     // values hand the descent more time.
     fleet_p0_pct: u8 = 40,
+    // Money objective: cost per matrix-time-unit of route DURATION (travel +
+    // service + unavoidable waiting) added to acceptance cost and insertion
+    // deltas, alongside distance and veh_penalty. Duration comes from the
+    // Tws algebra, so each route is charged its departure-time-optimized
+    // schedule (Savelsbergh shifting is inherent). 0 = off (pure
+    // distance + veh_penalty, bit-identical to the historic objective).
+    time_penalty: u64 = 0,
 };
 
 pub const NbrKey = enum { sum, min, out };
@@ -97,11 +104,29 @@ const Tws = struct {
     }
 };
 
+/// Full-route duration (depot -> nodes -> depot) under the Tws algebra:
+/// travel + service + unavoidable waiting at the duration-minimizing
+/// departure time. Only meaningful for TW-feasible sequences; transient
+/// infeasible installs (squeeze) get a consistent bookkeeping value that
+/// snapshot rollback restores exactly.
+pub fn routeDuration(inst: pdp.PdpInstance, nodes: []const usize) u64 {
+    if (nodes.len == 0) return 0;
+    var acc = Tws.depotNode(inst);
+    var prev: usize = 0;
+    for (nodes) |c| {
+        acc = Tws.merge(acc, @intCast(inst.d(prev, c)), Tws.client(inst, c));
+        prev = c;
+    }
+    acc = Tws.merge(acc, @intCast(inst.d(prev, 0)), Tws.depotNode(inst));
+    return @intCast(@max(acc.dur, 0));
+}
+
 const NO_ROUTE = std.math.maxInt(usize);
 
 const Route = struct {
     items: std.ArrayList(usize) = .empty,
     dist: u64 = 0, // arc sum depot -> items -> depot (0 when empty)
+    dur: u64 = 0, // full-route Tws duration; maintained only when time_penalty > 0
     pre_t: std.ArrayList(Tws) = .empty, // pre_t[i] = depot..items[i-1]; len items+1
     suf_t: std.ArrayList(Tws) = .empty, // suf_t[i] = items[i]..depot;   len items+1
     pre_l: std.ArrayList(pdp.Lseg) = .empty,
@@ -121,15 +146,16 @@ const Route = struct {
     }
 };
 
-const Snap = struct { ri: usize, items: []usize, dist: u64 };
+const Snap = struct { ri: usize, items: []usize, dist: u64, dur: u64 };
 
 const S = struct {
     allocator: std.mem.Allocator,
     inst: pdp.PdpInstance,
     routes: std.ArrayList(Route) = .empty,
     nonempty: usize = 0,
-    cost: u64 = 0, // total dist + veh_penalty * nonempty
+    cost: u64 = 0, // total dist + veh_penalty * nonempty + time_penalty * total dur
     veh_penalty: u64,
+    time_penalty: u64,
     gran: []const usize,
     gk: usize,
     loc_route: []usize, // node -> route index (NO_ROUTE when removed)
@@ -155,12 +181,13 @@ const S = struct {
     // Granular pruning is safe there (see the gran gate in evalPairInsert).
     iter_start_complete: bool = false,
 
-    fn init(allocator: std.mem.Allocator, inst: pdp.PdpInstance, veh_penalty: u64, gran: []const usize, gk: usize) !S {
+    fn init(allocator: std.mem.Allocator, inst: pdp.PdpInstance, veh_penalty: u64, time_penalty: u64, gran: []const usize, gk: usize) !S {
         const dim = inst.dim();
         const s = S{
             .allocator = allocator,
             .inst = inst,
             .veh_penalty = veh_penalty,
+            .time_penalty = time_penalty,
             .gran = gran,
             .gk = gk,
             .loc_route = try allocator.alloc(usize, dim),
@@ -222,6 +249,7 @@ const S = struct {
             .ri = ri,
             .items = try s.allocator.dupe(usize, r.items.items),
             .dist = r.dist,
+            .dur = r.dur,
         });
     }
 
@@ -230,16 +258,18 @@ const S = struct {
         const r = &s.routes.items[ri];
         const was_empty = r.items.items.len == 0;
         const old_dist = r.dist;
+        const old_dur = r.dur;
         r.items.clearRetainingCapacity();
         try r.items.appendSlice(s.allocator, nodes);
         r.dist = arcSum(s.inst, nodes);
+        r.dur = if (s.time_penalty > 0) routeDuration(s.inst, nodes) else 0;
         r.dirty = true;
         for (nodes, 0..) |c, p| {
             s.loc_route[c] = ri;
             s.loc_pos[c] = p;
         }
         const now_empty = nodes.len == 0;
-        s.cost = s.cost + r.dist - old_dist;
+        s.cost = s.cost + r.dist + s.time_penalty * r.dur - old_dist - s.time_penalty * old_dur;
         if (was_empty and !now_empty) {
             s.nonempty += 1;
             s.cost += s.veh_penalty;
@@ -273,6 +303,7 @@ const S = struct {
             r.items.clearRetainingCapacity();
             try r.items.appendSlice(s.allocator, sn.items);
             r.dist = sn.dist;
+            r.dur = sn.dur;
             r.dirty = true;
             if (!was_empty and sn.items.len == 0 and sn.ri < s.min_empty_hint) s.min_empty_hint = sn.ri;
         }
@@ -441,7 +472,9 @@ const S = struct {
                     const f_l = pdp.Lseg.merge(pdp.Lseg.merge(m_l, q_l), r.suf_l.items[b]);
                     if (!(f_l.lo >= 0 and f_l.hi <= inst.capacity)) break :blk;
                     const new_dist = m_d + inst.d(last, q) + inst.d(q, nxt) + r.tail_d.items[b];
-                    const delta = @as(i64, @intCast(new_dist)) - @as(i64, @intCast(r.dist));
+                    var delta = @as(i64, @intCast(new_dist)) - @as(i64, @intCast(r.dist));
+                    if (s.time_penalty > 0)
+                        delta += @as(i64, @intCast(s.time_penalty)) * (f2.dur - @as(i64, @intCast(r.dur)));
                     if (best == null or delta < best.?.delta) best = .{ .a = a, .b = b, .delta = delta };
                 }
                 if (b < L) {
@@ -741,7 +774,9 @@ const S = struct {
             }
 
             const may_open = params.max_vehicles == 0 or s.nonempty < params.max_vehicles;
-            const singleton: i64 = @intCast(s.inst.d(0, p) + s.inst.d(p, q) + s.inst.d(q, 0) + s.veh_penalty);
+            var singleton: i64 = @intCast(s.inst.d(0, p) + s.inst.d(p, q) + s.inst.d(q, 0) + s.veh_penalty);
+            if (s.time_penalty > 0)
+                singleton += @intCast(s.time_penalty * routeDuration(s.inst, &[_]usize{ p, q }));
             if (best_ri == NO_ROUTE and !may_open) {
                 if (params.eject and try s.squeezeInsert(p, q)) {
                     s.n_unassigned -= 1;
@@ -862,7 +897,7 @@ pub fn solvePdptwSisrFrom(allocator: std.mem.Allocator, inst: pdp.PdpInstance, p
     const gran = try buildNeighbors(allocator, inst, gk, params.nbr_key);
     defer allocator.free(gran);
 
-    var s = try S.init(allocator, inst, params.veh_penalty, gran, gk);
+    var s = try S.init(allocator, inst, params.veh_penalty, params.time_penalty, gran, gk);
     defer s.deinit();
     for (seed_sol.items) |r| {
         if (r.items.len == 0) continue;
@@ -1699,6 +1734,43 @@ test "PDPTW SISR gran under cap: gran off stays bit-identical under cap" {
     var a = try solvePdptwSisr(allocator, inst, .{ .seed = 3, .iters = 4000, .veh_penalty = 10_000_000, .max_vehicles = free_run.vehicles });
     defer a.deinit();
     var b = try solvePdptwSisr(allocator, inst, .{ .seed = 3, .iters = 4000, .veh_penalty = 10_000_000, .max_vehicles = free_run.vehicles, .gran_gaps = 0 });
+    defer b.deinit();
+    try std.testing.expectEqual(a.total_cost, b.total_cost);
+    try std.testing.expectEqual(a.vehicles, b.vehicles);
+}
+
+test "PDPTW SISR time penalty: money mode is valid and deterministic" {
+    const allocator = std.testing.allocator;
+    var ri = try pdp.randomInstance(allocator, 10, 5, true);
+    defer ri.deinit(allocator);
+    const inst = ri.inst();
+    var a = try solvePdptwSisr(allocator, inst, .{ .seed = 5, .iters = 4000, .veh_penalty = 10_000_000, .time_penalty = 500 });
+    defer a.deinit();
+    const rc = try allocator.alloc([]const usize, a.routes.len);
+    defer allocator.free(rc);
+    for (a.routes, 0..) |r, i| rc[i] = r;
+    const vc = pdp.validate(inst, rc) orelse return error.Infeasible;
+    try std.testing.expectEqual(vc, a.total_cost);
+    // duration of a real route is at least its service content
+    var dur: u64 = 0;
+    for (a.routes) |r| dur += routeDuration(inst, r);
+    var service: u64 = 0;
+    for (1..inst.dim()) |c| service += inst.service[c];
+    try std.testing.expect(dur >= service);
+    var b = try solvePdptwSisr(allocator, inst, .{ .seed = 5, .iters = 4000, .veh_penalty = 10_000_000, .time_penalty = 500 });
+    defer b.deinit();
+    try std.testing.expectEqual(a.total_cost, b.total_cost);
+    try std.testing.expectEqual(a.vehicles, b.vehicles);
+}
+
+test "PDPTW SISR time penalty: off is bit-identical to default" {
+    const allocator = std.testing.allocator;
+    var ri = try pdp.randomInstance(allocator, 10, 11, true);
+    defer ri.deinit(allocator);
+    const inst = ri.inst();
+    var a = try solvePdptwSisr(allocator, inst, .{ .seed = 11, .iters = 3000, .veh_penalty = 10_000_000 });
+    defer a.deinit();
+    var b = try solvePdptwSisr(allocator, inst, .{ .seed = 11, .iters = 3000, .veh_penalty = 10_000_000, .time_penalty = 0 });
     defer b.deinit();
     try std.testing.expectEqual(a.total_cost, b.total_cost);
     try std.testing.expectEqual(a.vehicles, b.vehicles);
