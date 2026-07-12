@@ -341,8 +341,25 @@ is_pickup, demand_signed, ready, due, service }`; returns `PdpResult`
     loading (15%) measured a wash on hard n=1000 cells; default 40.
   The snapshot-rollback undo journal was profiled and measured dead (rollback+snapshot
   = 0.3-2.3% of wall; the insertion scan is 46-88%).
+
+  **Money objective** (`time_penalty`, `PB_TIMEPEN`): charge each route's *duration*
+  (driving + service + unavoidable waiting, at the departure-time-optimized schedule —
+  the time-window algebra computes it natively) on top of distance and the per-vehicle
+  cost. This turns the objective into real operating cost:
+  `A·vehicles + B·distance + C·hours`, with the engine trading fuel for driver salary
+  wherever waiting exists. Measured at 30 s on Li & Lim 200-series (`PB_TIMEPEN=1`,
+  time unit priced like a distance unit): lr2_2_1 gives up an exact-best-known distance
+  (+10%) to cut paid waiting 24% (4041 -> 3058) — total money **down 153 units**;
+  lr1_2_10 cuts waiting 56% for +1.5% distance. Off (`time_penalty = 0`, the default)
+  the engine is bit-identical to the historic vehicles-then-distance objective.
+  Notably, VROOM cannot price waiting time at all (their open issue #1130).
 - `solvePdptwSisrFleetMin(allocator, inst, params, total_time_ms)` — vehicle-count descent
   (uncapped run, then capped request-bank attempts, warm + cold, terminal polish).
+- `solvePdptwSisrPinned(allocator, inst, params, total_time_ms, pin)` — enterprise
+  pinned-fleet driver: best solution using at most `pin` vehicles, whole budget on that
+  goal (uncapped warm-up, retrying descent, all remaining time polishing at the pin).
+  On the hardest long-route cells this halves the distance gap vs a cold capped run
+  (lr2_2_7 22.8% -> 5.0%) and solves cells where a cold capped run finds nothing.
 - `solvePdptw(allocator, inst, PdpParams)` — correctness baseline (pair insertion +
   pair relocate, brute-force-verified); use the SISR engine for real work.
 - `validatePdptw(inst, routes) ?u64` — independent pairing + precedence + capacity-prefix +
