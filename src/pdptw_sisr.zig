@@ -150,6 +150,10 @@ const S = struct {
     nbr_mark_q: []u64,
     nbr_gen: u64 = 0,
     eject_pen: []u32, // pickup id -> times it forced a squeeze (GES guidance)
+    // True when the current iteration began with an empty request bank —
+    // i.e. a capped run is in pure distance-polish mode, not consolidation.
+    // Granular pruning is safe there (see the gran gate in evalPairInsert).
+    iter_start_complete: bool = false,
 
     fn init(allocator: std.mem.Allocator, inst: pdp.PdpInstance, veh_penalty: u64, gran: []const usize, gk: usize) !S {
         const dim = inst.dim();
@@ -389,10 +393,13 @@ const S = struct {
         // versa). If the route holds fewer than 4 marked nodes the gate is
         // dropped for this route: too sparse a mark set cannot consolidate
         // (measured: n=1000 lr2 fleet blows 19 -> 30 without the fallback).
-        // Never gate while a fleet cap is active: capped repacking (descent
-        // attempts, polish) needs the awkward insertions the gate skips
-        // (measured: lrc2 200-series loses a vehicle on 2/7 cells otherwise).
-        var granular = params.gran_gaps != 0 and params.max_vehicles == 0 and
+        // Never gate while a fleet cap is active AND the iteration started
+        // with a nonempty request bank: capped consolidation needs the
+        // awkward insertions the gate skips (measured: lrc2 200-series loses
+        // a vehicle on 2/7 cells otherwise). Capped-complete iterations
+        // (bank empty at iteration start) are pure distance polish — the
+        // same regime as uncapped, where gating is the measured win.
+        var granular = params.gran_gaps != 0 and (params.max_vehicles == 0 or s.iter_start_complete) and
             L >= params.gran_gap_min_len and s.nonempty <= params.gran_max_routes;
         var genp: u64 = 0;
         if (granular) {
@@ -907,6 +914,7 @@ pub fn solvePdptwSisrFrom(allocator: std.mem.Allocator, inst: pdp.PdpInstance, p
         const saved_nonempty = s.nonempty;
         const saved_unassigned = s.n_unassigned;
         s.beginIter();
+        s.iter_start_complete = s.n_unassigned == 0;
         try s.ruin(params, rng);
         try s.recreate(params, rng);
         const eff = s.cost + UNASSIGNED_PEN * @as(u64, @intCast(s.n_unassigned));
@@ -1026,7 +1034,7 @@ pub fn solvePdptwSisrFleetMin(allocator: std.mem.Allocator, inst: pdp.PdpInstanc
 pub fn solvePdptwSisrPinned(allocator: std.mem.Allocator, inst: pdp.PdpInstance, params: PdpSisrParams, total_time_ms: u64, pin: usize) !pdp.PdpResult {
     const t_start = nanos();
     var p0 = params;
-    p0.time_ms = @max(total_time_ms * @min(@as(u64, params.fleet_p0_pct), 90) / 100, 1);
+    p0.time_ms = @max(total_time_ms * 25 / 100, 1);
     p0.max_vehicles = 0;
     var best = try solvePdptwSisr(allocator, inst, p0);
     errdefer best.deinit();
@@ -1034,10 +1042,10 @@ pub fn solvePdptwSisrPinned(allocator: std.mem.Allocator, inst: pdp.PdpInstance,
     // Descent toward pin. Unlike fleet-min, a failed target is retried with a
     // fresh seed while budget remains: reaching pin is the whole objective,
     // so giving up on the first failure would waste the rest of the budget.
-    // Half the time left to the 85% mark per attempt (half warm, half cold):
-    // attempt SIZE beats retry count for hard packing (measured: a cold run
-    // that fails in 27 s can succeed in 120 s), so retries shrink
-    // geometrically rather than staying small.
+    // A quarter of the time left to the 85% mark per attempt (half warm, half
+    // cold): measured against half-of-remaining attempts, MORE retries beat
+    // BIGGER attempts on giant-route pins (they are seed-luck-dominated —
+    // halving lost lrc2_2_10's pin outright and cost 1.7% on lr2_6_4).
     var seed = params.seed;
     const descent_limit = total_time_ms * 85 / 100;
     while (best.vehicles > pin and best.vehicles > 1) {
@@ -1050,7 +1058,7 @@ pub fn solvePdptwSisrPinned(allocator: std.mem.Allocator, inst: pdp.PdpInstance,
         pk.cbar = @max(pk.cbar, 16.0);
         pk.l_max = @max(pk.l_max, 16);
         pk.eject = true;
-        pk.time_ms = @max((descent_limit - spent) / 2, 2000) / 2;
+        pk.time_ms = @max((descent_limit - spent) / 4, 1000) / 2;
         const warm = try allocator.alloc([]const usize, best.routes.len);
         defer allocator.free(warm);
         for (best.routes, 0..) |r, i| warm[i] = r;
@@ -1652,6 +1660,45 @@ test "PDPTW SISR pinned: deterministic for a fixed seed" {
     var a = try solvePdptwSisrPinned(allocator, inst, params, 2000, free_run.vehicles);
     defer a.deinit();
     var b = try solvePdptwSisrPinned(allocator, inst, params, 2000, free_run.vehicles);
+    defer b.deinit();
+    try std.testing.expectEqual(a.total_cost, b.total_cost);
+    try std.testing.expectEqual(a.vehicles, b.vehicles);
+}
+
+test "PDPTW SISR gran under cap: capped complete run stays valid and cost-honest" {
+    const allocator = std.testing.allocator;
+    var ri = try pdp.randomInstance(allocator, 10, 3, true);
+    defer ri.deinit(allocator);
+    const inst = ri.inst();
+    var free_run = try solvePdptwSisr(allocator, inst, .{ .seed = 3, .iters = 2000, .veh_penalty = 10_000_000 });
+    defer free_run.deinit();
+    var res = try solvePdptwSisr(allocator, inst, .{
+        .seed = 3,
+        .iters = 4000,
+        .veh_penalty = 10_000_000,
+        .max_vehicles = free_run.vehicles,
+        .gran_gaps = 2,
+        .eject = true,
+    });
+    defer res.deinit();
+    try std.testing.expect(res.vehicles <= free_run.vehicles);
+    const rc = try allocator.alloc([]const usize, res.routes.len);
+    defer allocator.free(rc);
+    for (res.routes, 0..) |r, i| rc[i] = r;
+    const vc = pdp.validate(inst, rc) orelse return error.Infeasible;
+    try std.testing.expectEqual(vc, res.total_cost);
+}
+
+test "PDPTW SISR gran under cap: gran off stays bit-identical under cap" {
+    const allocator = std.testing.allocator;
+    var ri = try pdp.randomInstance(allocator, 10, 3, true);
+    defer ri.deinit(allocator);
+    const inst = ri.inst();
+    var free_run = try solvePdptwSisr(allocator, inst, .{ .seed = 3, .iters = 2000, .veh_penalty = 10_000_000 });
+    defer free_run.deinit();
+    var a = try solvePdptwSisr(allocator, inst, .{ .seed = 3, .iters = 4000, .veh_penalty = 10_000_000, .max_vehicles = free_run.vehicles });
+    defer a.deinit();
+    var b = try solvePdptwSisr(allocator, inst, .{ .seed = 3, .iters = 4000, .veh_penalty = 10_000_000, .max_vehicles = free_run.vehicles, .gran_gaps = 0 });
     defer b.deinit();
     try std.testing.expectEqual(a.total_cost, b.total_cost);
     try std.testing.expectEqual(a.vehicles, b.vehicles);
