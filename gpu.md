@@ -1,8 +1,14 @@
 # GPU acceleration lever — task spec
 
-Status: NOT STARTED. Needs hardware (CUDA/ROCm device) not present in the dev env, so
-it could not be built or measured here. This is a self-contained spec for a developer
-with a GPU box.
+Status: **MEASURED AND CLOSED (NO-GO), 2026-07-13.** Both kernels below were gated on
+a GTX 1660 Ti (WSL2, CUDA 12.6) against the Ryzen 2600X's 12 threads and failed:
+batched move-delta = 0.11x at n=1001 (only 1.6-4x at n>=5000 dense sweeps, a regime
+the DLQ-sparse engine deliberately avoids); massively-parallel chains = 0.55x
+aggregate at 1536 chains, per-chain 0.4-2.6% of a CPU core (annealed SISR needs
+depth, not width — measured). Full evidence, tables, and repro:
+`tools/gpu-probe/GPU-REPORT.md` (+ the two .cu benchmarks alongside). Do not reopen
+on consumer hardware; the conditions that could change the answer are listed in the
+report. Original spec kept below for reference.
 
 ## Why GPU could help (the mathematical case)
 
