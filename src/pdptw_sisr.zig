@@ -152,6 +152,7 @@ const S = struct {
     allocator: std.mem.Allocator,
     inst: pdp.PdpInstance,
     routes: std.ArrayList(Route) = .empty,
+    lock: std.ArrayList(usize) = .empty, // per-route locked leading positions (0 = unlocked)
     nonempty: usize = 0,
     cost: u64 = 0, // total dist + veh_penalty * nonempty + time_penalty * total dur
     veh_penalty: u64,
@@ -209,6 +210,7 @@ const S = struct {
     fn deinit(s: *S) void {
         for (s.routes.items) |*r| r.deinit(s.allocator);
         s.routes.deinit(s.allocator);
+        s.lock.deinit(s.allocator);
         s.allocator.free(s.loc_route);
         s.allocator.free(s.loc_pos);
         s.allocator.free(s.drop_buf);
@@ -234,10 +236,18 @@ const S = struct {
 
     fn addSlot(s: *S) !usize {
         try s.routes.append(s.allocator, .{});
+        try s.lock.append(s.allocator, 0);
         try s.cand_mark.append(s.allocator, 0);
         try s.ruin_mark.append(s.allocator, 0);
         try s.snap_mark.append(s.allocator, 0);
         return s.routes.items.len - 1;
+    }
+
+    /// Locked leading positions of route `ri` (dispatch mode); set once before
+    /// the loop and never changed. Rollback restores route CONTENT, which
+    /// always preserves the locked prefix because no mutation may touch it.
+    fn lockOf(s: *const S, ri: usize) usize {
+        return if (ri < s.lock.items.len) s.lock.items[ri] else 0;
     }
 
     /// Record route `ri`'s pre-iteration content once per iteration.
@@ -370,9 +380,17 @@ const S = struct {
     /// a removed node, IF the remainder stays TW-feasible. Removed pairs are
     /// appended to s.removed (pickup id once each). Returns true if removed.
     fn removeStringPaired(s: *S, ri: usize, start: usize, l: usize) !bool {
+        const lk = s.lockOf(ri);
+        if (start < lk) return false;
         const r = &s.routes.items[ri];
         const it = r.items.items;
         for (it[start .. start + l]) |c| {
+            // A locked pickup pins its unlocked dropoff: pair-atomic removal
+            // would drag the locked node out.
+            if (lk > 0 and s.loc_pos[s.inst.pair_of[c]] < lk) {
+                for (it) |x| s.drop_buf[x] = false;
+                return false;
+            }
             s.drop_buf[c] = true;
             s.drop_buf[s.inst.pair_of[c]] = true;
         }
@@ -447,7 +465,7 @@ const S = struct {
             if (hits < 4) granular = false;
         }
 
-        for (0..L + 1) |a| {
+        for (s.lockOf(ri)..L + 1) |a| {
             if (granular and (params.gran_gaps & 1) != 0 and a != 0 and a != L and
                 s.nbr_mark_p[it[a - 1]] != genp and s.nbr_mark_p[it[a]] != genp) continue;
             const prev_a: usize = if (a == 0) 0 else it[a - 1];
@@ -506,7 +524,7 @@ const S = struct {
         const q_t = Tws.client(inst, q);
         const q_l = pdp.Lseg.node(inst, q);
 
-        for (0..L + 1) |a| {
+        for (s.lockOf(ri)..L + 1) |a| {
             const prev_a: usize = if (a == 0) 0 else it[a - 1];
             var m_t = Tws.merge(r.pre_t.items[a], @intCast(inst.d(prev_a, p)), Tws.client(inst, p));
             var m_l = pdp.Lseg.merge(r.pre_l.items[a], pdp.Lseg.node(inst, p));
@@ -544,9 +562,11 @@ const S = struct {
     fn ejectCandidate(s: *S, ri: usize, skip_p: usize) !?usize {
         const inst = s.inst;
         const it = s.routes.items[ri].items.items;
+        const lk = s.lockOf(ri);
         var best: ?usize = null;
         for (it) |e| {
             if (!inst.is_pickup[e] or e == skip_p) continue;
+            if (s.loc_pos[e] < lk or s.loc_pos[inst.pair_of[e]] < lk) continue;
             const f = inst.pair_of[e];
             s.keep_buf.clearRetainingCapacity();
             for (it) |c| {
@@ -707,6 +727,7 @@ const S = struct {
             var smallest: usize = NO_ROUTE;
             var slen: usize = std.math.maxInt(usize);
             for (s.routes.items, 0..) |r, i| {
+                if (s.lockOf(i) > 0) continue;
                 const len = r.items.items.len;
                 if (len > 0 and len < slen) {
                     smallest = i;
@@ -861,6 +882,12 @@ pub fn solvePdptwSisr(allocator: std.mem.Allocator, inst: pdp.PdpInstance, param
 /// packing instead of restarting cold). `warm` must be a feasible solution;
 /// pass empty for the normal cold start.
 pub fn solvePdptwSisrFrom(allocator: std.mem.Allocator, inst: pdp.PdpInstance, params: PdpSisrParams, warm: []const []const usize) !pdp.PdpResult {
+    return solvePdptwSisrFromLocked(allocator, inst, params, warm, &.{}, false);
+}
+
+/// Seeded runner with dispatch locks: `locks[i]` pins the first locks[i]
+/// stops of warm[i] (empty = no locking, the plain warm path).
+fn solvePdptwSisrFromLocked(allocator: std.mem.Allocator, inst: pdp.PdpInstance, params: PdpSisrParams, warm: []const []const usize, locks: []const usize, partial_ok: bool) !pdp.PdpResult {
     const n_nodes = 2 * inst.n_pairs;
     if (inst.n_pairs == 0) return error.InvalidInstance;
 
@@ -884,7 +911,14 @@ pub fn solvePdptwSisrFrom(allocator: std.mem.Allocator, inst: pdp.PdpInstance, p
         pdp.freeSol(allocator, &seed_sol);
         seed_sol = try pdp.construct(allocator, inst, pickups, pos);
     } else {
-        if (pdp.validate(inst, warm) == null) return error.InvalidWarmStart;
+        // Dispatch warms may omit pairs (new orders enter via the request
+        // bank), so they get a partial check: the routes GIVEN must be
+        // feasible and pair-consistent, completeness is not required.
+        const ok = if (partial_ok)
+            try validatePartialWarm(allocator, inst, warm)
+        else
+            pdp.validate(inst, warm) != null;
+        if (!ok) return error.InvalidWarmStart;
         for (warm) |r| {
             var route: std.ArrayList(usize) = .empty;
             errdefer route.deinit(allocator);
@@ -899,10 +933,19 @@ pub fn solvePdptwSisrFrom(allocator: std.mem.Allocator, inst: pdp.PdpInstance, p
 
     var s = try S.init(allocator, inst, params.veh_penalty, params.time_penalty, gran, gk);
     defer s.deinit();
-    for (seed_sol.items) |r| {
+    for (seed_sol.items, 0..) |r, wi| {
         if (r.items.len == 0) continue;
         const ri = try s.addSlot();
         try s.install(ri, r.items);
+        if (wi < locks.len) s.lock.items[ri] = locks[wi];
+    }
+
+    // Dispatch/partial warms: pairs absent from every seed route start in the
+    // request bank (new orders arriving in a rolling-horizon re-solve, which
+    // the bank re-derivation feeds back into recreate each iteration).
+    // Complete warms and cold constructs leave this at zero.
+    for (1..inst.dim()) |c| {
+        if (inst.is_pickup[c] and s.loc_route[c] == NO_ROUTE) s.n_unassigned += 1;
     }
 
     // Under a fleet cap the seed may exceed it: empty the smallest surplus
@@ -912,6 +955,7 @@ pub fn solvePdptwSisrFrom(allocator: std.mem.Allocator, inst: pdp.PdpInstance, p
             var smallest: usize = NO_ROUTE;
             var slen: usize = std.math.maxInt(usize);
             for (s.routes.items, 0..) |r, i| {
+                if (s.lockOf(i) > 0) continue;
                 const len = r.items.items.len;
                 if (len > 0 and len < slen) {
                     smallest = i;
@@ -1056,6 +1100,65 @@ pub fn solvePdptwSisrFleetMin(allocator: std.mem.Allocator, inst: pdp.PdpInstanc
         }
     }
     return best;
+}
+
+/// Feasibility of a PARTIAL warm start (dispatch): every given route must be
+/// TW- and capacity-feasible with pairing and precedence satisfied within it,
+/// and no node may appear twice — but pairs may be absent entirely (they go
+/// to the request bank as new orders).
+fn validatePartialWarm(allocator: std.mem.Allocator, inst: pdp.PdpInstance, warm: []const []const usize) !bool {
+    const seen = try allocator.alloc(bool, inst.dim());
+    defer allocator.free(seen);
+    @memset(seen, false);
+    for (warm) |r| {
+        var acc = Tws.depotNode(inst);
+        var prev: usize = 0;
+        for (r) |c| {
+            if (c == 0 or c >= inst.dim() or seen[c]) return false;
+            seen[c] = true;
+            acc = Tws.merge(acc, @intCast(inst.d(prev, c)), Tws.client(inst, c));
+            if (acc.tw != 0) return false;
+            prev = c;
+        }
+        acc = Tws.merge(acc, @intCast(inst.d(prev, 0)), Tws.depotNode(inst));
+        if (acc.tw != 0) return false;
+        if (r.len > 0) {
+            const lg = pdp.routeLseg(inst, r);
+            if (!(lg.lo >= 0 and lg.hi <= inst.capacity)) return false;
+        }
+        for (r, 0..) |c, i| {
+            var found = false;
+            if (inst.is_pickup[c]) {
+                for (r[i + 1 ..]) |x| found = found or x == inst.pair_of[c];
+            } else {
+                for (r[0..i]) |x| found = found or x == inst.pair_of[c];
+            }
+            if (!found) return false;
+        }
+    }
+    return true;
+}
+
+/// Rolling-horizon dispatch re-solve: `current[i]` is vehicle i's present
+/// route and `locked[i]` how many of its leading stops are committed
+/// (in progress or already served) and must not move. Unlocked stops and
+/// banked/new pairs are re-optimized around them. Locked prefixes must be
+/// pairwise-consistent (a locked dropoff's pickup is locked too) — caller's
+/// contract, checked in Debug builds only.
+pub fn solvePdptwSisrDispatch(allocator: std.mem.Allocator, inst: pdp.PdpInstance, params: PdpSisrParams, current: []const []const usize, locked: []const usize) !pdp.PdpResult {
+    std.debug.assert(locked.len == current.len);
+    if (std.debug.runtime_safety) {
+        for (current, locked) |r, lk| {
+            std.debug.assert(lk <= r.len);
+            for (r[0..lk]) |c| {
+                if (inst.is_pickup[c]) continue;
+                var found = false;
+                for (r[0..lk]) |x| found = found or x == inst.pair_of[c];
+                std.debug.assert(found);
+            }
+        }
+    }
+    return solvePdptwSisrFromLocked(allocator, inst, params, current, locked, true);
 }
 
 /// Enterprise pinned-fleet driver: find the best solution using at most
@@ -1763,6 +1866,84 @@ test "PDPTW SISR time penalty: money mode is valid and deterministic" {
     try std.testing.expectEqual(a.vehicles, b.vehicles);
 }
 
+test "PDPTW SISR dispatch: locked prefixes survive re-solve" {
+    const allocator = std.testing.allocator;
+    var teeth = false;
+    var seed: u64 = 21;
+    while (seed <= 25) : (seed += 1) {
+        var ri = try pdp.randomInstance(allocator, 10, seed, true);
+        defer ri.deinit(allocator);
+        const inst = ri.inst();
+        var base = try solvePdptwSisr(allocator, inst, .{ .seed = seed, .iters = 3000 });
+        defer base.deinit();
+
+        const cur = try allocator.alloc([]const usize, base.routes.len);
+        defer allocator.free(cur);
+        for (base.routes, 0..) |r, i| cur[i] = r;
+        const locked = try allocator.alloc(usize, base.routes.len);
+        defer allocator.free(locked);
+        @memset(locked, 0);
+
+        // Lock the longest proper pair-closed prefix of the first route with
+        // >= 4 items (pair-closed: every locked node's partner is inside the
+        // prefix, i.e. no pickup in it is still open).
+        for (cur, 0..) |r, i| {
+            if (r.len < 4) continue;
+            var open: usize = 0;
+            var k: usize = 0;
+            for (r, 0..) |c, pos| {
+                if (inst.is_pickup[c]) open += 1 else open -= 1;
+                if (open == 0 and pos + 1 < r.len) k = pos + 1;
+            }
+            locked[i] = k;
+            if (k > 0) teeth = true;
+            break;
+        }
+
+        var res = try solvePdptwSisrDispatch(allocator, inst, .{ .seed = seed + 100, .iters = 4000 }, cur, locked);
+        defer res.deinit();
+        const rc = try allocator.alloc([]const usize, res.routes.len);
+        defer allocator.free(rc);
+        for (res.routes, 0..) |r, i| rc[i] = r;
+        const vc = pdp.validate(inst, rc) orelse return error.Infeasible;
+        try std.testing.expectEqual(vc, res.total_cost);
+
+        // every locked prefix must survive verbatim at the head of some route
+        // (toResult drops empty routes but never reorders nonempty ones)
+        for (cur, locked) |r, lk| {
+            if (lk == 0) continue;
+            var found = false;
+            for (res.routes) |r2| {
+                if (r2.len >= lk and std.mem.eql(usize, r2[0..lk], r[0..lk])) found = true;
+            }
+            try std.testing.expect(found);
+        }
+    }
+    // at least one seed must have produced a nonempty pair-closed prefix
+    try std.testing.expect(teeth);
+}
+
+test "PDPTW SISR dispatch: zero locks is bit-identical to plain warm solve" {
+    const allocator = std.testing.allocator;
+    var ri = try pdp.randomInstance(allocator, 10, 21, true);
+    defer ri.deinit(allocator);
+    const inst = ri.inst();
+    var base = try solvePdptwSisr(allocator, inst, .{ .seed = 21, .iters = 2000 });
+    defer base.deinit();
+    const cur = try allocator.alloc([]const usize, base.routes.len);
+    defer allocator.free(cur);
+    for (base.routes, 0..) |r, i| cur[i] = r;
+    const locked = try allocator.alloc(usize, base.routes.len);
+    defer allocator.free(locked);
+    @memset(locked, 0);
+    var a = try solvePdptwSisrDispatch(allocator, inst, .{ .seed = 9, .iters = 3000 }, cur, locked);
+    defer a.deinit();
+    var b = try solvePdptwSisrFrom(allocator, inst, .{ .seed = 9, .iters = 3000 }, cur);
+    defer b.deinit();
+    try std.testing.expectEqual(b.total_cost, a.total_cost);
+    try std.testing.expectEqual(b.vehicles, a.vehicles);
+}
+
 test "PDPTW SISR time penalty: off is bit-identical to default" {
     const allocator = std.testing.allocator;
     var ri = try pdp.randomInstance(allocator, 10, 11, true);
@@ -1774,4 +1955,63 @@ test "PDPTW SISR time penalty: off is bit-identical to default" {
     defer b.deinit();
     try std.testing.expectEqual(a.total_cost, b.total_cost);
     try std.testing.expectEqual(a.vehicles, b.vehicles);
+}
+
+test "PDPTW SISR dispatch: new orders enter via the bank" {
+    // Rolling-horizon case: the warm start covers all but one pair (a new
+    // order); the solve must place it and return a complete solution with
+    // every locked prefix intact.
+    const allocator = std.testing.allocator;
+    var ri = try pdp.randomInstance(allocator, 10, 33, true);
+    defer ri.deinit(allocator);
+    const inst = ri.inst();
+    var base = try solvePdptwSisr(allocator, inst, .{ .seed = 33, .iters = 3000 });
+    defer base.deinit();
+
+    // drop the pair of the LAST node of the last route from the warm start
+    const last_route = base.routes[base.routes.len - 1];
+    const drop_c = last_route[last_route.len - 1];
+    const drop_p = if (inst.is_pickup[drop_c]) drop_c else inst.pair_of[drop_c];
+    const drop_q = inst.pair_of[drop_p];
+    var warm: std.ArrayList([]usize) = .empty;
+    defer {
+        for (warm.items) |r| allocator.free(r);
+        warm.deinit(allocator);
+    }
+    for (base.routes) |r| {
+        var keep: std.ArrayList(usize) = .empty;
+        errdefer keep.deinit(allocator);
+        for (r) |c| {
+            if (c != drop_p and c != drop_q) try keep.append(allocator, c);
+        }
+        try warm.append(allocator, try keep.toOwnedSlice(allocator));
+    }
+    const cur = try allocator.alloc([]const usize, warm.items.len);
+    defer allocator.free(cur);
+    for (warm.items, 0..) |r, i| cur[i] = r;
+    const locked = try allocator.alloc(usize, warm.items.len);
+    defer allocator.free(locked);
+    @memset(locked, 0);
+    // lock the first two stops of route 0 when they form a pair-closed prefix
+    if (cur[0].len >= 2 and inst.pair_of[cur[0][0]] == cur[0][1]) locked[0] = 2;
+
+    var res = try solvePdptwSisrDispatch(allocator, inst, .{ .seed = 77, .iters = 5000 }, cur, locked);
+    defer res.deinit();
+    const rc = try allocator.alloc([]const usize, res.routes.len);
+    defer allocator.free(rc);
+    var served: usize = 0;
+    for (res.routes, 0..) |r, i| {
+        rc[i] = r;
+        served += r.len;
+    }
+    try std.testing.expectEqual(2 * inst.n_pairs, served); // the new order was placed
+    const vc = pdp.validate(inst, rc) orelse return error.Infeasible;
+    try std.testing.expectEqual(vc, res.total_cost);
+    if (locked[0] > 0) {
+        var found = false;
+        for (res.routes) |r2| {
+            if (r2.len >= locked[0] and std.mem.eql(usize, r2[0..locked[0]], cur[0][0..locked[0]])) found = true;
+        }
+        try std.testing.expect(found);
+    }
 }
