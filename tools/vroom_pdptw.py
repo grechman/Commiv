@@ -55,7 +55,7 @@ def run(name):
     query = {"shipments": shipments, "vehicles": vehicles,
              "matrices": {"car": {"durations": mat, "costs": mat}}}
     t0 = time.time()
-    r = subprocess.run([BIN, "-t", "1", "-x", "5", "-l", str(T)],
+    r = subprocess.run([BIN, "-t", os.environ.get("VROOM_THREADS", "1"), "-x", "5", "-l", str(T)],
                        input=json.dumps(query), capture_output=True, text=True, timeout=T*3+60)
     wall = time.time() - t0
     try:

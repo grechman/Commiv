@@ -11,6 +11,7 @@ import roadlib
 def main():
     path = sys.argv[1]
     expl = int(sys.argv[2]) if len(sys.argv) > 2 else 5      # exploration level 0..5
+    threads = int(sys.argv[3]) if len(sys.argv) > 3 else 3
     dim, cap, demand, M, coords = roadlib.parse_road(path)
     mat = np.frombuffer(M, dtype=np.int64).reshape(dim, dim).astype(np.uint32)
 
@@ -24,7 +25,7 @@ def main():
         inp.add_job(vroom.Job(c, location=c, delivery=[int(demand[c])]))
 
     t0 = time.time()
-    sol = inp.solve(exploration_level=expl, nb_threads=3)
+    sol = inp.solve(exploration_level=expl, nb_threads=threads)
     el = time.time() - t0
 
     df = sol.routes
