@@ -392,372 +392,27 @@ part of this API and free to change between versions.
 
 ## Benchmarks
 
-Every gap is against the reference shown: a proven optimum, a published best-known, or a
-reference solver. Hardware is a laptop, Intel i3-1115G4 (2 cores, 4 threads). Times are
-wall-clock at the stated budget.
+Full campaign, one machine (Ryzen 5 2600X, 12 threads, WSL2), 2026-07-14: every family,
+every real competitor, equal wall-clock anchored on commiv's own runtime, independent
+validators wherever one exists. **All tables, per-instance data, and methodology:
+[BENCHMARKS.md](BENCHMARKS.md).** The essentials:
 
-### Symmetric
+| family | field | verdict (equal wall, best of 3 seeds) |
+|---|---|---|
+| TSP (TSPLIB, 16) | LKH-3 | parity: commiv 0.008% vs LKH 0.006% mean gap |
+| ATSP (TSPLIB, 19) | LKH-3 | near-parity: 0.017% vs 0.001% |
+| CVRP Augerat (12) | HGS-CVRP, PyVRP | all three at/near optimum; commiv 0.000% |
+| CVRP Uchoa X (6) | HGS-CVRP, PyVRP | **commiv 0.320%** vs HGS 0.965%, PyVRP 2.640% |
+| ACVRP (30) | LKH-3 field best | +0.010% vs LKH's own best-known values |
+| Road CVRP (10 cities/sizes) | PyVRP, VROOM | commiv leads every cell but one (nyc-100 −0.15%); PyVRP +1.2-1.9% behind at n≥1000, VROOM +2-5% |
+| Road VRPTW (9) | PyVRP, VROOM | commiv leads 8/9 (nyc-100 −0.01%); VROOM +1-9% behind |
+| VRPTW Solomon/GH (18) | PyVRP | Solomon at BKS; GH R/RC fleet counts remain the honest miss |
+| PDPTW Li & Lim (352) | VROOM | commiv completes **352/352**; VROOM leaves shipments unassigned on 238/352 at the same wall |
 
-| benchmark | reference | instances | commiv gap | budget / time |
-|---|---|---:|---:|---|
-| TSP (TSPLIB) | proven optima | rat575 / pr1002 / fl1577 / d657 | 0.089% / **0.000%** / 0.031% / 0.008% | ILS, seconds |
-| TSP large (rl11849) | proven optimum | 1 | 0.690% | ~77 s, single probe |
-| CVRP, Augerat A | proven optima | 12 | **0.021%** | ~1 s/instance |
-| CVRP, Uchoa X | best-known | 6 | **0.456%** (SISR 20M, 3 threads) | 50–170 s/instance |
-| CVRP, Uchoa X | best-known | 6 | 0.711% (SISR 1M best-of-3) | ~seconds |
-| VRPTW, Solomon | SINTEF BKS | 5 | 0.182% distance (vehicle-matched) | ~seconds |
-| VRPTW, Gehring–Homberger 400/1000 | SINTEF BKS | 12 | fleet matched on 4/12 (see below) | 2–60 s |
+The one systematic weakness: Gehring-Homberger R/RC classes, where commiv runs 1-6
+vehicles over best-known (route-min phase exists only in the PDPTW engine so far).
+Everything else in that table is a lead or a tie.
 
-Uchoa X per-instance (SISR 20M): X-n101 **0.120%**, X-n153 0.452%, X-n200 **0.143%**,
-X-n303 0.902%, X-n502 **0.087%**, X-n1001 1.034%. The two hard instances (X-n303 and
-X-n1001) sit near 1%; the rest land between 0.09% and 0.45%.
-
-Gehring–Homberger (first instance of each class at 400 and 1000 customers) is the honest
-miss. The objective is lexicographic — fewest vehicles first, distance second — and commiv
-matches the BKS fleet only on the easy clustered classes (c1_4_1 +0.09%, c1_10_1 +0.06%,
-c2_10_1 +0.78% distance at matched fleet, plus r2_4_1 at +2.3%). On the R and RC classes it
-runs 1–6 vehicles over the best known (often at *lower* distance, which is exactly the
-trade the lexicographic objective forbids). Root cause is known: commiv has a per-vehicle
-penalty and a fleet-emptying ruin, but no dedicated route-minimization phase
-(ejection-pool style, as in the solvers that hold these records). That is a real gap, not
-a tuning issue.
-
-### Asymmetric
-
-| benchmark | reference | instances | commiv gap | time |
-|---|---|---:|---:|---|
-| ATSP (TSPLIB classic) | proven optima | 14 | **0.000%** (br17…kro124p) | sub-second to 18 s |
-| ATSP (rbg stacker-crane) | proven optima | 4 | 0.043% (rbg323/403/443 optimal; rbg358 +0.17%) | 17–24 s |
-| ACVRP | LKH-3 (field best) | 30 | **0.228%** | ~1–2 s/instance |
-
-### Real directed road data (Moscow, OSRM)
-
-`moscow-*` is a custom benchmark: real OSRM directed travel-time matrices sampled across
-central Moscow, not a published instance set, so there is no quotable optimum. It exists to
-compare commiv against the solvers that also accept directed matrices, on identical
-instances, scored the same way (route cost on the true directed matrix, capacity-validated).
-The harness is in [`tools/competitors/`](tools/competitors/).
-
-| n | commiv (SISR) | OR-Tools 9.15 | LKH-3 (warmstart) | VROOM |
-|---|---:|---:|---:|---:|
-| 100  | **41,808** @ 0.8 s  | 44,183 @ 8 s   | 43,090 @ 12 s   | 42,490 @ 1.3 s |
-| 1000 | **207,406** @ 2 s   | 225,917 @ 60 s | 221,487 @ 456 s | 208,687 @ 315 s |
-| 2000 | **366,996** @ 9 s   | 423,800 @ 60 s | 523,233 @ 909 s¹ | 368,373 @ 1607 s |
-| 5000 | **779,161** @ 109 s | 868,583 @ 420 s | infeasible²     | did not finish³ |
-
-<sub>Cores: commiv 3, VROOM 3 (`nb_threads=3`), OR-Tools and LKH-3 run their serial
-search on 1. ¹ one unfinished LK trial. ² LKH could not reach a feasible packing even
-warmstarted. ³ VROOM did not finish n=5000 within an hour. VROOM n≤2000 runs at
-exploration level 5 (its highest-quality setting; lower levels are faster and worse).</sub>
-
-commiv is fastest and cheapest at every size. The nearest competitor on cost is VROOM
-(within about 0.4% to 0.6%), but its wall-clock blows up with scale: 20x slower at n=1000,
-about 180x at n=2000. LKH-3 needs a feasible warmstart just to run on explicit directed
-matrices and falls apart past n=1000. There is no published optimum here, but VROOM landing
-independently within 0.5% is strong evidence the solutions are near-optimal.
-
-Robustness checks on the n=1000 instance (so the single-number table above is not hiding
-anything): commiv across seeds {1, 7, 42, 99, 777} lands in 206,815–208,355 — the published
-seed sits mid-range, and even the worst seed beats every competitor. VROOM's full
-exploration-level sweep (its own speed/quality knob, 3 threads) gives 213,406 @ 10 s
-(level 0), 213,406 @ 22 s (level 1), 209,669 @ 112 s (level 3), 208,687 @ 315 s (level 5):
-commiv's 207,406 @ 2 s dominates that entire frontier. OR-Tools given a 600 s budget (10x
-the table) reaches 218,230, still +5.2%. commiv's routes are re-scored and
-capacity-validated by the competitor harness's own Python checker, not by the solver's
-internal accounting.
-
-### Directed + time windows (Moscow VRPTW)
-
-The same directed matrices with a courier-slot overlay: 60% of customers get one 2 h
-delivery slot out of four in an 8 h shift, the rest are flexible; 300 s service per stop;
-9 h depot horizon. Deterministic generator and independent schedule validator (every
-solution below is checked by the same Python code): [`tools/competitors/vrptw_moscow.py`](tools/competitors/vrptw_moscow.py).
-Two budget points per solver, cost @ wall (vehicles).
-
-| n | commiv (SISR-TW) | VROOM level 1 / 5 | OR-Tools 60 s |
-|---|---|---|---|
-| 100  | **45,993 @ 1.7 s (10 veh)** | 46,486 @ 1.7 s (11) | 47,538 @ 60 s (11) |
-| 1000 | **232,544 @ 3.5 s** (51); 229,909 @ 30 s at 3M iters | 246,573 @ 22 s / 239,977 @ 341 s (50) | 267,897 @ 60 s (53) |
-| 2000 | **412,602 @ 10 s, 3 threads** (102) | not run¹ | not run¹ |
-| 5000 | **884,137 @ 22 s, 3 threads** (257) | not run¹ | not run¹ |
-
-<sub>commiv: `solveVrptwSisr`, default 300k iterations, single-threaded except n≥2000
-(best-of-3 chains; n=5000 served over the binary REST framing). VROOM 3 cores, OR-Tools 1.
-Seeds {7, 42, 12345} at n=1000 span
-231,417–232,544; best-of-3 parallel: 231,892 @ 4.9 s. Objective is pure distance
-(`veh_penalty = 0`); VROOM's n=1000 solution uses one vehicle fewer at 3.2% more distance.
-¹ n≥2000 competitor runs were skipped: VROOM level 5 already needs 1607 s on the same
-matrix without windows, and did not finish n=5000 CVRP within an hour.</sub>
-
-The history of this table is worth telling straight. The first published version was the
-one benchmark commiv did not win: the original VRPTW engine (a giant-tour ILS predating
-SISR) needed 988 s to reach 238,829 at n=1000 — a wash with VROOM at 3x the wall. The fix
-was to port the flagship CVRP engine: SISR with time windows wired into recreate through
-O(1) time-slack (Tws) feasibility evaluation. That engine (`solveVrptwSisr`, now the
-default everywhere) produces the numbers above: better cost than every competitor point at
-every size, in seconds, plus a vehicle saved at n=100. The old ILS remains available as
-`solveVrptw` and reproduces the Solomon table; on Solomon, SISR beats it at its default
-budget (0.135% vs 0.182% vehicle-matched mean, ~3x faster) and matches the vehicle counts
-given budget — including the notoriously tight rc101 at 14 vehicles (2M iterations, 12 s)
-via the fleet-minimization ruin that empties the smallest route when `veh_penalty` is set.
-One negative result, kept honest: the CVRP split-string ("slack induction") ruin measured
-WORSE with time windows on (Moscow n=1000: +0.8%), so it defaults off for VRPTW.
-
-### PyVRP head-to-head, and two more cities
-
-[PyVRP](https://github.com/PyVRP/PyVRP) (0.13.4) is the open-source descendant of HGS and
-the strongest freely available quality reference that natively accepts directed matrices
-with time windows — the one competitor that plays on commiv's home turf without adapters
-bending the problem. Same instances, same window overlay, same independent validator;
-PyVRP is single-threaded by design and gets a full core.
-
-Moscow, at commiv's wall and at 6–10x more (cost @ seconds; commiv long runs in
-parentheses for the equal-long comparison):
-
-| n / mode | commiv | PyVRP @ equal wall | PyVRP @ more time |
-|---|---|---|---|
-| 100 CVRP  | 41,808 @ 0.8 s | 42,449 @ 1.0 s | **41,705 @ 6 s** (commiv 41,806 @ 6.3 s) |
-| 1000 CVRP | **207,406 @ 2 s** | 214,285 @ 1.5 s | **203,190 @ 60 s** (commiv 205,315 @ 36 s) |
-| 2000 CVRP | **366,996 @ 9 s** | 379,446 @ 6 s | **357,454 @ 161 s** (commiv 361,000 @ 16 s) |
-| 100 TW    | **45,993 @ 1.7 s** | 46,505 @ 1.7 s | 46,267 @ 17 s |
-| 1000 TW   | **232,544 @ 3.5 s** | 240,081 @ 3.7 s | **227,581 @ 341 s** (commiv 228,243 @ 299 s) |
-| 2000 TW   | **412,602 @ 10 s** | 426,882 @ 11 s | **400,437 @ 501 s** (commiv 406,038 @ 50 s) |
-
-At equal wall commiv wins every Moscow cell by 1.2–3.5%. Given ~10x the time, PyVRP
-crosses on five of six cells, by 0.2–1.4% (only 100 TW holds against any PyVRP budget
-tried). The crossing wall grows with size — at n=2000 PyVRP needs 161 s (CVRP) and 501 s
-(TW) to pass numbers commiv produced in 9–50 s. That is the shape of the claim: commiv is
-not "better than HGS at convergence" — it reaches ~98–99% of PyVRP's multi-minute quality
-in 1–10% of the time.
-
-To test that this is not a Moscow artifact, the same protocol ran on two more real
-cities with opposite road topologies: NYC (Manhattan one-way grid, measured asymmetry
-ratio 1.13–1.17, higher than Moscow's ~1.11) and Berlin (ring city, nearly symmetric at
-1.06). All 12 commiv cells validate feasible; equal-wall margins (PyVRP cost vs commiv
-cost, positive = commiv wins):
-
-| cell | commiv | PyVRP | margin |
-|---|---|---|---:|
-| nyc-100 CVRP | **32,563** @ 0.9 s | 32,718 @ 0.9 s | +0.5% |
-| nyc-1000 CVRP | **95,057** @ 2.0 s | 96,070 @ 2.2 s | +1.1% |
-| nyc-2000 CVRP | **139,772** @ 9.0 s | 141,241 @ 10.0 s | +1.1% |
-| berlin-100 CVRP | **34,046** @ 0.9 s | 34,292 @ 0.9 s | +0.7% |
-| berlin-1000 CVRP | **111,631** @ 2.3 s | 111,855 @ 2.5 s | +0.2% |
-| berlin-2000 CVRP | 167,232 @ 9.9 s | **166,234** @ 10.8 s | **−0.6%** |
-| nyc-100 TW | 36,992 @ 1.7 s | **36,925** @ 1.7 s | **−0.2%** |
-| nyc-1000 TW | **135,873** @ 5.0 s | 138,044 @ 5.2 s | +1.6% |
-| nyc-2000 TW | **221,184** @ 14.5 s | 229,132 @ 17.2 s | +3.6% |
-| berlin-100 TW | **36,967** @ 1.6 s | 37,335 @ 1.6 s | +1.0% |
-| berlin-1000 TW | **152,784** @ 6.1 s | 154,941 @ 6.3 s | +1.4% |
-| berlin-2000 TW | **247,678** @ 16.3 s | infeasible @ 19 s¹ | +2.7%¹ |
-
-<sub>¹ At commiv's 16 s wall PyVRP found no feasible schedule at all on berlin-2000 TW;
-its first feasible solution needed 63 s and still cost 254,459, +2.7% over commiv's 16 s
-result.</sub>
-
-Score at equal short wall: 10 of 12 cells to commiv, two thin losses (berlin-2000 CVRP
-−0.6%, nyc-100 TW −0.2%). The pattern matches the physics: the margin tracks the asymmetry
-of the city. NYC's one-way grid (most asymmetric) gives the widest margins; near-symmetric
-Berlin is where PyVRP — an engine born symmetric — gets closest, and takes its one CVRP
-cell.
-
-The same cells at ~10x budgets (commiv given matching wall via more iterations):
-
-| cell | commiv | PyVRP | margin |
-|---|---|---|---:|
-| nyc-100 CVRP | 32,371 @ 7.4 s | **32,285** @ 9 s | −0.3% |
-| nyc-1000 CVRP | **92,815** @ 20.2 s | 92,843 @ 20.2 s | +0.03% |
-| nyc-2000 CVRP | 134,779 @ 88 s | **134,478** @ 91 s | −0.2% |
-| berlin-100 CVRP | 34,012 @ 8.4 s | **33,809** @ 9 s | −0.6% |
-| berlin-1000 CVRP | 110,254 @ 24 s² | **109,717** @ 23 s | −0.5% |
-| berlin-2000 CVRP | 163,860 @ 89 s | **162,243** @ 100 s | −1.0% |
-| nyc-100 TW | 36,827 @ 16.4 s | **36,526** @ 17 s | −0.8% |
-| nyc-1000 TW | **134,885** @ 50 s | 135,171 @ 50 s | +0.2% |
-| nyc-2000 TW | 220,036 @ 141 s | **214,471** @ 148 s | −2.5% |
-| berlin-100 TW | 37,008 @ 16.4 s | **36,910** @ 16 s | −0.3% |
-| berlin-1000 TW | 152,889 @ 60 s | **152,053** @ 61 s | −0.6% |
-| berlin-2000 TW | **246,602** @ 164 s | 247,822 @ 166 s | +0.5% |
-
-<sub>² commiv's 3M-iteration run at 11.7 s scored 109,774, better than the 6M run shown —
-long SISR trajectories are not monotone in budget (a known limitation of the current
-threshold schedule; also visible at berlin-100 TW and Moscow 100 TW).</sub>
-
-So the honest division of the map: commiv owns the seconds regime nearly everywhere;
-give both engines minutes and the HGS machinery grinds past on most cells by 0.05–2.5%,
-with nyc-2000 TW its biggest win (−2.5%) and two deep directed+windowed cells still
-holding for commiv (nyc-1000 TW, berlin-2000 TW). Directedness sets how *long* commiv's
-lead survives: the more asymmetric and windowed the cell, the further out the crossing.
-
-### Reclaiming the minutes regime (opt-in VRPTW levers)
-
-The table above is the **baseline** engine. commiv also ships an opt-in set of long-run
-levers — a post-accept local-search polish (FILO-style education), stress-guided ruin
-centers, a reinsertion tabu, and a colder large-neighborhood "marathon" profile — all off
-by default and enabled per call (`polish`, `stress_rate`, `tabu_tenure`, `marathon`; or
-`VT_COMBO=1` in the bench). They spend per-iteration wall, so they lose in the seconds
-regime and exist for the minutes budgets where the table above handed cells to PyVRP. With
-them on, the deep directed+windowed cells flip back:
-
-| n=1000 TW | commiv (levers on) | PyVRP | margin |
-|---|---|---|---:|
-| berlin | **151,417** @ 132 s | 151,948 @ 150 s | +0.35% |
-| nyc | **132,996** @ 151 s | 135,054 @ 150 s | +1.52% |
-| moscow | 229,544 @ 141 s | **227,581** @ 341 s | −0.86% |
-
-Two of the three long-budget TW cells come back to commiv at equal-or-less wall. Moscow —
-the most-tuned instance in the suite — is the one PyVRP keeps: its HGS reaches a basin the
-SISR trajectory plateaus above (10 M iterations move it only from 229,511 to 229,544). The
-levers scale where there is slack to recover: at n=2000 they take nyc TW to 213,500 (−3.0 %
-and two vehicles under baseline, at roughly twice the baseline wall — the equal-wall n=2000
-rerun is still open), and at n=5000 they even take *Moscow* TW to 866,679 (−0.7 %, one
-vehicle fewer) at near-equal wall — the larger, less-converged instances benefit most.
-
-The `nbr_key`/`gk` knobs (below) and the `polish_every` cadence apply to the TW engine
-too, and together they retake nyc-2000 TW — PyVRP's biggest win in the baseline tables —
-at *equal-or-less* wall, no 2x asterisk (`combo + nbr_key=min + polish_every=8`, 800 k
-iterations, 3 seeds, `commiv-twroadbench` protocol):
-
-| nyc-2000 TW @ ≤150 s | seed 12345 | seed 7 | seed 99 | mean |
-|---|---|---|---|---:|
-| commiv (109–123 s) | 215,026 | 215,052 | **214,233** | **214,770** |
-| PyVRP (150 s) | 214,812 | 220,158 | 216,533 | 217,168 |
-
-commiv's *worst* seed beats PyVRP's 3-seed mean (+1.1 %). Sparse polish cadence is the
-n=2000 ingredient: per-accept polish costs too much wall at that scale, and
-`polish_every=8` bought both the iterations and three vehicles over every-accept polish.
-On nyc-1000 TW at 150 s commiv holds either way (~133.2 k vs PyVRP's 133.9 k 3-seed mean,
-17–19 vehicles vs their 19–20); `min` is equal-wall-neutral there, and Berlin TW measured
-neutral too, so `.sum` stays the TW default as well.
-
-On the CVRP engine, three of the four ports (polish, stress, tabu) measured dead across
-cities — the window-free flagship is already near-converged and they only perturb it.
-`marathon` is alive there (an earlier "measured dead" verdict traced to a stale bench
-binary that silently ignored the flag): at 1M+ iterations it fixes the long-run
-non-monotonicity on near-symmetric instances. berlin-1000 baseline *worsens* with budget
-(109,774 @ 13 s at 3 M → 110,254 @ 30 s at 6 M); marathon gives 109,181 @ 18 s (4 M) and
-109,051 @ 29 s (6 M), better than baseline on 3/3 seeds, taking the berlin-1000 minute
-cell under the tables' fixed-seed protocol (PyVRP rerun at its 23 s wall: 109,522). NYC —
-the most asymmetric city — is the mirror image: every deviation from the base constants
-(marathon, colder tf alone, education at any cadence) measured *worse* there, and Moscow
-is a seed-level wash, so `marathon` stays opt-in.
-
-NYC's real lever turned out to be structural, not a constant: the granular neighbor
-lists were built with a symmetrized key `d(c,j)+d(j,c)`, which buries one-way-close
-pairs — on the NYC grid ~3 % of each customer's five nearest *directional* arcs never
-made the top-20 list (Berlin: 0.4 %), so recreate and every local-search move were
-blind to exactly the arcs that make NYC asymmetric-favorable, while the ATSP seed
-(min-key) could see them. `nbr_key = .min` (+ `gk` list-size knob; both default to the
-old behavior bit-identically) restores them at zero per-iteration cost:
-
-| CVRP minutes, 3 seeds each | commiv (`nbr_key=min`) | PyVRP | mean margin |
-|---|---|---|---:|
-| nyc-1000 (min, 4 M, ≤18 s) | **91,639 / 91,793 / 92,159** | 92,751 / 93,678 / 93,391 @ 20 s | **+1.51 %** |
-| nyc-2000 (min, gk=40, 5 M, ≤91 s) | **133,815 / 133,894 / 134,303** | 134,549 / 133,421 / 134,676 @ 91 s | **+0.16 %** |
-
-Every nyc-1000 seed beats PyVRP's best seed; nyc-1000's *seconds* cell also improves
-(95,057 → 93,832 @ 2.4 s with `min`). At the 60-second wall the margin holds and grows
-earlier: commiv 13 M `min` iterations finish in ~49 s at 91,405 / 91,714 / 91,973 vs
-PyVRP's 92,525 / 93,484 / 92,786 at 60 s — every commiv seed beats PyVRP's best seed
-with ten seconds to spare (+1.33 % on means). The key is topology-gated like marathon:
-Moscow (ratio 1.11) and Berlin (1.06) measured neutral-to-worse on `min`, so `.sum`
-stays the default. Seed-honest summary of the CVRP minute regime with both levers:
-nyc-1000 is commiv's outright, nyc-2000 commiv on 3-seed means, berlin-1000
-tie-to-commiv, the moscow cells stay PyVRP's by 0.4–0.8 %.
-
-Reproduce: `tools/competitors/pyvrp_road.py <instance.road> {cvrp|vrptw} <seconds> [seed]`;
-the NYC and Berlin matrices live in `vendor/road/` next to Moscow. TW levers are the
-`solveVrptwSisr` flags above (see [`docs/rest.md`](docs/rest.md) for the REST fields); the
-CVRP cells (`zig build roadbench -Doptimize=ReleaseFast` first):
-`RB_FILES=berlin-1000 RB_ITERS=4000000 RB_THREADS=3 RB_SYM=0 RB_MARATHON=1
-./zig-out/bin/commiv-roadbench` → 109,181;
-`RB_FILES=nyc-1000 RB_ITERS=4000000 RB_THREADS=3 RB_SYM=0 RB_NBR=min
-./zig-out/bin/commiv-roadbench` → 91,639;
-`RB_FILES=nyc-2000 RB_ITERS=5000000 RB_THREADS=3 RB_SYM=0 RB_NBR=min RB_GK=40
-./zig-out/bin/commiv-roadbench` → 133,815 (add `RB_FINAL_LS=1` → 133,677).
-### The refiner ladder
-
-The engine converges fast and then stalls; the ladder is a post-run pipeline of
-algorithms each suited to nearly-optimal input (the insertion-sort principle). It runs
-once, on the winning chain only, after best-of-K selection, and every stage keeps a
-change only on strict measured improvement — the pipeline is never worse than the raw
-run by construction. Four rungs, all default-off, off = bit-identical:
-
-- `final_ls` (both engines): improvement-only local-search convergence on the returned
-  best. The raw SISR loop never educates its own final answer; this does.
-- `route_atsp` (CVRP, `RB_ROUTE_ATSP=1`): each route's internal order re-solved as a
-  standalone depot-rooted ATSP by the elite directed engine, alternated with education
-  drains until dry. Sub-solves are read-only and fan out across the idle threads;
-  a memo skips routes unchanged since their last no-improvement solve. Reaches
-  whole-route reorderings the relocate/2-opt vocabulary can't — gain tracks route length.
-- `kicks` (CVRP, `RB_KICKS=N`): N deterministic zero-temperature perturbation rounds —
-  small ruin+recreate, full education drain, keep strict improvements only. The rung
-  that moves customers *between* routes; it broke the n=100 lock-in (nyc-100 seed 7
-  now 32,286, one unit off PyVRP's 32,285 optimum-basin result).
-- `subsolve` (CVRP, `RB_SUBSOLVE=iters`, `RB_SUBSOLVE_PAIRS=k`): adjacent route pairs
-  (ranked by granular cross-link count) extracted as standalone sub-CVRPs and re-solved
-  by a fresh seeded SISR; spliced back only if strictly cheaper with ≤2 vehicles. The
-  rung that moves *load* across route boundaries — it finally moved Moscow, the cell
-  every intra-route lever had left flat.
-
-Final 3-way comparison, 3 seeds (12345/7/99), PyVRP rerun at commiv's *full-pipeline*
-wall on the same machine (commiv 3 threads vs single-threaded PyVRP on one core, as
-everywhere in this README). "base" = same search config, ladder off:
-
-| cell | commiv base | commiv + ladder | PyVRP @ equal wall | mean gap vs PyVRP |
-|---|---|---|---|---:|
-| nyc-100 (1 M, min, ~3.7 s) | 32,468 / 32,328 / 32,412 | **32,333 / 32,286 / 32,356** | 32,295 / 32,286 / 32,308 @ 4 s | −0.09 % |
-| nyc-1000 (4 M, min, ~24 s) | 91,639 / 91,793 / 92,159 | **91,305 / 91,480 / 91,652** | 92,731 / 93,642 / 93,357 @ 24 s | **+1.93 %** |
-| nyc-2000 (5 M, min gk40, ~118 s) | 133,815 / 133,894 / 134,303 | **133,409 / 133,269 / 133,599** | 134,436 / 133,175 / 134,472 @ 121 s | **+0.45 %** |
-| berlin-1000 (4 M, marathon, ~30 s) | 109,181 / 109,637 / 109,601 | **109,086 / 109,450 / 109,373** | 109,392 / 108,470 / 109,822 @ 31 s | −0.07 % |
-| moscow-1000 (4 M, ~20 s) | 205,063 / 205,323 / 205,126 | **204,655 / 204,651 / 204,823** | 206,837 / 207,414 / 206,848 @ 20 s | **+1.13 %** |
-
-(Positive gap = commiv mean beats PyVRP mean.) The ladder is worth −0.16 % to −0.43 %
-on top of an already-converged run for 8–12 % wall at these protocols (2–4 % at a
-60-second wall). It flips nyc-2000 from a seed-level tie to a clear win, more than
-doubles the nyc-1000 and moscow margins, and closes most of the two remaining deficits:
-nyc-100 −0.33 % → −0.09 % (PyVRP parks at its optimum basin there) and berlin-1000
-−0.22 % → −0.07 % (2 of 3 seeds now commiv's; PyVRP's seed-7 run is the outlier that
-holds the mean). Moscow at PyVRP's 3× budget (203,190 @ 60 s) remains the one
-long-budget cell commiv doesn't reach.
-
-Ladder knobs per cell (append to the roadbench commands above): n=100
-`RB_FINAL_LS=1 RB_ROUTE_ATSP=1 RB_KICKS=300 RB_SUBSOLVE=30000 RB_SUBSOLVE_PAIRS=4`;
-n=1000 `... RB_KICKS=150 RB_SUBSOLVE=50000 RB_SUBSOLVE_PAIRS=4` (moscow: `_PAIRS=8`);
-n=2000 `... RB_KICKS=50 RB_SUBSOLVE=50000 RB_SUBSOLVE_PAIRS=2` (kick cost scales with
-n, so the count drops). Example: the nyc-1000 command above plus the n=1000 knobs
-→ 91,305. PyVRP side: `pyvrp_road.py vendor/road/nyc-1000.road cvrp 24 12345` → 92,731.
-
-One more knob sits behind the ladder: `RB_CHAIN_KICKS=N` runs N kicks inside *each*
-parallel chain before winner selection, so selection picks the best of K refined
-trajectories instead of refining the best raw one — K chains' worth of kicked
-exploration for one chain's kick wall. It matters where kicks themselves have slack:
-nyc-100 + `RB_CHAIN_KICKS=300` reaches **32,285 / 32,286 / 32,333** (~4.3 s) — seed
-12345 lands on the same 32,285 PyVRP parks at (its 4 s and 5 s runs are identical:
-32,295 / 32,286 / 32,308), the first commiv run to touch that basin, now winning or
-tying 2 of 3 seeds head-to-head. nyc-1000 + `RB_CHAIN_KICKS=300` gives
-91,007 / 91,389 / 91,660 (−0.14 % mean) for ~+20 % wall — notably the *only* lever that
-converts extra wall into quality there, since more SISR iterations are non-monotone
-(5 M scores 91,762, worse than 4 M's 91,305). Berlin, Moscow, and nyc-2000 measured
-flat-to-crumbs (two nyc-2000 seeds bit-identical), so it stays off outside NYC ≤ 1000.
-
-`RB_ROUNDS=N` (with `RB_REHEAT`, default full re-melt) re-runs the `t0→tf` schedule N
-times, each restart from the best-so-far. Its one honest use: the SISR schedule is
-non-monotone in budget (nyc-1000 5 M scores worse than 4 M), and past that point
-restarting the proven 4 M schedule beats stretching it at *equal compute* — nyc-1000
-2 × 4 M gives 91,479 / 91,684 vs a single 8 M run's 91,719 / 92,422 (2 seeds, equal
-wall). But it only helps at ≈2× wall for ≈0.3–0.8 %, and on budget-monotone cells like
-Moscow it's pure loss, so it stays opt-in and out of the deployment configs above. Four
-other levers explored the same round — curl-guided ruin, per-chain matrix jitter,
-route-pool set-partitioning, and giant-tour re-split — were built, measured across
-3 seeds at the deployment config, and removed as dead (all were either single-seed
-false positives or net-negative once the search was already converged). The road-TW
-cells: `zig build twroadbench -Doptimize=ReleaseFast && python3
-tools/competitors/dump_windows.py nyc-2000 && TP_FILE=nyc-2000 TP_ITERS=800000
-TP_THREADS=3 TP_COMBO=1 TP_NBR=min TP_POLISH_EVERY=8 ./zig-out/bin/commiv-twroadbench`
-→ 215,026, 33 vehicles, ~123 s (PyVRP side: `pyvrp_road.py vendor/road/nyc-2000.road
-vrptw 150 [seed]`).
-
----
 
 ## How commiv compares, honestly
 
@@ -775,11 +430,11 @@ vrptw 150 [seed]`).
 **Where the competition wins, and you should know it**
 
 - **Absolute accuracy at huge budgets.** LKH-3, HGS-CVRP, and SISR (the paper) reach lower
-  gaps (about 0.16% to 0.39% on Uchoa X) when given far more time, and PyVRP crosses
-  commiv's seconds-scale numbers by 0.05–2.5% when both get minutes — the crossing wall
-  grows with instance size and asymmetry, but it exists on almost every cell. commiv
-  trades that last fraction of a percent for a large speed advantage. It is not
-  state-of-the-art on accuracy at the frontier.
+  gaps (about 0.16% to 0.39% on Uchoa X) when given far more time than the equal-wall
+  budgets in [BENCHMARKS.md](BENCHMARKS.md), and PyVRP can cross commiv's numbers when
+  given roughly 10x the compute — the crossing wall grows with instance size and
+  asymmetry. commiv trades that last fraction of a percent for a large speed advantage.
+  It is not state-of-the-art on accuracy at the unlimited-budget frontier.
 - **Dedicated fleet minimization.** On the vehicles-first Gehring–Homberger objective
   commiv matches the best-known fleet on only 4 of 12 instances; the record holders run an
   ejection-pool route-minimization phase commiv does not have yet.
@@ -787,8 +442,9 @@ vrptw 150 [seed]`).
   nodes faster than anything here. commiv targets the routing-scale (hundreds to a few
   thousand) directed regime.
 - **Production hardness.** OR-Tools and VROOM are battle-tested stacks with rich constraints
-  (time windows, pickup and delivery, skills, breaks) and years of deployment. commiv is a
-  fast, focused core, not a complete logistics platform.
+  (skills, breaks, multi-depot, driver shifts) and years of deployment. commiv covers
+  capacities, time windows, pickup-and-delivery, fleet pinning, and a money objective —
+  but it is a fast, focused core, not a complete logistics platform.
 
 ---
 
@@ -857,37 +513,37 @@ vrptw 150 [seed]`).
 
 ---
 
-## GPU acceleration (designed, not built)
+## GPU acceleration (measured: not worth it)
 
-commiv is CPU-only today. The single largest untapped speedup is a GPU. SISR's hot loop
-evaluates millions of independent move-deltas per second, an embarrassingly parallel batched
-reduction that maps cleanly onto a GPU with the directed matrix held device-resident (100 MB
-at n=5000 fits any modern card). A full task spec (batched move-delta kernel, massive
-best-of-K islands, CUDA FFI, device-resident matrix) is in [`gpu.md`](gpu.md). It is not
-implemented (there is no GPU in the dev environment), but it is the most likely path to
-another order of magnitude at large n.
+Measured and closed on a GTX 1660 Ti (2026-07-13): the batched move-delta kernel runs
+0.11x vs the 12-thread CPU at n=1001, and 1536 parallel on-device chains reach only
+0.55x of the CPU's aggregate throughput — the engine's winning moves (sparse don't-look
+scans, deep anneals, ejection chains) are exactly the work GPUs are bad at. Full
+evidence and reopen conditions: [`tools/gpu-probe/GPU-REPORT.md`](tools/gpu-probe/GPU-REPORT.md);
+original design spec kept in [`gpu.md`](gpu.md).
 
----
 
 ## Reproducing the benchmarks
 
 Standard instances ship under `vendor/` (TSPLIB, CVRPLIB Augerat and Uchoa X, ATSP, ACVRP,
-Solomon, and the Moscow OSRM matrices under `vendor/road/`). The `moscow-5000` matrix is
-gzipped, so run `gunzip vendor/road/moscow-5000.road.gz` before using it. Competitor
-adapters (OR-Tools, LKH-3 with warmstart, VROOM, and an assignment lower bound) plus setup
-notes are in [`tools/competitors/`](tools/competitors/). To re-fetch a Moscow matrix from a
-self-hosted OSRM, use [`tools/fetch_road_matrix.py`](tools/fetch_road_matrix.py).
-
-The gap benchmarks build their own binary that you then run:
+Solomon, Gehring-Homberger, Li & Lim PDPTW, and the road matrices under `vendor/road/` —
+`gunzip vendor/road/moscow-5000.road.gz` first). Competitor adapters and setup notes are in
+[`tools/competitors/`](tools/competitors/). Each bench builds its own binary:
 
 ```sh
 zig build cvrpbench  -Doptimize=ReleaseFast && ./zig-out/bin/commiv-cvrpbench   # CVRP vs optima
-zig build acvrpbench -Doptimize=ReleaseFast && ./zig-out/bin/commiv-acvrpbench  # asymmetric CVRP vs LKH-3
-zig build atspbench  -Doptimize=ReleaseFast && ./zig-out/bin/commiv-atspbench   # ATSP vs proven optima
+zig build acvrpbench -Doptimize=ReleaseFast && ./zig-out/bin/commiv-acvrpbench  # asymmetric CVRP
+zig build atspbench  -Doptimize=ReleaseFast && ./zig-out/bin/commiv-atspbench   # ATSP vs optima
 zig build vrptwbench -Doptimize=ReleaseFast && ./zig-out/bin/commiv-vrptwbench  # VRPTW vs SINTEF BKS
-zig build roadbench  -Doptimize=ReleaseFast && ./zig-out/bin/commiv-roadbench   # real directed Moscow matrix
-zig build bench      -Doptimize=ReleaseFast                                     # TSP benchmark (runs)
+zig build roadbench  -Doptimize=ReleaseFast && ./zig-out/bin/commiv-roadbench   # directed road CVRP
+zig build twroadbench -Doptimize=ReleaseFast && ./zig-out/bin/commiv-twroadbench # directed road VRPTW
+zig build pdptwbench -Doptimize=ReleaseFast && ./zig-out/bin/commiv-pdptwbench  # PDPTW vs Li & Lim BKS
+zig build bench      -Doptimize=ReleaseFast                                     # TSP suite (runs)
 ```
+
+Per-cell configs, walls, and the campaign driver that produced BENCHMARKS.md are
+documented in [BENCHMARKS.md](BENCHMARKS.md) itself.
+
 
 ## License
 
@@ -1205,108 +861,27 @@ defer atsp.deinit();
 
 ## Бенчмарки
 
-Каждый разрыв указан относительно показанного эталона: доказанного оптимума, опубликованного
-лучшего известного результата или эталонного солвера. Железо — Intel i3-1115G4
-(2 ядра, 4 потока).
+Полная кампания на одной машине (Ryzen 5 2600X, 12 потоков, WSL2), 2026-07-14: все
+семейства, все реальные конкуренты, равное время на инстанс (по замеренному времени
+commiv), независимые валидаторы везде, где они есть. **Все таблицы и методика:
+[BENCHMARKS.md](BENCHMARKS.md).** Главное:
 
-### Симметричные
+| семейство | конкуренты | вердикт (равное время, лучший из 3 сидов) |
+|---|---|---|
+| TSP (TSPLIB, 16) | LKH-3 | паритет: commiv 0.008% против 0.006% |
+| ATSP (19) | LKH-3 | почти паритет: 0.017% против 0.001% |
+| CVRP Augerat (12) | HGS-CVRP, PyVRP | все около оптимума; commiv 0.000% |
+| CVRP Uchoa X (6) | HGS-CVRP, PyVRP | **commiv 0.320%** против HGS 0.965% и PyVRP 2.640% |
+| ACVRP (30) | LKH-3 (лучшие известные) | +0.010% к лучшим значениям LKH |
+| Дорожный CVRP (10) | PyVRP, VROOM | commiv впереди во всех ячейках кроме одной (nyc-100 −0.15%) |
+| Дорожный VRPTW (9) | PyVRP, VROOM | commiv впереди в 8/9; VROOM отстаёт на 1-9% |
+| VRPTW Solomon/GH (18) | PyVRP | Solomon на уровне BKS; флот на GH R/RC — честная слабость |
+| PDPTW Li & Lim (352) | VROOM | commiv развозит всё в **352/352**; VROOM оставляет заявки неразвезёнными в 238/352 |
 
-| бенчмарк | эталон | инстансы | разрыв commiv | бюджет / время |
-|---|---|---:|---:|---|
-| TSP (TSPLIB) | доказанные оптимумы | rat575 / pr1002 / fl1577 / d657 | 0.089% / **0.000%** / 0.031% / 0.008% | ILS, секунды |
-| TSP большая (rl11849) | доказанный оптимум | 1 | 0.690% | ~77 с, один прогон |
-| CVRP, Augerat A | доказанные оптимумы | 12 | **0.021%** | ~1 с/инстанс |
-| CVRP, Uchoa X | лучший известный | 6 | **0.456%** (SISR 20M, 3 потока) | 50–170 с/инстанс |
-| CVRP, Uchoa X | лучший известный | 6 | 0.711% (SISR 1M, лучшее из 3) | ~секунды |
-| VRPTW, Solomon | SINTEF BKS | 5 | 0.182% по расстоянию (при равном числе машин) | ~секунды |
+Единственная системная слабость — классы R/RC у Gehring-Homberger, где commiv
+использует на 1-6 машин больше лучших известных решений (фаза минимизации флота пока
+есть только в PDPTW-движке). Всё остальное в таблице — лидерство или ничья.
 
-Uchoa X по инстансам (SISR 20M): X-n101 **0.120%**, X-n153 0.452%, X-n200 **0.143%**,
-X-n303 0.902%, X-n502 **0.087%**, X-n1001 1.034%. Два тяжёлых инстанса (X-n303 и X-n1001)
-держатся около 1%; остальные ложатся между 0.09% и 0.45%.
-
-### Асимметричные
-
-| бенчмарк | эталон | инстансы | разрыв commiv | время |
-|---|---|---:|---:|---|
-| ATSP (классика TSPLIB) | доказанные оптимумы | 14 | **0.000%** (br17…kro124p) | от долей секунды до 18 с |
-| ATSP (rbg, кран-штабелёр) | доказанные оптимумы | 4 | 0.043% (rbg323/403/443 оптимальны; rbg358 +0.17%) | 17–24 с |
-| ACVRP | LKH-3 (лучший в поле) | 30 | **0.228%** | ~1–2 с/инстанс |
-
-### Реальные направленные дорожные данные (Москва, OSRM)
-
-`moscow-*` — это собственный бенчмарк: реальные ориентированные матрицы времени в пути OSRM,
-снятые по центру Москвы, не опубликованный набор инстансов, поэтому цитируемого оптимума нет.
-Он существует, чтобы сравнивать commiv с солверами, которые тоже принимают направленные
-матрицы, на одинаковых инстансах, при одинаковом подсчёте (стоимость маршрута по настоящей
-направленной матрице, с проверкой вместимости). Харнесс — в
-[`tools/competitors/`](tools/competitors/).
-
-| n | commiv (SISR) | OR-Tools 9.15 | LKH-3 (тёплый старт) | VROOM |
-|---|---:|---:|---:|---:|
-| 100  | **41 808** @ 0.8 с  | 44 183 @ 8 с   | 43 090 @ 12 с   | 42 490 @ 1.3 с |
-| 1000 | **207 406** @ 2 с   | 225 917 @ 60 с | 221 487 @ 456 с | 208 687 @ 315 с |
-| 2000 | **366 996** @ 9 с   | 423 800 @ 60 с | 523 233 @ 909 с¹ | 368 373 @ 1607 с |
-| 5000 | **779 161** @ 109 с | 868 583 @ 420 с | недопустимо²     | не завершил³ |
-
-<sub>Ядра: commiv 3, VROOM 3 (`nb_threads=3`), OR-Tools и LKH-3 ведут последовательный
-поиск на 1. ¹ один незавершённый прогон LK. ² LKH не смог получить допустимую упаковку даже
-с тёплым стартом. ³ VROOM не завершил n=5000 в пределах часа. VROOM при n≤2000 идёт на
-уровне исследования 5 (его самый качественный и медленный режим); при n=5000 — на уровне 3.</sub>
-
-commiv быстрее и дешевле на каждом размере. Ближайший конкурент по стоимости — VROOM (в
-пределах примерно 0.4–0.6%), но его настенное время взрывается с масштабом: в 20 раз медленнее
-при n=1000 и примерно в 180 раз при n=2000. LKH-3 нужен допустимый тёплый старт просто чтобы
-запуститься на явных направленных матрицах, и он разваливается после n=1000. Опубликованного
-оптимума здесь нет, но то, что VROOM независимо попадает в пределах 0.5%, — сильное
-свидетельство того, что решения близки к оптимальным.
-
-Проверки устойчивости на инстансе n=1000 (чтобы единственное число в таблице ничего не
-прятало): commiv на сидах {1, 7, 42, 99, 777} даёт 206 815–208 355 — опубликованный сид
-лежит в середине, и даже худший сид бьёт каждого конкурента. Полный проход VROOM по его
-уровням исследования (его собственная ручка скорость/качество, 3 потока): 213 406 @ 10 с
-(уровень 0), 213 406 @ 22 с (уровень 1), 209 669 @ 112 с (уровень 3), 208 687 @ 315 с
-(уровень 5) — 207 406 @ 2 с commiv доминирует весь этот фронт. OR-Tools с бюджетом 600 с
-(10x от таблицы) достигает 218 230, всё ещё +5.2%. Маршруты commiv пересчитаны и проверены
-на вместимость Python-чекером харнесса конкурентов, а не внутренней бухгалтерией солвера.
-
-### Направленные дороги + временные окна (Москва, VRPTW)
-
-Те же направленные матрицы с курьерскими слотами: 60% клиентов получают один 2-часовой слот
-из четырёх в 8-часовой смене, остальные гибкие; 300 с обслуживания на точку; горизонт депо
-9 ч. Детерминированный генератор и независимый валидатор расписаний (каждое решение ниже
-проверено одним и тем же Python-кодом):
-[`tools/competitors/vrptw_moscow.py`](tools/competitors/vrptw_moscow.py).
-Две точки бюджета на солвер, стоимость @ время (машины).
-
-| n | commiv (SISR-TW) | VROOM уровень 1 / 5 | OR-Tools 60 с |
-|---|---|---|---|
-| 100  | **45 993 @ 1.7 с (10 машин)** | 46 486 @ 1.7 с (11) | 47 538 @ 60 с (11) |
-| 1000 | **232 544 @ 3.5 с** (51); 229 909 @ 30 с при 3M итераций | 246 573 @ 22 с / 239 977 @ 341 с (50) | 267 897 @ 60 с (53) |
-| 2000 | **412 602 @ 10 с, 3 потока** (102) | не запускался¹ | не запускался¹ |
-
-<sub>commiv: `solveVrptwSisr`, 300k итераций по умолчанию, однопоточно, кроме n=2000
-(лучшее из 3 цепочек). VROOM 3 ядра, OR-Tools 1. Сиды {7, 42, 12345} при n=1000 дают
-231 417–232 544; лучшее из 3 параллельно: 231 892 @ 4.9 с. Целевая функция — чистое
-расстояние (`veh_penalty = 0`); решение VROOM при n=1000 использует на одну машину меньше
-ценой +3.2% расстояния. ¹ Конкуренты при n=2000 не запускались: VROOM уровня 5 тратит
-1607 с на той же матрице даже без окон.</sub>
-
-Историю этой таблицы стоит рассказать честно. В первой опубликованной версии это был
-единственный бенчмарк, который commiv не выигрывал: старый движок VRPTW (ILS по гигантскому
-туру, старше SISR) тратил 988 с на 238 829 при n=1000 — ничья с VROOM при тройном времени.
-Исправлением стал перенос флагманского движка CVRP: SISR с временными окнами, встроенными в
-recreate через O(1)-проверку допустимости по запасам времени (Tws). Этот движок
-(`solveVrptwSisr`, теперь по умолчанию везде) даёт числа выше: стоимость лучше каждой точки
-каждого конкурента на каждом размере, за секунды, плюс сэкономленная машина при n=100.
-Старый ILS остаётся доступным как `solveVrptw` и воспроизводит таблицу Solomon; на Solomon
-SISR лучше него уже на бюджете по умолчанию (0.135% против 0.182% при совпадении машин,
-~3x быстрее) и добирает число машин при увеличении бюджета — включая знаменитый rc101 с
-14 машинами (2M итераций, 12 с) благодаря fleet-min разрушению, которое опустошает
-наименьший маршрут при заданном `veh_penalty`. Один отрицательный результат, честно:
-разрушение split-string («индукция запаса») из CVRP с окнами измеримо ХУЖЕ (Москва n=1000:
-+0.8%), поэтому для VRPTW оно выключено по умолчанию.
-
----
 
 ## commiv против остальных
 
@@ -1332,8 +907,10 @@ SISR лучше него уже на бюджете по умолчанию (0.1
   быстрее всего, что здесь есть. commiv нацелен на направленный режим масштаба маршрутизации
   (от сотен до нескольких тысяч).
 - **Производственная зрелость.** OR-Tools и VROOM — обкатанные стеки с богатым набором
-  ограничений (временные окна, pickup-and-delivery, навыки, перерывы) и годами эксплуатации.
-  commiv — быстрое сфокусированное ядро, а не полноценная логистическая платформа.
+  ограничений (навыки, перерывы, мульти-депо, смены водителей) и годами эксплуатации.
+  commiv покрывает вместимости, временные окна, pickup-and-delivery, фиксацию флота и
+  денежную целевую функцию, но это быстрое сфокусированное ядро, а не полноценная
+  логистическая платформа.
 
 ---
 
@@ -1391,38 +968,22 @@ SISR лучше него уже на бюджете по умолчанию (0.1
 
 ---
 
-## Ускорение на GPU (спроектировано, не реализовано)
+## Ускорение на GPU (замерено: не окупается)
 
-Сегодня commiv работает только на CPU. Самый крупный нетронутый источник ускорения — это GPU.
-Горячий цикл SISR оценивает миллионы независимых дельт ходов в секунду, это до неприличия
-параллельная пакетная редукция, которая чисто ложится на GPU, с направленной матрицей,
-размещённой в памяти устройства (100 МБ при n=5000 влезает в любую современную карту). Полное
-техзадание (пакетное ядро дельт ходов, массивные острова «лучшее из K», CUDA FFI, матрица в
-памяти устройства) — в [`gpu.md`](gpu.md). Оно не реализовано (в среде разработки нет GPU), но
-это самый вероятный путь к ещё одному порядку величины при большом n.
+Замерено и закрыто на GTX 1660 Ti (2026-07-13): ядро пакетной оценки ходов — 0.11x от
+12 потоков CPU при n=1001; 1536 параллельных цепочек на GPU — лишь 0.55x суммарной
+пропускной способности CPU. Сильные стороны движка (разреженный поиск, глубокий отжиг,
+цепочки выталкивания) — ровно та работа, которую GPU делает плохо. Полные данные и
+условия пересмотра: [`tools/gpu-probe/GPU-REPORT.md`](tools/gpu-probe/GPU-REPORT.md).
 
----
 
 ## Воспроизведение бенчмарков
 
-Стандартные инстансы поставляются в `vendor/` (TSPLIB, CVRPLIB Augerat и Uchoa X, ATSP, ACVRP,
-Solomon и матрицы Moscow OSRM в `vendor/road/`). Матрица `moscow-5000` сжата, так что выполните
-`gunzip vendor/road/moscow-5000.road.gz` перед использованием. Адаптеры конкурентов (OR-Tools,
-LKH-3 с тёплым стартом, VROOM и нижняя граница назначения) плюс заметки по настройке — в
-[`tools/competitors/`](tools/competitors/). Чтобы заново выкачать матрицу по Москве с
-самостоятельно поднятого OSRM, используйте
-[`tools/fetch_road_matrix.py`](tools/fetch_road_matrix.py).
+Инстансы лежат в `vendor/` (TSPLIB, CVRPLIB, ATSP, ACVRP, Solomon, Gehring-Homberger,
+Li & Lim, дорожные матрицы в `vendor/road/`). Адаптеры конкурентов — в
+[`tools/competitors/`](tools/competitors/). Команды сборки бенчей — в английской части
+выше; конфигурация каждой ячейки задокументирована в [BENCHMARKS.md](BENCHMARKS.md).
 
-Бенчмарки разрывов собирают собственный бинарник, который вы затем запускаете:
-
-```sh
-zig build cvrpbench  -Doptimize=ReleaseFast && ./zig-out/bin/commiv-cvrpbench   # CVRP против оптимумов
-zig build acvrpbench -Doptimize=ReleaseFast && ./zig-out/bin/commiv-acvrpbench  # асимметричная CVRP против LKH-3
-zig build atspbench  -Doptimize=ReleaseFast && ./zig-out/bin/commiv-atspbench   # ATSP против доказанных оптимумов
-zig build vrptwbench -Doptimize=ReleaseFast && ./zig-out/bin/commiv-vrptwbench  # VRPTW против SINTEF BKS
-zig build roadbench  -Doptimize=ReleaseFast && ./zig-out/bin/commiv-roadbench   # реальная направленная матрица по Москве
-zig build bench      -Doptimize=ReleaseFast                                     # бенчмарк TSP (запускается)
-```
 
 ## Лицензия
 
