@@ -46,12 +46,16 @@ def run(name):
             "delivery": {"id": d[0], "location_index": d[0],
                          "time_windows": [[d[4]*SCALE, d[5]*SCALE]], "service": d[6]*SCALE},
         })
-    nveh = 2 * K if FLEETMIN else K
+    # VROOM_FIXED=<scaled units>: money mode — free fleet (2x BKS) with a real
+    # per-vehicle fixed cost, the closest VROOM gets to a money objective (it
+    # cannot price duration/waiting; see VROOM issue #1130).
+    money_fixed = int(os.environ.get("VROOM_FIXED", "0"))
+    nveh = 2 * K if (FLEETMIN or money_fixed) else K
     vehicles = [{"id": i+1, "start_index": 0, "end_index": 0, "capacity": [cap],
                  "time_window": [0, horizon]} for i in range(nveh)]
-    if FLEETMIN:
+    if FLEETMIN or money_fixed:
         for v in vehicles:
-            v["costs"] = {"fixed": FIXED}
+            v["costs"] = {"fixed": money_fixed or FIXED}
     query = {"shipments": shipments, "vehicles": vehicles,
              "matrices": {"car": {"durations": mat, "costs": mat}}}
     t0 = time.time()
@@ -67,9 +71,11 @@ def run(name):
     unass = len(out["summary"].get("unassigned", [])) if isinstance(out["summary"].get("unassigned"), list) else out["summary"].get("unassigned", 0)
     cost = out["summary"]["cost"]
     used = sum(1 for rt in out.get("routes", []) if rt.get("steps"))
-    if FLEETMIN:
-        cost -= FIXED * used  # report pure distance; fleet shows in veh=
-    return name, cost, unass, wall, f"veh={used}"
+    if FLEETMIN or money_fixed:
+        cost -= (money_fixed or FIXED) * used  # report pure travel; fleet shows in veh=
+    s = out["summary"]
+    dur = s.get("duration", 0) + s.get("waiting_time", 0) + s.get("service", 0)
+    return name, cost, unass, wall, f"veh={used},dur={dur},wait={s.get('waiting_time', 0)}"
 
 if __name__ == "__main__":
     for name in sys.argv[1].split(","):
