@@ -38,6 +38,7 @@ pub fn main(init: std.process.Init) !void {
     const n_threads = try std.fmt.parseInt(usize, env.get("PB_THREADS") orelse "1", 10); // >1: parallel fleet-min waves
     const gran_gaps = try std.fmt.parseInt(u2, env.get("PB_GRAN") orelse "0", 10); // granular gaps mask: 1 pickup, 2 dropoff, 3 both
     const eject = std.mem.eql(u8, env.get("PB_EJECT") orelse "0", "1"); // GES squeeze fallback in capped runs
+    const eject_k = try std.fmt.parseInt(u8, env.get("PB_EJECTK") orelse "1", 10); // max residents ejected per squeeze (1..3)
     const swap_kick = try std.fmt.parseInt(usize, env.get("PB_SWAP") orelse "0", 10); // pair-exchange kick period (0 = off)
     const p0_pct = try std.fmt.parseInt(u8, env.get("PB_P0") orelse "40", 10); // uncapped phase % of fleet-min budget
     const pin_mode = std.mem.eql(u8, env.get("PB_PIN") orelse "0", "1"); // pinned-fleet driver: pin = PB_CAP, or BKS fleet if unset
@@ -87,6 +88,7 @@ pub fn main(init: std.process.Init) !void {
             .blink = blink,
             .gran_gaps = gran_gaps,
             .eject = eject,
+            .eject_k = eject_k,
             .swap_kick = swap_kick,
             .fleet_p0_pct = p0_pct,
             .time_penalty = time_pen,

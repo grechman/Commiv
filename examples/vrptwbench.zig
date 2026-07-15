@@ -52,6 +52,7 @@ pub fn main(init: std.process.Init) !void {
         const vt_fleetmin = std.mem.eql(u8, env.get("VT_FLEETMIN") orelse "0", "1");
         const vt_time_ms = try std.fmt.parseInt(u64, env.get("VT_TIME_MS") orelse "10000", 10);
         const vt_eject = std.mem.eql(u8, env.get("VT_EJECT") orelse "0", "1");
+        const vt_eject_k = try std.fmt.parseInt(u8, env.get("VT_EJECTK") orelse "1", 10); // max residents ejected per squeeze (1..3)
         const vt_p0 = try std.fmt.parseInt(u8, env.get("VT_P0") orelse "40", 10);
         const use_sisr = vt_fleetmin or std.mem.eql(u8, env.get("VT_ENGINE") orelse "ils", "sisr");
         // Fleet-min is time-governed: iters just needs to be big enough to
@@ -76,7 +77,7 @@ pub fn main(init: std.process.Init) !void {
             .generations = try std.fmt.parseInt(usize, env.get("VT_GENS") orelse "30", 10),
             .veh_penalty = veh_penalty,
         }) else if (use_sisr) blk: {
-            const sisr_params = commiv.VrptwSisrParams{ .iters = sisr_iters, .veh_penalty = veh_penalty, .adjacent_gaps = adjacent_gaps, .polish = polish, .stress_rate = stress, .tabu_tenure = tabu, .marathon = marathon, .nbr_key = nbr_key, .gk = vt_gk, .final_ls = std.mem.eql(u8, env.get("VT_FINAL_LS") orelse "0", "1"), .eject = vt_eject, .fleet_p0_pct = vt_p0 };
+            const sisr_params = commiv.VrptwSisrParams{ .iters = sisr_iters, .veh_penalty = veh_penalty, .adjacent_gaps = adjacent_gaps, .polish = polish, .stress_rate = stress, .tabu_tenure = tabu, .marathon = marathon, .nbr_key = nbr_key, .gk = vt_gk, .final_ls = std.mem.eql(u8, env.get("VT_FINAL_LS") orelse "0", "1"), .eject = vt_eject, .eject_k = vt_eject_k, .fleet_p0_pct = vt_p0 };
             break :blk if (vt_fleetmin)
                 try commiv.solveVrptwSisrFleetMin(allocator, inst, solve_opts, sisr_params, vt_time_ms)
             else
