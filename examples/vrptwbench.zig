@@ -45,8 +45,18 @@ pub fn main(init: std.process.Init) !void {
             .candidates = .{ .candidate_count = @min(@as(usize, 10), n - 1), .candidate_mode = .alpha_nearness, .sparse_min_dimension = 0 },
             .search = .{ .enable_lk = true, .lk_max_depth = 5 },
         };
-        const use_sisr = std.mem.eql(u8, env.get("VT_ENGINE") orelse "ils", "sisr");
-        const sisr_iters = try std.fmt.parseInt(usize, env.get("VT_ITERS") orelse "300000", 10);
+        // VT_FLEETMIN=1 runs the hierarchical fleet-min driver (implies the
+        // SISR engine) instead of a single solveVrptwSisr call; VT_TIME_MS is
+        // its total wall budget, VT_EJECT enables the GES squeeze fallback on
+        // capped attempts, VT_P0 is the uncapped-run budget share (percent).
+        const vt_fleetmin = std.mem.eql(u8, env.get("VT_FLEETMIN") orelse "0", "1");
+        const vt_time_ms = try std.fmt.parseInt(u64, env.get("VT_TIME_MS") orelse "10000", 10);
+        const vt_eject = std.mem.eql(u8, env.get("VT_EJECT") orelse "0", "1");
+        const vt_p0 = try std.fmt.parseInt(u8, env.get("VT_P0") orelse "40", 10);
+        const use_sisr = vt_fleetmin or std.mem.eql(u8, env.get("VT_ENGINE") orelse "ils", "sisr");
+        // Fleet-min is time-governed: iters just needs to be big enough to
+        // never be the binding stop condition, unless the caller overrode it.
+        const sisr_iters = try std.fmt.parseInt(usize, env.get("VT_ITERS") orelse if (vt_fleetmin) "4611686018427387904" else "300000", 10);
         const adjacent_gaps = std.mem.eql(u8, env.get("VT_ADJ_GAPS") orelse "0", "1");
         // Long-run quality levers; VT_COMBO=1 = the measured-best set (polish +
         // stress 0.5 + tabu 10000 + marathon), individual knobs override.
@@ -65,9 +75,13 @@ pub fn main(init: std.process.Init) !void {
             .lambda = try std.fmt.parseInt(usize, env.get("VT_LAMBDA") orelse "40", 10),
             .generations = try std.fmt.parseInt(usize, env.get("VT_GENS") orelse "30", 10),
             .veh_penalty = veh_penalty,
-        }) else if (use_sisr)
-            try commiv.solveVrptwSisr(allocator, inst, solve_opts, .{ .iters = sisr_iters, .veh_penalty = veh_penalty, .adjacent_gaps = adjacent_gaps, .polish = polish, .stress_rate = stress, .tabu_tenure = tabu, .marathon = marathon, .nbr_key = nbr_key, .gk = vt_gk, .final_ls = std.mem.eql(u8, env.get("VT_FINAL_LS") orelse "0", "1") })
-        else
+        }) else if (use_sisr) blk: {
+            const sisr_params = commiv.VrptwSisrParams{ .iters = sisr_iters, .veh_penalty = veh_penalty, .adjacent_gaps = adjacent_gaps, .polish = polish, .stress_rate = stress, .tabu_tenure = tabu, .marathon = marathon, .nbr_key = nbr_key, .gk = vt_gk, .final_ls = std.mem.eql(u8, env.get("VT_FINAL_LS") orelse "0", "1"), .eject = vt_eject, .fleet_p0_pct = vt_p0 };
+            break :blk if (vt_fleetmin)
+                try commiv.solveVrptwSisrFleetMin(allocator, inst, solve_opts, sisr_params, vt_time_ms)
+            else
+                try commiv.solveVrptwSisr(allocator, inst, solve_opts, sisr_params);
+        } else
             try commiv.solveVrptw(allocator, inst, solve_opts, .{ .rounds = rounds, .restarts = restarts, .veh_penalty = veh_penalty });
         defer res.deinit();
         const ms = @as(f64, @floatFromInt(nanos() - t0)) / 1e6;

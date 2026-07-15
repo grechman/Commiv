@@ -2107,6 +2107,27 @@ pub const VrptwSisrParams = struct {
     // short-run defaults above. Below the 1M-iter gate this is a no-op — the
     // default (false) path is bit-identical to before this flag existed.
     marathon: bool = false,
+    // Wall-clock cap in milliseconds, checked every 256 iterations (0 = none,
+    // the default — `iters` alone governs the loop, bit-identical to before
+    // this knob existed).
+    time_ms: u64 = 0,
+    // Fleet cap (0 = uncapped). When set, recreate may not open a route past
+    // the cap; customers with no feasible insertion sit in an unassigned pool
+    // (request bank) under a penalty that dominates everything else, and the
+    // engine keeps retrying them each iteration. The solve only reports
+    // solutions with an empty pool; error.NoCompleteSolution if none found.
+    max_vehicles: usize = 0,
+    // GES-style squeeze fallback (Nagata & Kobayashi 2010) for capped runs:
+    // when a banked customer has no feasible insertion and no route may open,
+    // insert it at the least-violating position (time warp + load excess)
+    // and eject the cheapest resident customer that restores feasibility.
+    // Ejection counters steer away from cycling. Only fires when
+    // max_vehicles > 0 blocks opening a route; default off.
+    eject: bool = false,
+    // Share of the fleet-min driver's total budget spent on the initial
+    // uncapped run, in percent. The SISR paper front-loads route minimization;
+    // lower values hand the descent more time.
+    fleet_p0_pct: u8 = 40,
 };
 
 const SisrTwRoute = struct {
@@ -2177,6 +2198,14 @@ const SisrTw = struct {
     // and left as an empty slice otherwise — every access is gated by
     // `params.tabu_tenure > 0` so the off path never indexes it.
     tabu_until: []u64 = &.{},
+    // Customers currently in the request bank (loc_route[c] == NO_ROUTE).
+    // INVARIANT: always equals the count of NO_ROUTE entries in loc_route;
+    // maintained inside the mutation primitives (removeString/insertAt/
+    // rollback), so ruin/recreate/polish/squeeze stay balanced automatically.
+    n_unassigned: usize = 0,
+    // Customer id -> times it forced a squeeze (GES guidance, see
+    // squeezeInsert/ejectCandidate). Sized n+1, allocated in init.
+    eject_pen: []u32,
 
     const NO_ROUTE = std.math.maxInt(usize);
     // dist/load are route `ri`'s values from BEFORE the logged mutation;
@@ -2197,8 +2226,10 @@ const SisrTw = struct {
             .loc_pos = try allocator.alloc(usize, inst.n + 1),
             .cand_mark = &.{},
             .ruin_mark = &.{},
+            .eject_pen = try allocator.alloc(u32, inst.n + 1),
         };
         @memset(s.loc_route, NO_ROUTE);
+        @memset(s.eject_pen, 0);
         return s;
     }
 
@@ -2207,6 +2238,7 @@ const SisrTw = struct {
         s.routes.deinit(s.allocator);
         s.allocator.free(s.loc_route);
         s.allocator.free(s.loc_pos);
+        s.allocator.free(s.eject_pen);
         s.undo_ops.deinit(s.allocator);
         s.undo_items.deinit(s.allocator);
         if (s.cand_mark.len > 0) s.allocator.free(s.cand_mark);
@@ -2306,6 +2338,7 @@ const SisrTw = struct {
                         s.nonempty += 1;
                         s.cost += s.veh_penalty;
                     }
+                    s.n_unassigned -= op.len;
                 },
                 .insert => |op| {
                     const r = &s.routes.items[op.ri];
@@ -2324,6 +2357,7 @@ const SisrTw = struct {
                         s.cost -= s.veh_penalty;
                         if (op.ri < s.min_empty_hint) s.min_empty_hint = op.ri;
                     }
+                    s.n_unassigned += 1;
                 },
             }
         }
@@ -2423,6 +2457,16 @@ const SisrTw = struct {
     /// integer +/- is exact and reorder-invariant, so this is bit-identical to
     /// the old full-recompute path.
     fn removeString(s: *SisrTw, ri: usize, start: usize, len: usize) !void {
+        try s.removeStringImpl(ri, start, len, true);
+    }
+
+    /// Same removal as removeString, with `bank` gating whether the removed
+    /// customers are appended to s.removed. bank=false is used by
+    /// squeezeInsert, which runs while recreate is mid-`for (s.removed.items)`
+    /// — appending there could realloc the slice recreate is iterating, UB.
+    /// n_unassigned is incremented either way: it counts loc_route==NO_ROUTE
+    /// customers regardless of whether they're tracked in s.removed.
+    fn removeStringImpl(s: *SisrTw, ri: usize, start: usize, len: usize, bank: bool) !void {
         const r = &s.routes.items[ri];
         try s.undo_ops.append(s.allocator, .{ .remove = .{ .ri = ri, .start = start, .seg = s.undo_items.items.len, .len = len, .dist = r.dist, .load = r.load } });
         const old_items = r.items.items;
@@ -2438,8 +2482,9 @@ const SisrTw = struct {
         for (old_items[start .. start + len]) |c| {
             removed_load += s.inst.demand[c];
             s.loc_route[c] = NO_ROUTE;
-            try s.removed.append(s.allocator, c);
+            if (bank) try s.removed.append(s.allocator, c);
             try s.undo_items.append(s.allocator, c);
+            s.n_unassigned += 1;
         }
         try r.items.replaceRange(s.allocator, start, len, &.{});
         for (r.items.items[start..], start..) |c, p| s.loc_pos[c] = p;
@@ -2473,6 +2518,8 @@ const SisrTw = struct {
     /// route was empty) is replaced by two new arcs, computed as an O(1) integer
     /// delta instead of an O(route) arcSum.
     fn insertAt(s: *SisrTw, ri: usize, g: usize, c: usize) !void {
+        // The inserted customer always comes from the request bank.
+        if (builtin.mode == .Debug) std.debug.assert(s.loc_route[c] == NO_ROUTE);
         const r = &s.routes.items[ri];
         try s.undo_ops.append(s.allocator, .{ .insert = .{ .ri = ri, .g = g, .dist = r.dist, .load = r.load } });
         const old_len = r.items.items.len;
@@ -2484,6 +2531,7 @@ const SisrTw = struct {
             s.loc_route[cc] = ri;
             s.loc_pos[cc] = p;
         }
+        s.n_unassigned -= 1;
         const old_dist = r.dist;
         r.dist = if (was_empty) s.inst.d(0, c) + s.inst.d(c, 0) else old_dist + s.inst.d(prev, c) + s.inst.d(c, next) - s.inst.d(prev, next);
         r.load += s.inst.demand[c];
@@ -2577,6 +2625,16 @@ const SisrTw = struct {
     fn ruin(s: *SisrTw, params: VrptwSisrParams, rng: std.Random, it: usize) !void {
         const n = s.inst.n;
         s.removed.clearRetainingCapacity();
+
+        // Request bank: unassigned customers (a capped run's leftovers) re-enter
+        // recreate every iteration. Uncapped this never fires (n_unassigned is
+        // always 0), so the default path draws no extra RNG and does no extra work.
+        if (s.n_unassigned > s.removed.items.len) {
+            for (1..n + 1) |c| {
+                if (s.loc_route[c] == NO_ROUTE) try s.removed.append(s.allocator, c);
+            }
+        }
+
         s.generation += 1;
 
         var seed_c = 1 + rng.uintLessThan(usize, n);
@@ -2736,14 +2794,106 @@ const SisrTw = struct {
                 }
             }
 
+            const may_open = params.max_vehicles == 0 or s.nonempty < params.max_vehicles;
             const singleton: i64 = @intCast(s.inst.d(0, c) + s.inst.d(c, 0) + s.veh_penalty);
-            if (best_ri == NO_ROUTE or singleton < best_delta) {
+            if (best_ri == NO_ROUTE and !may_open) {
+                if (params.eject) _ = try s.squeezeInsert(c, params);
+                continue; // otherwise stays in the request bank
+            }
+            if ((best_ri == NO_ROUTE or singleton < best_delta) and may_open) {
                 const slot = if (empty_slot != NO_ROUTE) empty_slot else try s.addSlot();
                 try s.insertAt(slot, 0, c);
             } else {
                 try s.insertAt(best_ri, best_g, c);
             }
         }
+    }
+
+    const InsV = struct { viol: u64, delta: i64 };
+
+    /// Least-violating insertion of `c` at gap `g` of (freshened) route `ri`:
+    /// SAME arithmetic as gapDelta but WITHOUT feasibility pruning — every gap
+    /// is scored by viol = final time warp + load excess, ties by distance
+    /// delta. Used only by the squeeze fallback, so no blinks, no granular
+    /// gating, no capacity pre-filter.
+    fn evalInsertViol(s: *SisrTw, ri: usize, g: usize, c: usize) InsV {
+        const r = &s.routes.items[ri];
+        const it = r.items.items;
+        const prev: usize = if (g == 0) 0 else it[g - 1];
+        const next: usize = if (g == it.len) 0 else it[g];
+        const with_c = Tws.merge(r.pre.items[g], @intCast(s.inst.d(prev, c)), Tws.client(s.inst, c));
+        const full = Tws.merge(with_c, @intCast(s.inst.d(c, next)), r.suf.items[g]);
+        const load_after: u64 = r.load + s.inst.demand[c];
+        const viol: u64 = @as(u64, @intCast(full.tw)) + (load_after -| @as(u64, s.inst.capacity));
+        const delta: i64 = @as(i64, @intCast(s.inst.d(prev, c) + s.inst.d(c, next))) - @as(i64, @intCast(s.inst.d(prev, next)));
+        return .{ .viol = viol, .delta = delta };
+    }
+
+    /// After a squeeze insertion made route `ri` infeasible, find the resident
+    /// customer (excluding `skip`) whose removal restores full feasibility (TW
+    /// via the freshened pre/suf Tws concat, load via the freshened running
+    /// total), preferring the lowest ejection counter, ties by lowest customer
+    /// id. Returns the customer id, or null. `ri` must have been freshened (or
+    /// is freshened here) AFTER the squeeze insert that dirtied it.
+    fn ejectCandidate(s: *SisrTw, ri: usize, skip: usize) !?usize {
+        try s.freshen(ri);
+        const r = &s.routes.items[ri];
+        const it = r.items.items;
+        var best: ?usize = null;
+        for (it, 0..) |x, e| {
+            if (x == skip) continue;
+            const prev: usize = if (e == 0) 0 else it[e - 1];
+            const next: usize = if (e + 1 == it.len) 0 else it[e + 1];
+            const merged = Tws.merge(r.pre.items[e], @intCast(s.inst.d(prev, next)), r.suf.items[e + 1]);
+            const ok = merged.tw == 0 and r.load - s.inst.demand[x] <= @as(u64, s.inst.capacity);
+            if (!ok) continue;
+            if (best == null or s.eject_pen[x] < s.eject_pen[best.?] or
+                (s.eject_pen[x] == s.eject_pen[best.?] and x < best.?)) best = x;
+        }
+        return best;
+    }
+
+    /// GES squeeze (Nagata & Kobayashi 2010): insert `c` at the least-violating
+    /// position among its kNN candidate routes, then eject one resident
+    /// customer to restore feasibility. The ejected customer goes to the
+    /// request bank via a bank=false removal (recreate is iterating
+    /// s.removed — see removeStringImpl). Returns true on success; on failure
+    /// `c` is removed again (also bank=false) and stays banked.
+    fn squeezeInsert(s: *SisrTw, c: usize, params: VrptwSisrParams) !bool {
+        _ = params;
+        s.generation += 1;
+        var best_ri: usize = NO_ROUTE;
+        var best_g: usize = 0;
+        var best: InsV = undefined;
+        for (0..s.gk) |t| {
+            const nb = s.gran[(c - 1) * s.gk + t];
+            if (nb == 0) continue;
+            const ri = s.loc_route[nb];
+            if (ri == NO_ROUTE) continue;
+            if (s.cand_mark[ri] == s.generation) continue;
+            s.cand_mark[ri] = s.generation;
+            try s.freshen(ri);
+            const glen = s.routes.items[ri].items.items.len;
+            for (0..glen + 1) |g| {
+                const ins = s.evalInsertViol(ri, g, c);
+                if (best_ri == NO_ROUTE or ins.viol < best.viol or (ins.viol == best.viol and ins.delta < best.delta)) {
+                    best_ri = ri;
+                    best_g = g;
+                    best = ins;
+                }
+            }
+        }
+        if (best_ri == NO_ROUTE) return false;
+
+        try s.insertAt(best_ri, best_g, c);
+        const ec = (try s.ejectCandidate(best_ri, c)) orelse {
+            try s.removeStringImpl(best_ri, s.loc_pos[c], 1, false);
+            s.eject_pen[c] +|= 1;
+            return false;
+        };
+        try s.removeStringImpl(best_ri, s.loc_pos[ec], 1, false);
+        s.eject_pen[c] +|= 1;
+        return true;
     }
 
     /// Distance delta of removing the single customer at `items[pos]` of route
@@ -2845,6 +2995,12 @@ const SisrTw = struct {
     }
 };
 
+fn nanos() u64 {
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
+}
+
 /// SISR solver for (symmetric or asymmetric) VRPTW, uncapped fleet: the CVRP
 /// flagship engine with time windows wired into recreate via the Tws algebra.
 /// Large and/or directed instances converge orders of magnitude faster than
@@ -2852,6 +3008,15 @@ const SisrTw = struct {
 /// the two are comparable. Requires every customer to be feasible as a
 /// singleton route (otherwise error.Infeasible — no solution exists).
 pub fn solveVrptwSisr(allocator: std.mem.Allocator, inst: VrptwInstance, options: solver.SolveOptions, params: VrptwSisrParams) !VrptwResult {
+    return solveVrptwSisrFrom(allocator, inst, options, params, &.{});
+}
+
+/// Same engine, seeded from `warm` routes instead of the giant-tour + Split
+/// construction (used by the fleet-min driver so capped descents keep the
+/// incumbent's packing instead of restarting cold). `warm` must be a complete
+/// feasible solution (every customer exactly once); pass `&.{}` for the normal
+/// cold start — that is exactly what `solveVrptwSisr` does.
+pub fn solveVrptwSisrFrom(allocator: std.mem.Allocator, inst: VrptwInstance, options: solver.SolveOptions, params: VrptwSisrParams, warm: []const []const usize) !VrptwResult {
     const n = inst.n;
     if (inst.demand.len != n + 1 or inst.matrix.len != (std.math.mul(usize, n + 1, n + 1) catch return error.InvalidInstance)) return error.InvalidInstance;
     if (inst.ready.len != n + 1 or inst.due.len != n + 1 or inst.service.len != n + 1) return error.InvalidInstance;
@@ -2863,19 +3028,6 @@ pub fn solveVrptwSisr(allocator: std.mem.Allocator, inst: VrptwInstance, options
         if (start > inst.due[c] or start + inst.service[c] + inst.d(c, 0) > inst.due[0]) return error.Infeasible;
     }
 
-    // Seed: directed giant tour (read in place off the customer block) -> TW Split.
-    var giant_buf: []usize = try allocator.alloc(usize, n);
-    defer allocator.free(giant_buf);
-    if (n >= 3) {
-        var atsp = try asymmetric.solveAtspNativeView(allocator, inst.matrix, n, n + 1, 1, options);
-        defer atsp.deinit();
-        for (atsp.tour, 0..) |c, idx| giant_buf[idx] = c + 1;
-    } else {
-        for (0..n) |i| giant_buf[i] = i + 1;
-    }
-    const sp = try splitDpTw(allocator, inst, giant_buf, params.veh_penalty);
-    defer allocator.free(sp.pred);
-
     const gk: usize = @min(if (params.gk == 0) @as(usize, 20) else params.gk, if (n > 1) n - 1 else 1);
     const gran = try buildNeighborsKeyed(allocator, inst, gk, params.nbr_key);
     defer allocator.free(gran);
@@ -2886,7 +3038,21 @@ pub fn solveVrptwSisr(allocator: std.mem.Allocator, inst: VrptwInstance, options
         cur.tabu_until = try allocator.alloc(u64, n + 1);
         @memset(cur.tabu_until, 0);
     }
-    {
+
+    if (warm.len == 0) {
+        // Seed: directed giant tour (read in place off the customer block) -> TW Split.
+        var giant_buf: []usize = try allocator.alloc(usize, n);
+        defer allocator.free(giant_buf);
+        if (n >= 3) {
+            var atsp = try asymmetric.solveAtspNativeView(allocator, inst.matrix, n, n + 1, 1, options);
+            defer atsp.deinit();
+            for (atsp.tour, 0..) |c, idx| giant_buf[idx] = c + 1;
+        } else {
+            for (0..n) |i| giant_buf[i] = i + 1;
+        }
+        const sp = try splitDpTw(allocator, inst, giant_buf, params.veh_penalty);
+        defer allocator.free(sp.pred);
+
         // install seed routes from the Split pred chain (walk back, emit forward)
         var bounds: std.ArrayList([2]usize) = .empty;
         defer bounds.deinit(allocator);
@@ -2901,10 +3067,41 @@ pub fn solveVrptwSisr(allocator: std.mem.Allocator, inst: VrptwInstance, options
             const ri = try cur.addSlot();
             try cur.installRoute(ri, giant_buf[bounds.items[bi][0]..bounds.items[bi][1]]);
         }
+    } else {
+        // Dispatch/descent warms must be complete and feasible; unlike PDPTW
+        // dispatch there is no partial-warm mode for VRPTW.
+        if (validate(inst, warm) == null) return error.InvalidWarmStart;
+        for (warm) |r| {
+            const ri = try cur.addSlot();
+            try cur.installRoute(ri, r);
+        }
     }
 
-    var best = try cur.toResult(allocator);
-    errdefer best.deinit();
+    // Under a fleet cap the seed may exceed it: empty the smallest surplus
+    // routes into the request bank before the loop starts.
+    if (params.max_vehicles > 0) {
+        while (cur.nonempty > params.max_vehicles) {
+            var smallest: usize = std.math.maxInt(usize);
+            var slen: usize = std.math.maxInt(usize);
+            for (cur.routes.items, 0..) |r, i| {
+                const len = r.items.items.len;
+                if (len > 0 and len < slen) {
+                    smallest = i;
+                    slen = len;
+                }
+            }
+            if (smallest == std.math.maxInt(usize)) break;
+            try cur.removeString(smallest, 0, slen);
+        }
+        cur.removed.clearRetainingCapacity(); // bank is re-derived each ruin
+        // These trims are permanent seeding, not iteration-0's transaction —
+        // clear their undo journal so the first loop iteration's rollback (if
+        // rejected) can't replay them and resurrect the surplus routes.
+        cur.commit();
+    }
+
+    var best: ?VrptwResult = if (cur.n_unassigned == 0) try cur.toResult(allocator) else null;
+    errdefer if (best) |*b| b.deinit();
     var best_cost = cur.cost;
 
     var prng = std.Random.DefaultPrng.init(options.seed ^ 0x51_53_52_7457); // distinct stream from the ILS
@@ -2943,12 +3140,21 @@ pub fn solveVrptwSisr(allocator: std.mem.Allocator, inst: VrptwInstance, options
     // path.
     var accepted_count: usize = 0;
 
+    // Request-bank penalty: dominates veh_penalty, which dominates distance.
+    // On the uncapped default path n_unassigned is always 0 on both sides of
+    // every dt, so this term is always 0 there — bit-identical to before.
+    const UNASSIGNED_PEN: u64 = 1_000_000_000;
+    const t_start = nanos();
     var it: usize = 0;
     while (it < iters) : (it += 1) {
+        if (params.time_ms > 0 and it % 256 == 0 and (nanos() - t_start) / std.time.ns_per_ms >= params.time_ms) break;
         const saved_cost = cur.cost;
+        const saved_unassigned = cur.n_unassigned;
         try cur.ruin(eff_params, rng, it);
         try cur.recreate(eff_params, rng);
-        const dt = @as(i64, @intCast(cur.cost)) - @as(i64, @intCast(saved_cost));
+        const eff = cur.cost + UNASSIGNED_PEN * @as(u64, @intCast(cur.n_unassigned));
+        const saved_eff = saved_cost + UNASSIGNED_PEN * @as(u64, @intCast(saved_unassigned));
+        const dt = @as(i64, @intCast(eff)) - @as(i64, @intCast(saved_eff));
         if (@as(f64, @floatFromInt(dt)) < temp) {
             var do_polish = false;
             if (params.polish) {
@@ -2986,19 +3192,23 @@ pub fn solveVrptwSisr(allocator: std.mem.Allocator, inst: VrptwInstance, options
                 try cur.polish(touched_scratch.items);
                 cur.commit(); // fold polish's own journal in — never rollback-able
             }
-            if (cur.cost < best_cost) {
+            if (cur.n_unassigned == 0 and (best == null or cur.cost < best_cost)) {
                 best_cost = cur.cost;
-                best.deinit();
+                if (best) |*b| b.deinit();
                 best = try cur.toResult(allocator);
             }
         } else {
             try cur.rollback();
             // Debug invariant (mirrors the CVRP engine): rollback must restore the
-            // incremental cost exactly, or the undo journal is corrupting state.
+            // incremental cost and unassigned count exactly, or the undo journal
+            // is corrupting state.
             if (builtin.mode == .Debug) std.debug.assert(cur.cost == saved_cost);
+            if (builtin.mode == .Debug) std.debug.assert(cur.n_unassigned == saved_unassigned);
         }
         temp *= cf;
     }
+
+    if (best == null) return error.NoCompleteSolution;
 
     if (params.final_ls) {
         // Final education (improvement-only): rebuild a live SisrTw from the
@@ -3009,7 +3219,7 @@ pub fn solveVrptwSisr(allocator: std.mem.Allocator, inst: VrptwInstance, options
         // without this pass.
         var fin = try SisrTw.init(allocator, inst, params.veh_penalty, gran, gk);
         defer fin.deinit();
-        for (best.routes) |route| {
+        for (best.?.routes) |route| {
             const ri = try fin.addSlot();
             try fin.installRoute(ri, route);
         }
@@ -3024,11 +3234,90 @@ pub fn solveVrptwSisr(allocator: std.mem.Allocator, inst: VrptwInstance, options
             if (fin.cost >= before) break;
         }
         if (fin.cost < best_cost) {
-            best.deinit();
+            best.?.deinit();
             best = try fin.toResult(allocator);
         }
     }
-    if (validate(inst, best.routes) == null) return error.Infeasible;
+    if (validate(inst, best.?.routes) == null) return error.Infeasible;
+    return best.?;
+}
+
+/// Hierarchical fleet minimization (the Li & Lim objective): one uncapped run
+/// finds a starting fleet size, then capped runs with a request bank walk the
+/// vehicle count down while time remains. Each success becomes the incumbent;
+/// the first failed cap stops the descent. total_time_ms is split: fleet_p0_pct
+/// for the uncapped run, the rest per descent attempt plus a terminal polish.
+pub fn solveVrptwSisrFleetMin(allocator: std.mem.Allocator, inst: VrptwInstance, options: solver.SolveOptions, params: VrptwSisrParams, total_time_ms: u64) !VrptwResult {
+    var p0 = params;
+    const p0_pct: u64 = @min(@as(u64, params.fleet_p0_pct), 90);
+    p0.time_ms = @max(total_time_ms * p0_pct / 100, 1);
+    p0.max_vehicles = 0;
+    var best = try solveVrptwSisr(allocator, inst, options, p0);
+    errdefer best.deinit();
+
+    const t_start = nanos();
+    var target: usize = best.vehicles;
+    descent: while (target > 1) {
+        target -= 1;
+        const spent = (nanos() - t_start) / std.time.ns_per_ms;
+        const budget = total_time_ms * (100 - p0_pct) / 100;
+        if (spent + 500 >= budget) break;
+        var pk = params;
+        pk.max_vehicles = target;
+        // Packing into a below-natural fleet needs bigger ruins than distance
+        // polishing (measured on the PDPTW twin: cbar 10 fails where cbar 16
+        // succeeds).
+        pk.time_ms = @max((budget - spent) / 2, 500);
+        pk.cbar = @max(pk.cbar, 16.0);
+        pk.l_max = @max(pk.l_max, 16);
+        const warm = try allocator.alloc([]const usize, best.routes.len);
+        defer allocator.free(warm);
+        for (best.routes, 0..) |r, i| warm[i] = r;
+        // Warm start keeps the incumbent's packing but can trap the descent in
+        // its basin (a tight K+1 solution leaves no slack for the banked
+        // customers); a cold construct starts looser. Try warm, then cold.
+        pk.time_ms = @max(pk.time_ms / 2, 250);
+        var res = solveVrptwSisrFrom(allocator, inst, options, pk, warm) catch |err| switch (err) {
+            error.NoCompleteSolution => blk: {
+                break :blk solveVrptwSisr(allocator, inst, options, pk) catch |err2| switch (err2) {
+                    error.NoCompleteSolution => break :descent,
+                    else => return err2,
+                };
+            },
+            else => return err,
+        };
+        if (res.vehicles <= target) {
+            best.deinit();
+            best = res;
+        } else {
+            res.deinit();
+            break :descent;
+        }
+    }
+
+    // terminal polish: whatever time remains, warm-started at the final fleet
+    const spent = (nanos() - t_start) / std.time.ns_per_ms;
+    const p0_ms = @min(p0.time_ms, total_time_ms);
+    if (spent + p0_ms + 500 < total_time_ms) {
+        var pp = params;
+        pp.max_vehicles = best.vehicles;
+        pp.time_ms = total_time_ms - p0_ms - spent;
+        var opts = options;
+        opts.seed = options.seed +% 0x9E3779B97F4A7C15;
+        const warm = try allocator.alloc([]const usize, best.routes.len);
+        defer allocator.free(warm);
+        for (best.routes, 0..) |r, i| warm[i] = r;
+        var res = solveVrptwSisrFrom(allocator, inst, opts, pp, warm) catch |err| switch (err) {
+            error.NoCompleteSolution => return best,
+            else => return err,
+        };
+        if (res.vehicles <= best.vehicles and res.total_cost < best.total_cost) {
+            best.deinit();
+            best = res;
+        } else {
+            res.deinit();
+        }
+    }
     return best;
 }
 
@@ -4372,4 +4661,180 @@ test "VRPTW SISR final_ls: never worse, feasible, default bit-identical" {
     defer on.deinit();
     try std.testing.expect(validate(inst, on.routes) != null);
     try std.testing.expect(on.total_cost <= off.total_cost);
+}
+
+test "VRPTW SISR From: empty warm start is bit-identical to solveVrptwSisr" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0xFEED5EED);
+    const rng = prng.random();
+    const n = 25;
+    const dim = n + 1;
+    const matrix = try allocator.alloc(u32, dim * dim);
+    defer allocator.free(matrix);
+    for (0..dim) |i| {
+        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 60);
+    }
+    const demand = try allocator.alloc(u32, dim);
+    defer allocator.free(demand);
+    const ready = try allocator.alloc(u32, dim);
+    defer allocator.free(ready);
+    const due = try allocator.alloc(u32, dim);
+    defer allocator.free(due);
+    const service = try allocator.alloc(u32, dim);
+    defer allocator.free(service);
+    demand[0] = 0;
+    ready[0] = 0;
+    due[0] = 100_000;
+    service[0] = 0;
+    for (1..dim) |i| {
+        demand[i] = rng.intRangeAtMost(u32, 1, 5);
+        ready[i] = rng.intRangeAtMost(u32, 0, 300);
+        due[i] = ready[i] + rng.intRangeAtMost(u32, 80, 400);
+        service[i] = rng.intRangeAtMost(u32, 1, 10);
+    }
+    const inst = VrptwInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 12, .ready = ready, .due = due, .service = service };
+
+    var a = try solveVrptwSisr(allocator, inst, .{ .seed = 3 }, .{ .iters = 4000, .veh_penalty = 10_000_000 });
+    defer a.deinit();
+    var b = try solveVrptwSisrFrom(allocator, inst, .{ .seed = 3 }, .{ .iters = 4000, .veh_penalty = 10_000_000 }, &.{});
+    defer b.deinit();
+    try std.testing.expectEqual(a.total_cost, b.total_cost);
+    try std.testing.expectEqual(a.vehicles, b.vehicles);
+    try std.testing.expectEqual(a.routes.len, b.routes.len);
+    for (a.routes, b.routes) |ra, rb| try std.testing.expectEqualSlices(usize, ra, rb);
+}
+
+test "VRPTW SISR capped: request bank keeps runs valid and cost-honest" {
+    const allocator = std.testing.allocator;
+    var seed: u64 = 1;
+    while (seed <= 3) : (seed += 1) {
+        var prng = std.Random.DefaultPrng.init(0xBA5E0000 ^ seed);
+        const rng = prng.random();
+        const n = 40;
+        const dim = n + 1;
+        const matrix = try allocator.alloc(u32, dim * dim);
+        defer allocator.free(matrix);
+        for (0..dim) |i| {
+            for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 60);
+        }
+        const demand = try allocator.alloc(u32, dim);
+        defer allocator.free(demand);
+        const ready = try allocator.alloc(u32, dim);
+        defer allocator.free(ready);
+        const due = try allocator.alloc(u32, dim);
+        defer allocator.free(due);
+        const service = try allocator.alloc(u32, dim);
+        defer allocator.free(service);
+        demand[0] = 0;
+        ready[0] = 0;
+        due[0] = 100_000;
+        service[0] = 0;
+        for (1..dim) |i| {
+            // tight relative to capacity=12: at most ~3-4 customers per route
+            demand[i] = rng.intRangeAtMost(u32, 3, 8);
+            ready[i] = rng.intRangeAtMost(u32, 0, 300);
+            due[i] = ready[i] + rng.intRangeAtMost(u32, 80, 400);
+            service[i] = rng.intRangeAtMost(u32, 1, 10);
+        }
+        const inst = VrptwInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 12, .ready = ready, .due = due, .service = service };
+
+        var free_run = try solveVrptwSisr(allocator, inst, .{ .seed = seed }, .{ .iters = 2000, .veh_penalty = 10_000_000 });
+        const target = if (free_run.vehicles > 1) free_run.vehicles - 1 else 1;
+        free_run.deinit();
+
+        var res = solveVrptwSisr(allocator, inst, .{ .seed = seed }, .{
+            .iters = 4000,
+            .veh_penalty = 10_000_000,
+            .max_vehicles = target,
+            .eject = true,
+        }) catch |err| switch (err) {
+            error.NoCompleteSolution => continue, // legal outcome; the point is not crashing/corrupting
+            else => return err,
+        };
+        defer res.deinit();
+        try std.testing.expect(res.vehicles <= target);
+        const checked = validate(inst, res.routes) orelse return error.TestInfeasibleResult;
+        try std.testing.expectEqual(res.total_cost, checked);
+    }
+}
+
+test "VRPTW SISR eject: off by default leaves engine bit-identical" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0xE1EC7);
+    const rng = prng.random();
+    const n = 30;
+    const dim = n + 1;
+    const matrix = try allocator.alloc(u32, dim * dim);
+    defer allocator.free(matrix);
+    for (0..dim) |i| {
+        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 60);
+    }
+    const demand = try allocator.alloc(u32, dim);
+    defer allocator.free(demand);
+    const ready = try allocator.alloc(u32, dim);
+    defer allocator.free(ready);
+    const due = try allocator.alloc(u32, dim);
+    defer allocator.free(due);
+    const service = try allocator.alloc(u32, dim);
+    defer allocator.free(service);
+    demand[0] = 0;
+    ready[0] = 0;
+    due[0] = 100_000;
+    service[0] = 0;
+    for (1..dim) |i| {
+        demand[i] = rng.intRangeAtMost(u32, 1, 5);
+        ready[i] = rng.intRangeAtMost(u32, 0, 300);
+        due[i] = ready[i] + rng.intRangeAtMost(u32, 80, 400);
+        service[i] = rng.intRangeAtMost(u32, 1, 10);
+    }
+    const inst = VrptwInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 12, .ready = ready, .due = due, .service = service };
+
+    // Uncapped (max_vehicles == 0): may_open is unconditionally true, so the
+    // `!may_open` branch that guards squeezeInsert is unreachable regardless
+    // of `eject` — the only scenario where the two runs are GUARANTEED
+    // bit-identical rather than merely usually-identical.
+    var a = try solveVrptwSisr(allocator, inst, .{ .seed = 5 }, .{ .iters = 3000, .veh_penalty = 10_000_000 });
+    defer a.deinit();
+    var b = try solveVrptwSisr(allocator, inst, .{ .seed = 5 }, .{ .iters = 3000, .veh_penalty = 10_000_000, .eject = false });
+    defer b.deinit();
+    try std.testing.expectEqual(a.total_cost, b.total_cost);
+    try std.testing.expectEqual(a.vehicles, b.vehicles);
+}
+
+test "VRPTW SISR fleet-min: reaches the constructed optimum fleet" {
+    const allocator = std.testing.allocator;
+    const n = 12;
+    const dim = n + 1;
+    var prng = std.Random.DefaultPrng.init(0xF1EE70);
+    const rng = prng.random();
+    const matrix = try allocator.alloc(u32, dim * dim);
+    defer allocator.free(matrix);
+    for (0..dim) |i| {
+        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 50);
+    }
+    const demand = try allocator.alloc(u32, dim);
+    defer allocator.free(demand);
+    const ready = try allocator.alloc(u32, dim);
+    defer allocator.free(ready);
+    const due = try allocator.alloc(u32, dim);
+    defer allocator.free(due);
+    const service = try allocator.alloc(u32, dim);
+    defer allocator.free(service);
+    demand[0] = 0;
+    ready[0] = 0;
+    due[0] = 100_000;
+    service[0] = 0;
+    for (1..dim) |i| {
+        demand[i] = 5; // 12 * 5 = 60, capacity 20 -> exactly 3 routes minimum by load
+        ready[i] = 0;
+        due[i] = 100_000; // wide windows: only capacity constrains the fleet
+        service[i] = 0;
+    }
+    const inst = VrptwInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 20, .ready = ready, .due = due, .service = service };
+
+    var res = try solveVrptwSisrFleetMin(allocator, inst, .{ .seed = 1 }, .{ .veh_penalty = 10_000_000 }, 1500);
+    defer res.deinit();
+    try std.testing.expectEqual(@as(usize, 3), res.vehicles);
+    const checked = validate(inst, res.routes) orelse return error.TestInfeasibleResult;
+    try std.testing.expectEqual(res.total_cost, checked);
 }
