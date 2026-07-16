@@ -126,12 +126,22 @@ with the honest caveat inline.
 Acceptance: `pip install commiv` on a clean machine, then a 10-line money-
 objective script runs green with no toolchain. `docker run` serves `/solve/pdptw`.
 
-## M6 — Dispatch / rolling-horizon session API (the real-ops feature, last)
+## M6 — Dispatch / rolling-horizon session API (PULLED UP 2026-07-16)
+
+REPRIORITIZED by owner decision 2026-07-16: M6 moves up the line, to be built
+immediately after the planned bench campaign lands (tightness sweep, cuOpt
+round, equal-compute n=2000 rerun). Rationale: the Russian market target runs
+express delivery with 15–30 min promises measured from ORDER TIME — that is
+structurally a rolling-horizon dispatch problem (orders arriving live, locked
+prefixes, re-solve), not a pre-booked-slot problem. The static tightness sweep
+only proxies it; the real product for that segment IS the dispatch API.
+`solvePdptwSisrDispatch` (locked prefixes) already exists in the engine,
+benchmark-proven internally — this is exposure work, same shape as M1 was.
 
 The stateful one, deferred out of M1 on purpose. Rolling-horizon re-solve
 (`solvePdptwSisrDispatch`, locked prefixes) is what real logistics runs on — but
 it needs a session/state API, which is a different shape from the stateless
-solve calls. Do it once the stateless wedge is proven and adopted, not before.
+solve calls.
 
 Acceptance: a session accepts an initial fleet + committed (locked) prefixes,
 re-optimizes around new orders, and never moves a locked stop; a demo simulates
@@ -166,6 +176,14 @@ that flags ABI changes.
 5. **M5 removes the last friction** so the wedge can spread.
 6. **M6/M7 are for when there are integrators to serve** — building them earlier
    is polishing a door nobody has opened.
+
+UPDATE 2026-07-16 (status + reorder): M1 DONE (7f5290b, C ABI 0.3.0, verified).
+M2 DONE (6aa588a, Python + REST + docs, smoke-verified). M3 substantially done
+(MONEY_REAL.md: real prices, real matrices, audited VROOM head-to-heads both
+regimes; remaining: tightness sweep + equal-compute n=2000 rerun in flight).
+NEW ORDER for the rest: finish bench campaign -> **M6 (dispatch API, pulled up —
+express-delivery market)** -> M4 (VROOM migration + waiting-cost demo) -> M5 ->
+M7. M4's demo gains the measured waiting numbers from M3 either way.
 
 ## What this plan deliberately does NOT include
 
