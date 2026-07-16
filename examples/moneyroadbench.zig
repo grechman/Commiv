@@ -49,6 +49,10 @@ const commiv = @import("commiv");
 //   MR_USD_VEH  dollars per vehicle for the reported USD (default 140)
 //   MR_USD_MIN  dollars per minute of duration for the reported USD (default 0.50)
 //   MR_USE_TW   1 = load <name>.tw if present instead of synthesizing (default 0)
+//   MR_STAGGER  >0 = staggered pickup openings, ready[p] in [0,MR_STAGGER] seeded,
+//               ready[q]=ready[p]; makes waiting bite. 0 = ready=0 (default, bit-id)
+//   MR_DUMP     path: write the synthesized instance as JSON before solving
+//   MR_SOLVE    0 = with MR_DUMP set, exit after dumping (no solve). default 1
 //
 // The default MR_TIMEPEN/MR_VEH_PEN keep the internal money weights at real
 // ratio: 30 per sec = $0.50/min at a $1 == 60 internal-unit scale, and
@@ -74,6 +78,9 @@ pub fn main(init: std.process.Init) !void {
     const usd_veh = try std.fmt.parseFloat(f64, env.get("MR_USD_VEH") orelse "140");
     const usd_min = try std.fmt.parseFloat(f64, env.get("MR_USD_MIN") orelse "0.50");
     const use_tw = std.mem.eql(u8, env.get("MR_USE_TW") orelse "0", "1");
+    const stagger_s = try std.fmt.parseInt(u32, env.get("MR_STAGGER") orelse "0", 10);
+    const dump_path = env.get("MR_DUMP");
+    const do_solve = !std.mem.eql(u8, env.get("MR_SOLVE") orelse "1", "0");
 
     // --- read the REAL directed road matrix ---
     var path_buf: [512]u8 = undefined;
@@ -156,18 +163,28 @@ pub fn main(init: std.process.Init) !void {
         // Synthesize windows from a provably-feasible reference schedule: each
         // pair on its own vehicle depot->p->q->depot is feasible by
         // construction, so the whole instance is feasible and the money search
-        // consolidates from there. ready=0 (no forced waiting), due = reference
-        // arrival + slack. Depot horizon covers every reference return.
+        // consolidates from there. due = reference arrival + slack. Depot horizon
+        // covers every reference return.
+        //
+        // MR_STAGGER > 0: staggered pickup openings so waiting bites during
+        // consolidation. ready[p] drawn deterministically in [0, MR_STAGGER],
+        // ready[q] = ready[p] (>= ready[p]). The reference schedule departs the
+        // depot at 0 and WAITS at each stop until its window opens, so arrive =
+        // max(ready, earliest-travel-arrival) and due = arrive + slack stays
+        // feasible for any stagger. MR_STAGGER == 0 draws no RNG and is
+        // bit-identical to the original ready=0 construction.
         var horizon: u64 = 0;
         for (0..n_pairs) |i| {
             const p = custs[2 * i];
             const q = custs[2 * i + 1];
-            const arrive_p: u64 = matrix[0 * K + p];
+            const rp: u32 = if (stagger_s > 0) rng.intRangeAtMost(u32, 0, stagger_s) else 0;
+            const rq: u32 = rp; // ready[q] >= ready[p]
+            const arrive_p: u64 = @max(@as(u64, rp), @as(u64, matrix[0 * K + p]));
             const depart_p: u64 = arrive_p + service[p];
-            const arrive_q: u64 = depart_p + matrix[p * K + q];
+            const arrive_q: u64 = @max(@as(u64, rq), depart_p + matrix[p * K + q]);
             const ret: u64 = arrive_q + service[q] + matrix[q * K + 0];
-            ready[p] = 0;
-            ready[q] = 0;
+            ready[p] = rp;
+            ready[q] = rq;
             due[p] = @intCast(arrive_p + slack_s);
             due[q] = @intCast(arrive_q + slack_s);
             if (ret > horizon) horizon = ret;
@@ -184,6 +201,14 @@ pub fn main(init: std.process.Init) !void {
         std.debug.assert(is_pickup[c] != is_pickup[pair_of[c]]);
         std.debug.assert(is_pickup[c] == (demand_signed[c] > 0));
     }
+
+    // --- optional instance dump: the EXACT arrays the solver sees, as JSON, so
+    //     a second engine (VROOM via tools/vroom_road_pdptw.py) gets a bit-for-bit
+    //     identical instance. MR_SOLVE=0 exits here without burning solver time. ---
+    if (dump_path) |dp| {
+        try dumpInstance(init, allocator, dp, name, n_pairs, road.capacity, K, matrix, custs, demand_signed, ready, due, service);
+    }
+    if (!do_solve) return;
 
     const inst = commiv.PdpInstance{
         .n_pairs = n_pairs,
@@ -245,6 +270,91 @@ fn nanos() u64 {
     var ts: std.os.linux.timespec = undefined;
     _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
+}
+
+// --- instance dump (JSON) --------------------------------------------------
+// Writes exactly the arrays the solver receives so both engines solve the same
+// instance. Schema:
+//   {"name","n_pairs","capacity","matrix":[[KxK directed seconds]],
+//    "pairs":[{"pickup","delivery","amount"}], "ready":[K],"due":[K],"service":[K]}
+
+fn appendUint(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, v: anytype) !void {
+    var tmp: [24]u8 = undefined;
+    const s = std.fmt.bufPrint(&tmp, "{d}", .{v}) catch unreachable;
+    try buf.appendSlice(allocator, s);
+}
+
+fn appendArr(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, comptime T: type, arr: []const T) !void {
+    try buf.append(allocator, '[');
+    for (arr, 0..) |v, i| {
+        if (i != 0) try buf.append(allocator, ',');
+        try appendUint(buf, allocator, v);
+    }
+    try buf.append(allocator, ']');
+}
+
+fn dumpInstance(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    name: []const u8,
+    n_pairs: usize,
+    capacity: u32,
+    K: usize,
+    matrix: []const u32,
+    custs: []const usize,
+    demand_signed: []const i64,
+    ready: []const u32,
+    due: []const u32,
+    service: []const u32,
+) !void {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+
+    try buf.appendSlice(allocator, "{\"name\":\"");
+    try buf.appendSlice(allocator, name);
+    try buf.appendSlice(allocator, "\",\"n_pairs\":");
+    try appendUint(&buf, allocator, n_pairs);
+    try buf.appendSlice(allocator, ",\"capacity\":");
+    try appendUint(&buf, allocator, capacity);
+
+    try buf.appendSlice(allocator, ",\"matrix\":[");
+    for (0..K) |a| {
+        if (a != 0) try buf.append(allocator, ',');
+        try buf.append(allocator, '[');
+        for (0..K) |b| {
+            if (b != 0) try buf.append(allocator, ',');
+            try appendUint(&buf, allocator, matrix[a * K + b]);
+        }
+        try buf.append(allocator, ']');
+    }
+    try buf.append(allocator, ']');
+
+    try buf.appendSlice(allocator, ",\"pairs\":[");
+    for (0..n_pairs) |i| {
+        if (i != 0) try buf.append(allocator, ',');
+        const p = custs[2 * i];
+        const q = custs[2 * i + 1];
+        const amt: u64 = @intCast(demand_signed[p]);
+        try buf.appendSlice(allocator, "{\"pickup\":");
+        try appendUint(&buf, allocator, p);
+        try buf.appendSlice(allocator, ",\"delivery\":");
+        try appendUint(&buf, allocator, q);
+        try buf.appendSlice(allocator, ",\"amount\":");
+        try appendUint(&buf, allocator, amt);
+        try buf.append(allocator, '}');
+    }
+    try buf.append(allocator, ']');
+
+    try buf.appendSlice(allocator, ",\"ready\":");
+    try appendArr(&buf, allocator, u32, ready[0..K]);
+    try buf.appendSlice(allocator, ",\"due\":");
+    try appendArr(&buf, allocator, u32, due[0..K]);
+    try buf.appendSlice(allocator, ",\"service\":");
+    try appendArr(&buf, allocator, u32, service[0..K]);
+    try buf.appendSlice(allocator, "}\n");
+
+    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = path, .data = buf.items });
 }
 
 /// Load a <name>.tw overlay (same format as examples/twroadbench.zig: first
