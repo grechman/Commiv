@@ -60,6 +60,7 @@ class InfeasibleError(CommivError):
 
 
 class _Options(ctypes.Structure):
+    # Must mirror commiv_options in include/commiv.h byte-for-byte (80 bytes).
     _fields_ = [
         ("seed", ctypes.c_uint64),
         ("sisr_iters", ctypes.c_uint64),
@@ -68,7 +69,10 @@ class _Options(ctypes.Structure):
         ("vrptw_restarts", ctypes.c_uint64),
         ("veh_penalty", ctypes.c_uint64),
         ("threads", ctypes.c_uint32),
-        ("reserved", ctypes.c_uint32),
+        ("fleet_min", ctypes.c_uint32),
+        ("wall_ms", ctypes.c_uint64),
+        ("max_vehicles", ctypes.c_uint64),
+        ("time_penalty", ctypes.c_uint64),
     ]
 
 
@@ -144,7 +148,7 @@ _lib.commiv_routes_free.argtypes = [ctypes.c_void_p]
 
 
 def version() -> str:
-    """libcommiv version string, e.g. '0.2.0'."""
+    """libcommiv version string, e.g. '0.3.0'."""
     return _lib.commiv_version().decode()
 
 

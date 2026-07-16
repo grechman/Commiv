@@ -2,6 +2,8 @@ const std = @import("std");
 const solver = @import("solver.zig");
 const vrp = @import("vrp.zig");
 const vrptw = @import("vrptw.zig");
+const pdptw = @import("pdptw.zig");
+const pdptw_sisr = @import("pdptw_sisr.zig");
 const asymmetric = @import("asymmetric.zig");
 
 // =============================================================================
@@ -17,7 +19,7 @@ const asymmetric = @import("asymmetric.zig");
 //   * return codes, never Zig errors: 0 ok, negative = COMMIV_ERR_*.
 // =============================================================================
 
-const version_string = "0.2.0";
+const version_string = "0.3.0";
 
 // Thread-safe, libc-free allocator: the library must work when dlopen'd from
 // arbitrary hosts, so no global init/deinit entry points to forget.
@@ -37,9 +39,18 @@ pub const COMMIV_ERR_INTERNAL: c_int = -4;
 ///   trials          ATSP trial budget; 0 -> solver default.
 ///   vrptw_rounds    Setting either of these selects the legacy VRPTW ILS engine
 ///   vrptw_restarts  instead of the default SISR; 0/0 -> SISR.
-///   veh_penalty     VRPTW per-route penalty biasing toward fewer vehicles.
+///   veh_penalty     Per-route penalty biasing toward fewer vehicles (VRPTW, PDPTW).
 ///   threads         0 or 1 = single-threaded (deterministic); >1 = parallel
 ///                   SISR chains (CVRP and VRPTW; result depends on the count).
+///   fleet_min       Nonzero -> hierarchical fleet-minimization driver (VRPTW,
+///                   PDPTW): minimize vehicles first, then distance. 0 = off.
+///   wall_ms         Wall-clock budget in ms for SISR/fleet-min (VRPTW, PDPTW);
+///                   0 = no wall cap (bounded by sisr_iters only).
+///   max_vehicles    Hard cap on route count (VRPTW, PDPTW); 0 = uncapped. For
+///                   PDPTW a positive cap selects the pinned (exact-count) driver.
+///   time_penalty    PDPTW ONLY money objective: cost per matrix time-unit of
+///                   route DURATION (travel + service + waiting); 0 = pure
+///                   distance. Ignored by CVRP and VRPTW.
 pub const CommivOptions = extern struct {
     seed: u64 = 0,
     sisr_iters: u64 = 0,
@@ -48,7 +59,10 @@ pub const CommivOptions = extern struct {
     vrptw_restarts: u64 = 0,
     veh_penalty: u64 = 0,
     threads: u32 = 0,
-    reserved: u32 = 0, // keep the struct 8-aligned; must be zero
+    fleet_min: u32 = 0, // was `reserved`; nonzero selects the fleet-min driver
+    wall_ms: u64 = 0, // wall-clock budget in ms (VRPTW/PDPTW SISR); 0 = none
+    max_vehicles: u64 = 0, // hard route cap; 0 = uncapped
+    time_penalty: u64 = 0, // PDPTW money objective; ignored by CVRP/VRPTW
 };
 
 /// Opaque to C; accessed through commiv_routes_* only. Routes are flattened:
@@ -68,7 +82,7 @@ fn resolveOptions(opt: ?*const CommivOptions) CommivOptions {
 fn mapError(err: anyerror) c_int {
     return switch (err) {
         error.OutOfMemory => COMMIV_ERR_OUT_OF_MEMORY,
-        error.Infeasible, error.NoFeasibleSplit => COMMIV_ERR_INFEASIBLE,
+        error.Infeasible, error.NoFeasibleSplit, error.NoCompleteSolution => COMMIV_ERR_INFEASIBLE,
         error.InvalidInstance, error.InvalidMatrix, error.InstanceTooLargeForTransform => COMMIV_ERR_INVALID_ARGUMENT,
         else => COMMIV_ERR_INTERNAL,
     };
@@ -207,10 +221,153 @@ export fn commiv_solve_vrptw(
         }
         var params: vrptw.VrptwSisrParams = .{ .veh_penalty = o.veh_penalty };
         if (o.sisr_iters != 0) params.iters = @intCast(o.sisr_iters);
+        if (o.wall_ms != 0) params.time_ms = o.wall_ms;
+        if (o.max_vehicles != 0) params.max_vehicles = @intCast(o.max_vehicles);
+        if (o.fleet_min != 0) {
+            // Hierarchical fleet minimization needs a wall budget; default 10s if unset.
+            // fleet_min takes precedence over threads (the fleet-min driver is serial).
+            const budget: u64 = if (o.wall_ms != 0) o.wall_ms else 10_000;
+            break :blk vrptw.solveVrptwSisrFleetMin(gpa, inst, .{ .seed = o.seed }, params, budget) catch |err| return mapError(err);
+        }
         if (o.threads > 1) {
             break :blk vrptw.solveVrptwSisrParallel(gpa, inst, .{ .seed = o.seed }, params, o.threads) catch |err| return mapError(err);
         }
         break :blk vrptw.solveVrptwSisr(gpa, inst, .{ .seed = o.seed }, params) catch |err| return mapError(err);
+    };
+    defer result.deinit();
+
+    out_p.* = makeRoutes(result.routes, result.total_cost) catch |err| return mapError(err);
+    return COMMIV_OK;
+}
+
+/// Argument validation + coverage/pairing pass for commiv_solve_pdptw. Fills the
+/// caller-provided `seen` scratch (len == dim). Returns 0 when the instance shape
+/// is usable, a COMMIV_ERR_* otherwise.
+fn checkPdpArgs(
+    n_pairs: usize,
+    dim: usize,
+    pickup_node: [*]const u32,
+    delivery_node: [*]const u32,
+    demand: [*]const u32,
+    capacity: u32,
+    ready: [*]const u32,
+    service: [*]const u32,
+    seen: []bool,
+) c_int {
+    if (n_pairs == 0 or capacity == 0) return COMMIV_ERR_INVALID_ARGUMENT;
+    // Time-window depot sanity (due[0] = horizon, any value allowed).
+    if (ready[0] != 0 or service[0] != 0) return COMMIV_ERR_INVALID_ARGUMENT;
+
+    @memset(seen, false);
+    for (0..n_pairs) |i| {
+        const p = pickup_node[i];
+        const q = delivery_node[i];
+        if (p == 0 or q == 0 or p >= dim or q >= dim or p == q) return COMMIV_ERR_INVALID_ARGUMENT;
+        if (seen[p] or seen[q]) return COMMIV_ERR_INVALID_ARGUMENT; // duplicate use of a node
+        seen[p] = true;
+        seen[q] = true;
+        // A request whose load exceeds capacity can never be packed: fast-fail.
+        if (demand[i] > capacity) return COMMIV_ERR_INFEASIBLE;
+    }
+    // Coverage: every node 1..dim-1 must be named exactly once.
+    for (seen[1..dim]) |s| {
+        if (!s) return COMMIV_ERR_INVALID_ARGUMENT;
+    }
+    return COMMIV_OK;
+}
+
+/// Directed PDPTW (pickup-and-delivery with time windows), SISR solver.
+/// dim = 2*n_pairs + 1; node 0 is the depot. Each request is one pickup node
+/// and one delivery node carried on the same route, pickup before delivery,
+/// capacity respected along the route. Objective: directed distance, plus a
+/// money charge on route duration when options->time_penalty > 0 (PDPTW-only).
+export fn commiv_solve_pdptw(
+    matrix: ?[*]const u32,
+    n_pairs: usize,
+    pickup_node: ?[*]const u32,
+    delivery_node: ?[*]const u32,
+    demand: ?[*]const u32,
+    capacity: u32,
+    ready: ?[*]const u32,
+    due: ?[*]const u32,
+    service: ?[*]const u32,
+    options: ?*const CommivOptions,
+    out: ?**CommivRoutes,
+) c_int {
+    const m = matrix orelse return COMMIV_ERR_INVALID_ARGUMENT;
+    const pick = pickup_node orelse return COMMIV_ERR_INVALID_ARGUMENT;
+    const drop = delivery_node orelse return COMMIV_ERR_INVALID_ARGUMENT;
+    const dem = demand orelse return COMMIV_ERR_INVALID_ARGUMENT;
+    const rdy = ready orelse return COMMIV_ERR_INVALID_ARGUMENT;
+    const du = due orelse return COMMIV_ERR_INVALID_ARGUMENT;
+    const srv = service orelse return COMMIV_ERR_INVALID_ARGUMENT;
+    const out_p = out orelse return COMMIV_ERR_INVALID_ARGUMENT;
+
+    if (n_pairs == 0 or capacity == 0) return COMMIV_ERR_INVALID_ARGUMENT;
+    // Keep node ids in u32 and dim = 2*n_pairs+1 from overflowing.
+    if (n_pairs >= (std.math.maxInt(u32) - 1) / 2) return COMMIV_ERR_INVALID_ARGUMENT;
+    const dim = 2 * n_pairs + 1;
+    _ = std.math.mul(usize, dim, dim) catch return COMMIV_ERR_INVALID_ARGUMENT;
+
+    // Synthesized instance arrays + the validation scratch, all length dim.
+    const seen = gpa.alloc(bool, dim) catch return COMMIV_ERR_OUT_OF_MEMORY;
+    defer gpa.free(seen);
+    const rc = checkPdpArgs(n_pairs, dim, pick, drop, dem, capacity, rdy, srv, seen);
+    if (rc != COMMIV_OK) return rc;
+
+    const pair_of = gpa.alloc(usize, dim) catch return COMMIV_ERR_OUT_OF_MEMORY;
+    defer gpa.free(pair_of);
+    const is_pickup = gpa.alloc(bool, dim) catch return COMMIV_ERR_OUT_OF_MEMORY;
+    defer gpa.free(is_pickup);
+    const demand_signed = gpa.alloc(i64, dim) catch return COMMIV_ERR_OUT_OF_MEMORY;
+    defer gpa.free(demand_signed);
+
+    pair_of[0] = 0;
+    is_pickup[0] = false;
+    demand_signed[0] = 0;
+    for (0..n_pairs) |i| {
+        const p = pick[i];
+        const q = drop[i];
+        pair_of[p] = q;
+        pair_of[q] = p;
+        is_pickup[p] = true;
+        is_pickup[q] = false;
+        demand_signed[p] = @as(i64, dem[i]);
+        demand_signed[q] = -@as(i64, dem[i]);
+    }
+
+    const o = resolveOptions(options);
+    const inst = pdptw.PdpInstance{
+        .n_pairs = n_pairs,
+        .matrix = m[0 .. dim * dim],
+        .capacity = @intCast(capacity),
+        .pair_of = pair_of,
+        .is_pickup = is_pickup,
+        .demand_signed = demand_signed,
+        .ready = rdy[0..dim],
+        .due = du[0..dim],
+        .service = srv[0..dim],
+    };
+
+    var params: pdptw_sisr.PdpSisrParams = .{
+        .seed = o.seed,
+        .veh_penalty = o.veh_penalty,
+        .time_penalty = o.time_penalty,
+    };
+    if (o.sisr_iters != 0) params.iters = @intCast(o.sisr_iters);
+    if (o.wall_ms != 0) params.time_ms = o.wall_ms;
+    if (o.max_vehicles != 0) params.max_vehicles = @intCast(o.max_vehicles);
+    // The wall-driven drivers (fleet-min, pinned) need a budget; default 10s.
+    const budget: u64 = if (o.wall_ms != 0) o.wall_ms else 10_000;
+
+    var result = blk: {
+        if (o.fleet_min != 0) {
+            break :blk pdptw_sisr.solvePdptwSisrFleetMin(gpa, inst, params, budget) catch |err| return mapError(err);
+        }
+        if (o.max_vehicles != 0) {
+            break :blk pdptw_sisr.solvePdptwSisrPinned(gpa, inst, params, budget, @intCast(o.max_vehicles)) catch |err| return mapError(err);
+        }
+        break :blk pdptw_sisr.solvePdptwSisr(gpa, inst, params) catch |err| return mapError(err);
     };
     defer result.deinit();
 
@@ -395,4 +552,151 @@ test "capi vrptw honors windows and returns feasible routes" {
     const validated = vrptw.validate(inst, slices[0..k]);
     try testing.expect(validated != null);
     try testing.expectEqual(commiv_routes_cost(routes), validated.?);
+}
+
+// A tiny 2-pair PDPTW: dim=5, depot 0. Requests (1->3) and (2->4).
+const pdp_matrix = [_]u32{
+    0,  10, 12, 14, 16,
+    10, 0,  6,  8,  10,
+    12, 6,  0,  7,  9,
+    14, 8,  7,  0,  6,
+    16, 10, 9,  6,  0,
+};
+const pdp_pickup = [_]u32{ 1, 2 };
+const pdp_delivery = [_]u32{ 3, 4 };
+const pdp_demand = [_]u32{ 4, 5 };
+const pdp_ready = [_]u32{ 0, 0, 0, 0, 0 };
+const pdp_due = [_]u32{ 10_000, 10_000, 10_000, 10_000, 10_000 };
+const pdp_service = [_]u32{ 0, 3, 3, 3, 3 };
+
+// Rebuild the PdpInstance the C entry synthesizes, for the validator oracle.
+fn buildPdpTestInstance(
+    pair_of: *[5]usize,
+    is_pickup: *[5]bool,
+    demand_signed: *[5]i64,
+) pdptw.PdpInstance {
+    pair_of[0] = 0;
+    is_pickup[0] = false;
+    demand_signed[0] = 0;
+    for (0..2) |i| {
+        const p = pdp_pickup[i];
+        const q = pdp_delivery[i];
+        pair_of[p] = q;
+        pair_of[q] = p;
+        is_pickup[p] = true;
+        is_pickup[q] = false;
+        demand_signed[p] = @as(i64, pdp_demand[i]);
+        demand_signed[q] = -@as(i64, pdp_demand[i]);
+    }
+    return .{
+        .n_pairs = 2,
+        .matrix = &pdp_matrix,
+        .capacity = 10,
+        .pair_of = pair_of,
+        .is_pickup = is_pickup,
+        .demand_signed = demand_signed,
+        .ready = &pdp_ready,
+        .due = &pdp_due,
+        .service = &pdp_service,
+    };
+}
+
+test "capi pdptw solves a tiny instance and validates against the oracle" {
+    var routes: *CommivRoutes = undefined;
+    var opts: CommivOptions = .{ .seed = 5, .sisr_iters = 2000 };
+    const rc = commiv_solve_pdptw(&pdp_matrix, 2, &pdp_pickup, &pdp_delivery, &pdp_demand, 10, &pdp_ready, &pdp_due, &pdp_service, &opts, &routes);
+    try testing.expectEqual(COMMIV_OK, rc);
+    defer commiv_routes_free(routes);
+    try testing.expect(commiv_routes_cost(routes) > 0);
+
+    // Reconstruct route slices and check with the engine's own validator.
+    var slices: [5][]const usize = undefined;
+    var storage: [5][4]usize = undefined;
+    const k = commiv_routes_count(routes);
+    for (0..k) |i| {
+        const len = commiv_routes_len(routes, i);
+        const nodes = commiv_routes_get(routes, i).?;
+        for (nodes[0..len], 0..) |c, j| storage[i][j] = c;
+        slices[i] = storage[i][0..len];
+    }
+    var pair_of: [5]usize = undefined;
+    var is_pickup: [5]bool = undefined;
+    var demand_signed: [5]i64 = undefined;
+    const inst = buildPdpTestInstance(&pair_of, &is_pickup, &demand_signed);
+    const validated = pdptw.validate(inst, slices[0..k]);
+    try testing.expect(validated != null);
+    try testing.expectEqual(commiv_routes_cost(routes), validated.?);
+}
+
+test "capi pdptw money objective still returns a feasible complete plan" {
+    var routes: *CommivRoutes = undefined;
+    var opts: CommivOptions = .{ .seed = 5, .sisr_iters = 2000, .time_penalty = 3 };
+    const rc = commiv_solve_pdptw(&pdp_matrix, 2, &pdp_pickup, &pdp_delivery, &pdp_demand, 10, &pdp_ready, &pdp_due, &pdp_service, &opts, &routes);
+    try testing.expectEqual(COMMIV_OK, rc);
+    defer commiv_routes_free(routes);
+
+    var slices: [5][]const usize = undefined;
+    var storage: [5][4]usize = undefined;
+    const k = commiv_routes_count(routes);
+    for (0..k) |i| {
+        const len = commiv_routes_len(routes, i);
+        const nodes = commiv_routes_get(routes, i).?;
+        for (nodes[0..len], 0..) |c, j| storage[i][j] = c;
+        slices[i] = storage[i][0..len];
+    }
+    var pair_of: [5]usize = undefined;
+    var is_pickup: [5]bool = undefined;
+    var demand_signed: [5]i64 = undefined;
+    const inst = buildPdpTestInstance(&pair_of, &is_pickup, &demand_signed);
+    // The money objective changes reported cost, but the plan must stay a
+    // complete, feasible PDPTW solution (distance-validated by the oracle).
+    try testing.expect(pdptw.validate(inst, slices[0..k]) != null);
+}
+
+test "capi pdptw rejects impossible demand and self-paired requests" {
+    var routes: *CommivRoutes = undefined;
+    // demand[0]=11 > capacity 10 -> infeasible.
+    const heavy = [_]u32{ 11, 5 };
+    try testing.expectEqual(
+        COMMIV_ERR_INFEASIBLE,
+        commiv_solve_pdptw(&pdp_matrix, 2, &pdp_pickup, &pdp_delivery, &heavy, 10, &pdp_ready, &pdp_due, &pdp_service, null, &routes),
+    );
+    // delivery_node[0] == pickup_node[0] -> invalid argument.
+    const bad_delivery = [_]u32{ 1, 4 };
+    try testing.expectEqual(
+        COMMIV_ERR_INVALID_ARGUMENT,
+        commiv_solve_pdptw(&pdp_matrix, 2, &pdp_pickup, &bad_delivery, &pdp_demand, 10, &pdp_ready, &pdp_due, &pdp_service, null, &routes),
+    );
+}
+
+test "capi pdptw C path is bit-identical to the internal engine" {
+    // The M1 acceptance contract: the C shim (instance synthesis + param
+    // mapping) adds ZERO divergence versus calling the engine directly with
+    // the same seed and params — including under the money objective.
+    var opts: CommivOptions = .{ .seed = 5, .sisr_iters = 2000, .time_penalty = 3, .veh_penalty = 100 };
+    var routes: *CommivRoutes = undefined;
+    const rc = commiv_solve_pdptw(&pdp_matrix, 2, &pdp_pickup, &pdp_delivery, &pdp_demand, 10, &pdp_ready, &pdp_due, &pdp_service, &opts, &routes);
+    try testing.expectEqual(COMMIV_OK, rc);
+    defer commiv_routes_free(routes);
+
+    var pair_of: [5]usize = undefined;
+    var is_pickup: [5]bool = undefined;
+    var demand_signed: [5]i64 = undefined;
+    const inst = buildPdpTestInstance(&pair_of, &is_pickup, &demand_signed);
+    var direct = try pdptw_sisr.solvePdptwSisr(testing.allocator, inst, .{
+        .seed = 5,
+        .iters = 2000,
+        .time_penalty = 3,
+        .veh_penalty = 100,
+    });
+    defer direct.deinit();
+
+    try testing.expectEqual(direct.total_cost, commiv_routes_cost(routes));
+    try testing.expectEqual(direct.routes.len, commiv_routes_count(routes));
+    for (direct.routes, 0..) |r, i| {
+        const len = commiv_routes_len(routes, i);
+        try testing.expectEqual(r.len, len);
+        const nodes = commiv_routes_get(routes, i).?;
+        for (r, nodes[0..len]) |a, b| try testing.expectEqual(a, @as(usize, b));
+    }
 }
