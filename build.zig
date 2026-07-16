@@ -83,6 +83,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "commiv-twroadbench", .src = "examples/twroadbench.zig", .step = "twroadbench", .desc = "Real directed-road VRPTW benchmark (make_windows overlay)" },
         .{ .name = "commiv-twprobe", .src = "examples/twprobe.zig", .step = "twprobe", .desc = "Synthetic VRPTW-SISR throughput + bit-identity probe (n=1000)" },
         .{ .name = "commiv-pdptwbench", .src = "examples/pdptwbench.zig", .step = "pdptwbench", .desc = "PDPTW gap benchmark (Li & Lim 100-series) vs best-known solutions" },
+        .{ .name = "commiv-moneyroadbench", .src = "examples/moneyroadbench.zig", .step = "moneyroadbench", .desc = "PDPTW money objective on REAL directed OSRM road matrices (real durations + prices)" },
     };
     for (benches) |x| {
         const exe = b.addExecutable(.{
