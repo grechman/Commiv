@@ -1,5 +1,39 @@
 # M3 — real-road money proof (head-to-head complete, audited)
 
+## 0a. WINDOW-TIGHTNESS SWEEP — the appointment-window economics (2026-07-16 night)
+
+The dose-response curve: slot openings spread across the 8 h shift
+(`MR_STAGGER=28800`), window tightness = `MR_SLACK` at 900/1800/3600/7200 s =
+15/30/60/120-minute appointment windows. moscow-1000 + nyc-1000 (499 pairs),
+equal wall 60 s, single thread, seed 1, one price model per dump, commiv
+best-of-two-drivers vs VROOM, per-width independent audit (feasibility CLEAN
+throughout; only wall-noise reproducibility deltas of 0.02–0.25%).
+
+| window | moscow-1000 gap | nyc-1000 gap | VROOM waiting (msk/nyc) | commiv waiting |
+|---|---|---|---|---|
+| **15 min** | **+5.8%** | **+8.0%** | 79.4 h / 80.6 h | 16.3 h / 15.9 h |
+| **30 min** | **+3.7%** | **+5.7%** | 52.1 h / 50.3 h | 6.7 h / 7.9 h |
+| **60 min** | **+1.2%** | **+2.5%** | 20.7 h / 20.5 h | 1.2 h / 2.2 h |
+| 120 min | +0.6% | +1.4% | 8.2 h / 6.0 h | 0.1 h / 0.1 h |
+
+Monotone in both cities: every halving of window width roughly doubles VROOM's
+overspend, and the driver is entirely waiting time VROOM cannot price — at
+15-minute windows its plans carry **~80 hours of paid driver idling per depot
+per day** (5x commiv's structurally-unavoidable 16 h). In dollars at the §2
+prices: the 15-min gap is $946/day (moscow) and $1163/day (nyc) per depot —
+$345–425k/year, software-only.
+
+Sales read: the commiv money edge is a function of window tightness. Express /
+tight-appointment operations (the 15–30 min promise segment) sit at +4–8%;
+generous 2 h slots at +1–3% (consistent with §0 below). Driver note: `plain`
+won both 15-min cells, `fleetmin` won at 60/120 min — best-of-two is the
+protocol, tightness flips the winner. Caveat: 15–30 min promises measured from
+ORDER time (express q-commerce) are a rolling-horizon dispatch regime — this
+sweep is its static proxy; the real product for that segment is M6.
+
+Reproduce: winserver `~/money_tightsweep.sh` (binary from 09d97d1), results +
+per-width audits `~/campaign/results/money-tightsweep-2026-07-16/`.
+
 ## 0. HEADLINE — the real-window head-to-head (2026-07-16 evening, winserver)
 
 The definitive run: moscow + nyc road matrices with the PUBLISHED campaign courier-slot
