@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "commiv"
-version = "0.2.0"
-description = "Near-optimal directed (asymmetric) TSP / CVRP / VRPTW routes — Python binding over libcommiv"
+version = "0.3.0"
+description = "Near-optimal directed (asymmetric) TSP / ATSP / CVRP / VRPTW / PDPTW routes — Python binding over libcommiv"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }
-keywords = ["vrp", "cvrp", "tsp", "atsp", "vrptw", "routing", "logistics", "optimization"]
+keywords = ["vrp", "cvrp", "tsp", "atsp", "vrptw", "pdptw", "pickup-delivery", "routing", "logistics", "optimization"]
 
 [project.urls]
 Homepage = "https://github.com/grechman/Commiv"

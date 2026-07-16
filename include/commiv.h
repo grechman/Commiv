@@ -1,4 +1,4 @@
-/* commiv C API — near-optimal directed (asymmetric) TSP / CVRP / VRPTW routes.
+/* commiv C API — near-optimal directed (asymmetric) TSP / ATSP / CVRP / VRPTW / PDPTW routes.
  *
  * Build the libraries with `zig build lib -Doptimize=ReleaseFast`; link either
  * zig-out/lib/libcommiv.a (static) or libcommiv.so (shared). This header is the

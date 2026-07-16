@@ -1,8 +1,9 @@
-"""commiv — near-optimal directed (asymmetric) TSP / CVRP / VRPTW routes.
+"""commiv — near-optimal directed (asymmetric) TSP / ATSP / CVRP / VRPTW / PDPTW routes.
 
 ctypes binding over libcommiv (the C ABI in include/commiv.h). No required
 dependencies; numpy arrays are accepted and take a fast path when numpy is
-installed.
+installed. Four solver families ship: solve_cvrp, solve_vrptw, solve_pdptw
+(pickup-and-delivery with a money objective), and solve_atsp.
 
 Build the library once, from the repo root:
 
@@ -24,6 +25,26 @@ Example:
     ]
     sol = commiv.solve_cvrp(matrix, demand=[0, 4, 6, 5], capacity=10, seed=1)
     print(sol.total_cost, sol.routes)
+
+Pickup-and-delivery with the money objective (charge route duration, not just
+distance, via time_penalty > 0 — this is the PDPTW-only knob that trades fuel
+for driver hours wherever waiting exists):
+
+    # dim = 2*n_pairs+1 nodes: depot 0, then pickups/deliveries. Requests
+    # (1 -> 3) and (2 -> 4); demand is one load per request.
+    pdp_matrix = [
+        [0, 10, 12, 14, 16],
+        [10, 0, 6, 8, 10],
+        [12, 6, 0, 7, 9],
+        [14, 8, 7, 0, 6],
+        [16, 10, 9, 6, 0],
+    ]
+    sol = commiv.solve_pdptw(
+        pdp_matrix, pickups=[1, 2], deliveries=[3, 4], demand=[4, 5], capacity=10,
+        ready=[0, 0, 0, 0, 0], due=[10000] * 5, service=[0, 3, 3, 3, 3],
+        time_penalty=3,  # money objective: price each route's duration
+    )
+    print(sol.total_cost, sol.routes)
 """
 
 from __future__ import annotations
@@ -41,6 +62,7 @@ __all__ = [
     "CommivError",
     "solve_cvrp",
     "solve_vrptw",
+    "solve_pdptw",
     "solve_atsp",
     "version",
 ]
@@ -124,6 +146,15 @@ _lib.commiv_solve_cvrp.argtypes = [
 _lib.commiv_solve_vrptw.restype = ctypes.c_int
 _lib.commiv_solve_vrptw.argtypes = [
     ctypes.POINTER(ctypes.c_uint32), ctypes.c_size_t,
+    ctypes.POINTER(ctypes.c_uint32), ctypes.c_uint32,
+    ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint32),
+    ctypes.POINTER(ctypes.c_uint32),
+    ctypes.POINTER(_Options), ctypes.POINTER(ctypes.c_void_p),
+]
+_lib.commiv_solve_pdptw.restype = ctypes.c_int
+_lib.commiv_solve_pdptw.argtypes = [
+    ctypes.POINTER(ctypes.c_uint32), ctypes.c_size_t,
+    ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint32),
     ctypes.POINTER(ctypes.c_uint32), ctypes.c_uint32,
     ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint32),
     ctypes.POINTER(ctypes.c_uint32),
@@ -272,6 +303,9 @@ def solve_vrptw(
     rounds: int = 0,
     restarts: int = 0,
     veh_penalty: int = 0,
+    fleet_min: bool = False,
+    max_vehicles: int = 0,
+    wall_ms: int = 0,
 ) -> CvrpSolution:
     """Solve a directed VRPTW with SISR (the flagship engine). ready/due bound
     the START of service per node (due[0] is the depot horizon); service is the
@@ -279,7 +313,14 @@ def solve_vrptw(
 
     iters=0 means the default budget (300k); threads>1 runs best-of-K parallel
     chains. veh_penalty > 0 biases toward fewer vehicles at some distance cost.
-    Setting rounds/restarts selects the legacy ILS engine instead of SISR."""
+    Setting rounds/restarts selects the legacy ILS engine instead of SISR.
+
+    fleet_min=True runs the hierarchical fleet-minimization driver (minimize
+    vehicles first, then distance); it needs a wall budget, so pass wall_ms > 0
+    (defaults to 10s otherwise) and it takes precedence over threads.
+    max_vehicles > 0 caps the number of routes. wall_ms is a wall-clock budget
+    in milliseconds for the SISR / fleet-min search (0 = bounded by iters only).
+    There is NO time_penalty on VRPTW — the money objective is PDPTW-only."""
     dim = _matrix_dim(matrix)
     n = dim - 1
     m = _as_u32_array(matrix, dim * dim, "matrix")
@@ -288,11 +329,75 @@ def solve_vrptw(
     du = _as_u32_array(due, dim, "due")
     sv = _as_u32_array(service, dim, "service")
     opts = _Options(seed=seed, sisr_iters=iters, threads=threads,
-                    vrptw_rounds=rounds, vrptw_restarts=restarts, veh_penalty=veh_penalty)
+                    vrptw_rounds=rounds, vrptw_restarts=restarts, veh_penalty=veh_penalty,
+                    fleet_min=1 if fleet_min else 0, max_vehicles=max_vehicles, wall_ms=wall_ms)
     out = ctypes.c_void_p()
     rc = _lib.commiv_solve_vrptw(m, n, d, capacity, rd, du, sv, ctypes.byref(opts), ctypes.byref(out))
     if rc != _OK:
         _raise_for(rc, "solve_vrptw")
+    return _extract_routes(out)
+
+
+def solve_pdptw(
+    matrix,
+    pickups: Sequence[int],
+    deliveries: Sequence[int],
+    demand: Sequence[int],
+    capacity: int,
+    ready: Sequence[int],
+    due: Sequence[int],
+    service: Sequence[int],
+    *,
+    seed: int = 1,
+    iters: int = 0,
+    veh_penalty: int = 0,
+    time_penalty: int = 0,
+    fleet_min: bool = False,
+    max_vehicles: int = 0,
+    wall_ms: int = 0,
+) -> CvrpSolution:
+    """Solve a directed PDPTW (pickup-and-delivery with time windows), SISR.
+
+    dim = 2*n_pairs + 1 nodes: node 0 is the depot, and n_pairs = len(pickups).
+    matrix is dim x dim directed costs (nested lists, flat list, or numpy),
+    row-major, depot = node 0. pickups[i] and deliveries[i] are the node ids of
+    request i (each carried on the SAME route, pickup before delivery); every
+    node 1..dim-1 must appear exactly once across the two arrays. demand has
+    n_pairs entries (the load of each request). ready/due/service have dim
+    entries each and bound the START of service per node (ready[0]=service[0]=0,
+    due[0] = depot horizon); waiting before a window opens is free.
+
+    time_penalty > 0 is the MONEY objective (PDPTW-only): it charges each route's
+    DURATION (travel + service + unavoidable waiting) on top of distance and
+    veh_penalty, so the engine trades fuel for driver hours wherever waiting
+    exists. 0 = pure distance, bit-identical to the historic objective.
+
+    fleet_min=True runs the hierarchical vehicle-minimization driver. When
+    max_vehicles > 0 the PDPTW solver runs the PINNED driver: it targets EXACTLY
+    that many vehicles (the enterprise fixed-fleet case), not merely an upper
+    cap. Both wall-driven drivers use wall_ms as their budget (0 defaults to
+    10s). iters=0 means the SISR default. Note: threads is IGNORED for PDPTW."""
+    dim = _matrix_dim(matrix)
+    n_pairs = len(pickups)
+    if len(deliveries) != n_pairs:
+        raise ValueError(f"pickups and deliveries must be the same length ({n_pairs} vs {len(deliveries)})")
+    if dim != 2 * n_pairs + 1:
+        raise ValueError(f"matrix dim must be 2*n_pairs+1 = {2 * n_pairs + 1}, got {dim}")
+    m = _as_u32_array(matrix, dim * dim, "matrix")
+    pk = _as_u32_array(pickups, n_pairs, "pickups")
+    dl = _as_u32_array(deliveries, n_pairs, "deliveries")
+    dm = _as_u32_array(demand, n_pairs, "demand")
+    rd = _as_u32_array(ready, dim, "ready")
+    du = _as_u32_array(due, dim, "due")
+    sv = _as_u32_array(service, dim, "service")
+    opts = _Options(seed=seed, sisr_iters=iters, veh_penalty=veh_penalty,
+                    time_penalty=time_penalty, fleet_min=1 if fleet_min else 0,
+                    max_vehicles=max_vehicles, wall_ms=wall_ms)
+    out = ctypes.c_void_p()
+    rc = _lib.commiv_solve_pdptw(m, n_pairs, pk, dl, dm, capacity, rd, du, sv,
+                                 ctypes.byref(opts), ctypes.byref(out))
+    if rc != _OK:
+        _raise_for(rc, "solve_pdptw")
     return _extract_routes(out)
 
 

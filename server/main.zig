@@ -9,7 +9,11 @@ const commiv = @import("commiv");
 //
 //   POST /solve/cvrp   {matrix, demand, capacity, seed?, iters?, threads?}
 //   POST /solve/vrptw  {matrix, demand, capacity, ready, due, service,
-//                       seed?, rounds?, restarts?, veh_penalty?}
+//                       seed?, rounds?, restarts?, veh_penalty?, fleet_min?,
+//                       max_vehicles?, wall_ms?}
+//   POST /solve/pdptw  {matrix, pickups, deliveries, demand, capacity, ready,
+//                       due, service, seed?, iters?, veh_penalty?, time_penalty?,
+//                       fleet_min?, max_vehicles?, wall_ms?}
 //   POST /solve/atsp   {matrix, seed?, trials?}
 //   GET  /health
 //
@@ -27,7 +31,7 @@ const commiv = @import("commiv");
 // so admission control is the client's job for now (front it with a queue if
 // you need one). Parallelism inside one solve comes from `threads` in the body.
 
-const version_string = "0.2.0";
+const version_string = "0.3.0";
 
 const ServerConfig = struct {
     host: []const u8,
@@ -89,11 +93,13 @@ fn handleRequest(gpa: std.mem.Allocator, req: *std.http.Server.Request, cfg: Ser
         return respondJson(arena, req, .{ .status = "ok", .version = version_string });
     }
 
-    const Route = enum { cvrp, vrptw, atsp };
+    const Route = enum { cvrp, vrptw, pdptw, atsp };
     const route: Route = if (std.mem.eql(u8, target, "/solve/cvrp"))
         .cvrp
     else if (std.mem.eql(u8, target, "/solve/vrptw"))
         .vrptw
+    else if (std.mem.eql(u8, target, "/solve/pdptw"))
+        .pdptw
     else if (std.mem.eql(u8, target, "/solve/atsp"))
         .atsp
     else
@@ -111,6 +117,7 @@ fn handleRequest(gpa: std.mem.Allocator, req: *std.http.Server.Request, cfg: Ser
     switch (route) {
         .cvrp => return solveCvrp(arena, req, body),
         .vrptw => return solveVrptw(arena, req, body),
+        .pdptw => return solvePdptw(arena, req, body),
         .atsp => return solveAtsp(arena, req, body),
     }
 }
@@ -177,6 +184,9 @@ const VrptwRequest = struct {
     rounds: u64 = 0, // ILS engine only
     restarts: u64 = 0, // ILS engine only
     veh_penalty: u64 = 0,
+    fleet_min: bool = false, // hierarchical vehicle minimization (SISR engine)
+    max_vehicles: u64 = 0, // hard route cap; 0 = uncapped
+    wall_ms: u64 = 0, // wall-clock budget (ms) for SISR/fleet-min; 0 = iters-bounded
     // Long-run quality levers (see VrptwSisrParams); all default off, best
     // measured together at iters >= ~1M ("combo"): polish + stress_rate 0.5 +
     // tabu_tenure 10000 + marathon.
@@ -218,18 +228,136 @@ fn solveVrptw(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []c
         }
         var params: commiv.VrptwSisrParams = .{ .veh_penalty = r.veh_penalty };
         if (r.iters != 0) params.iters = @intCast(r.iters);
+        if (r.wall_ms != 0) params.time_ms = r.wall_ms;
+        if (r.max_vehicles != 0) params.max_vehicles = @intCast(r.max_vehicles);
         params.polish = r.polish;
         params.stress_rate = r.stress_rate;
         params.tabu_tenure = @intCast(r.tabu_tenure);
         params.marathon = r.marathon;
         params.nbr_key = if (std.mem.eql(u8, r.nbr_key, "min")) .min else if (std.mem.eql(u8, r.nbr_key, "out")) .out else .sum;
         params.gk = @intCast(r.gk);
+        if (r.fleet_min) {
+            // Hierarchical fleet minimization needs a wall budget; default 10s.
+            // It takes precedence over threads (the fleet-min driver is serial).
+            const budget: u64 = if (r.wall_ms != 0) r.wall_ms else 10_000;
+            break :blk commiv.solveVrptwSisrFleetMin(arena, inst, .{ .seed = r.seed }, params, budget) catch |err|
+                return respondSolverError(req, err);
+        }
         if (r.threads > 1)
             break :blk commiv.solveVrptwSisrParallel(arena, inst, .{ .seed = r.seed }, params, r.threads) catch |err|
                 return respondSolverError(req, err);
         break :blk commiv.solveVrptwSisr(arena, inst, .{ .seed = r.seed }, params) catch |err|
             return respondSolverError(req, err);
     };
+
+    return respondJson(arena, req, .{
+        .total_cost = result.total_cost,
+        .vehicles = result.routes.len,
+        .routes = result.routes,
+    });
+}
+
+const PdptwRequest = struct {
+    matrix: []const []const u32 = &.{}, // dim x dim, dim = 2*n_pairs+1; depot = 0 (absent in CMV1 bodies)
+    pickups: []const u32, // n_pairs pickup node ids (1..dim-1)
+    deliveries: []const u32, // n_pairs delivery node ids (1..dim-1)
+    demand: []const u32, // n_pairs loads (one per request)
+    capacity: u32,
+    ready: []const u32, // dim entries; earliest service start, ready[0] = 0
+    due: []const u32, // dim entries; latest service start, due[0] = depot horizon
+    service: []const u32, // dim entries; service durations, service[0] = 0
+    seed: u64 = 1,
+    iters: u64 = 0, // SISR iterations; 0 = default
+    veh_penalty: u64 = 0,
+    time_penalty: u64 = 0, // money objective: charge route duration (PDPTW-only)
+    fleet_min: bool = false, // hierarchical vehicle minimization
+    max_vehicles: u64 = 0, // positive = PINNED driver (targets EXACTLY this fleet)
+    wall_ms: u64 = 0, // wall-clock budget (ms) for the wall-driven drivers; 0 = 10s
+};
+
+fn solvePdptw(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []const u8) !void {
+    const p = parseSolveRequest(PdptwRequest, arena, req, body) orelse return;
+    const r = p.request;
+    const flat = p.matrix;
+    const dim = p.dim;
+    const n_pairs = r.pickups.len;
+    if (dim < 3 or n_pairs == 0 or dim != 2 * n_pairs + 1)
+        return respondError(req, .unprocessable_entity, "PDPTW needs a dim x dim matrix with dim = 2*n_pairs+1 and n_pairs >= 1");
+    if (r.deliveries.len != n_pairs or r.demand.len != n_pairs)
+        return respondError(req, .unprocessable_entity, "pickups/deliveries/demand must all have length n_pairs");
+    if (r.ready.len != dim or r.due.len != dim or r.service.len != dim)
+        return respondError(req, .unprocessable_entity, "ready/due/service must all have length dim (2*n_pairs+1)");
+    if (r.capacity == 0)
+        return respondError(req, .unprocessable_entity, "capacity must be > 0");
+    if (r.ready[0] != 0 or r.service[0] != 0)
+        return respondError(req, .unprocessable_entity, "depot slots ready[0] and service[0] must be 0");
+
+    // Synthesize the pairing arrays the engine consumes and validate coverage:
+    // every node 1..dim-1 must be named exactly once across pickups/deliveries.
+    const pair_of = arena.alloc(usize, dim) catch return respondError(req, .internal_server_error, "out of memory");
+    const is_pickup = arena.alloc(bool, dim) catch return respondError(req, .internal_server_error, "out of memory");
+    const demand_signed = arena.alloc(i64, dim) catch return respondError(req, .internal_server_error, "out of memory");
+    const seen = arena.alloc(bool, dim) catch return respondError(req, .internal_server_error, "out of memory");
+    @memset(seen, false);
+    pair_of[0] = 0;
+    is_pickup[0] = false;
+    demand_signed[0] = 0;
+    for (0..n_pairs) |i| {
+        const pu: usize = r.pickups[i];
+        const qu: usize = r.deliveries[i];
+        if (pu == 0 or qu == 0 or pu >= dim or qu >= dim or pu == qu)
+            return respondError(req, .unprocessable_entity, "pickup/delivery ids must be distinct and in 1..dim-1");
+        if (seen[pu] or seen[qu])
+            return respondError(req, .unprocessable_entity, "each node may appear only once across pickups/deliveries");
+        if (r.demand[i] > r.capacity)
+            return respondError(req, .unprocessable_entity, "a request's demand exceeds capacity (infeasible)");
+        seen[pu] = true;
+        seen[qu] = true;
+        pair_of[pu] = qu;
+        pair_of[qu] = pu;
+        is_pickup[pu] = true;
+        is_pickup[qu] = false;
+        demand_signed[pu] = @as(i64, r.demand[i]);
+        demand_signed[qu] = -@as(i64, r.demand[i]);
+    }
+    for (seen[1..dim]) |s| {
+        if (!s) return respondError(req, .unprocessable_entity, "every node 1..dim-1 must be named exactly once across pickups/deliveries");
+    }
+
+    const inst = commiv.PdpInstance{
+        .n_pairs = n_pairs,
+        .matrix = flat,
+        .capacity = @intCast(r.capacity),
+        .pair_of = pair_of,
+        .is_pickup = is_pickup,
+        .demand_signed = demand_signed,
+        .ready = r.ready,
+        .due = r.due,
+        .service = r.service,
+    };
+
+    var params: commiv.PdpSisrParams = .{
+        .seed = r.seed,
+        .veh_penalty = r.veh_penalty,
+        .time_penalty = r.time_penalty,
+    };
+    if (r.iters != 0) params.iters = @intCast(r.iters);
+    if (r.wall_ms != 0) params.time_ms = r.wall_ms;
+    if (r.max_vehicles != 0) params.max_vehicles = @intCast(r.max_vehicles);
+    // The wall-driven drivers (fleet-min, pinned) need a budget; default 10s.
+    const budget: u64 = if (r.wall_ms != 0) r.wall_ms else 10_000;
+
+    var result = blk: {
+        if (r.fleet_min)
+            break :blk commiv.internal.pdptw_sisr.solvePdptwSisrFleetMin(arena, inst, params, budget) catch |err|
+                return respondSolverError(req, err);
+        if (r.max_vehicles != 0)
+            break :blk commiv.internal.pdptw_sisr.solvePdptwSisrPinned(arena, inst, params, budget, @intCast(r.max_vehicles)) catch |err|
+                return respondSolverError(req, err);
+        break :blk commiv.solvePdptwSisr(arena, inst, params) catch |err|
+            return respondSolverError(req, err);
+    };
+    defer result.deinit();
 
     return respondJson(arena, req, .{
         .total_cost = result.total_cost,
@@ -341,7 +469,7 @@ fn flattenSquare(arena: std.mem.Allocator, rows: []const []const u32) ?[]u32 {
 
 fn respondSolverError(req: *std.http.Server.Request, err: anyerror) !void {
     return switch (err) {
-        error.Infeasible, error.NoFeasibleSplit => respondError(req, .unprocessable_entity, "instance is infeasible (capacity or time windows cannot be satisfied)"),
+        error.Infeasible, error.NoFeasibleSplit, error.NoCompleteSolution => respondError(req, .unprocessable_entity, "instance is infeasible (capacity, time windows, or vehicle cap cannot be satisfied)"),
         error.InvalidInstance, error.InvalidMatrix => respondError(req, .unprocessable_entity, "instance is invalid: check array lengths and that the depot slots (demand[0], ready[0], service[0]) are 0"),
         error.OutOfMemory => respondError(req, .internal_server_error, "out of memory"),
         else => respondError(req, .internal_server_error, "solver failed"),

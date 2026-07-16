@@ -4,6 +4,9 @@
 dependencies. Every language that can speak HTTP gets near-optimal directed
 routes without linking anything.
 
+Four solver families are exposed: `/solve/cvrp`, `/solve/vrptw`, `/solve/pdptw`
+(pickup-and-delivery with time windows and a money objective), and `/solve/atsp`.
+
 ```sh
 zig build serve -Doptimize=ReleaseFast
 COMMIV_PORT=8080 ./zig-out/bin/commiv-serve
@@ -37,7 +40,7 @@ expose it to the internet as-is.
 
 ```sh
 curl http://127.0.0.1:8080/health
-# {"status":"ok","version":"0.2.0"}
+# {"status":"ok","version":"0.3.0"}
 ```
 
 ## POST /solve/cvrp
@@ -77,7 +80,12 @@ at the stop, and must be back at the depot by `due[0]` (the horizon).
 | `iters` | int | SISR iterations (0 = 300000 default) |
 | `threads` | int | >1 = best-of-K parallel SISR chains |
 | `veh_penalty` | int | per-route penalty; > 0 biases toward fewer vehicles |
+| `fleet_min` | bool | `true` runs the hierarchical fleet-minimization driver (minimize vehicles first, then distance); needs a wall budget and takes precedence over `threads` |
+| `max_vehicles` | int | hard cap on the number of routes (0 = uncapped) |
+| `wall_ms` | int | wall-clock budget in ms for the SISR / fleet-min search (0 = bounded by `iters` only; `fleet_min` defaults to 10000 if unset) |
 | `engine` | string | `"sisr"` (default) or `"ils"` (legacy; uses `rounds`/`restarts`) |
+
+There is no `time_penalty` (money objective) on VRPTW — that knob is PDPTW-only.
 
 ```sh
 curl -X POST http://127.0.0.1:8080/solve/vrptw -d '{
@@ -86,6 +94,46 @@ curl -X POST http://127.0.0.1:8080/solve/vrptw -d '{
   "ready": [0,0,0,0], "due": [1000,500,500,500], "service": [0,5,5,5]
 }'
 # {"total_cost":58,"vehicles":2,"routes":[[2,1],[3]]}
+```
+
+## POST /solve/pdptw
+
+Directed pickup-and-delivery with time windows (SISR solver), with an optional
+**money objective**. Nodes are `dim = 2*n_pairs + 1`: node `0` is the depot,
+and each of the `n_pairs` requests is one pickup node and one delivery node
+carried on the **same route, pickup before delivery**, capacity respected along
+the whole route.
+
+| field | type | required | meaning |
+|---|---|---|---|
+| `matrix` | `int[dim][dim]` | yes | directed costs, depot = row/col 0, `dim = 2*n_pairs+1` |
+| `pickups` | `int[n_pairs]` | yes | pickup node id of each request (in `1..dim-1`) |
+| `deliveries` | `int[n_pairs]` | yes | delivery node id of each request; every node `1..dim-1` must appear exactly once across `pickups`+`deliveries` |
+| `demand` | `int[n_pairs]` | yes | load of each request (`> 0`, `<= capacity`) |
+| `capacity` | int | yes | per-vehicle capacity |
+| `ready` | `int[dim]` | yes | earliest service start, `ready[0] = 0` |
+| `due` | `int[dim]` | yes | latest service start, `due[0]` = depot horizon |
+| `service` | `int[dim]` | yes | service duration, `service[0] = 0` |
+| `seed` | int | no (1) | RNG seed |
+| `iters` | int | no (default) | SISR iterations |
+| `veh_penalty` | int | no (0) | per-route penalty; > 0 biases toward fewer vehicles |
+| `time_penalty` | int | no (0) | **money objective**: cost charged per matrix time-unit of route *duration* (travel + service + unavoidable waiting), on top of distance and `veh_penalty`. 0 = pure distance |
+| `fleet_min` | bool | no (false) | run the hierarchical vehicle-minimization driver |
+| `max_vehicles` | int | no (0) | positive = the **pinned** driver: target EXACTLY this many vehicles (enterprise fixed fleet), not merely an upper bound |
+| `wall_ms` | int | no | wall-clock budget in ms for the wall-driven drivers (0 defaults to 10000) |
+
+Note: `threads` is ignored for PDPTW. The money objective (`time_penalty > 0`)
+trades fuel for driver hours wherever waiting exists; VROOM cannot price waiting
+time at all.
+
+```sh
+curl -X POST http://127.0.0.1:8080/solve/pdptw -d '{
+  "matrix": [[0,10,12,14,16],[10,0,6,8,10],[12,6,0,7,9],[14,8,7,0,6],[16,10,9,6,0]],
+  "pickups": [1,2], "deliveries": [3,4], "demand": [4,5], "capacity": 10,
+  "ready": [0,0,0,0,0], "due": [10000,10000,10000,10000,10000], "service": [0,3,3,3,3],
+  "time_penalty": 3
+}'
+# {"total_cost":45,"vehicles":1,"routes":[[1,2,4,3]]}
 ```
 
 ## POST /solve/atsp
