@@ -27,37 +27,40 @@ const commiv = @import("commiv");
 // also in seconds. There is NO kilometre column in a duration matrix, so the
 // dollar model prices per-vehicle + per-minute-of-duration only (no $/km term).
 //
-// MONEY MODEL (real-world-sourced, same as BENCHMARKS.md money bench):
-//   $140 per vehicle  +  $0.50 per minute of route duration.
-// The $0.50/km term of the academic model has no analogue on a time matrix and
-// is deliberately dropped rather than faked. veh_penalty / time_penalty are the
-// solver's internal objective weights (MR_VEH_PEN / MR_TIMEPEN); the reported
-// USD figure is computed from the physical outputs with the prices above so it
-// is independent of the internal penalty scale.
+// MONEY MODEL (ONE model: the solver's search weights ARE the price model, so
+// there is no "optimize under one model, score under another" footgun):
+//   usd = (dist_sec + time_pen*dur_sec + veh_pen*veh) * money_unit
+// where time_pen = MR_TIMEPEN and veh_pen = MR_VEH_PEN are the very weights the
+// solver minimizes, money_unit = 0.0015 dollars per internal unit, dist_sec is
+// the directed travel time (validatePdptw), dur_sec is total route duration
+// (travel+service+wait), and veh is the vehicle count. There is no $/km term: a
+// duration matrix has no kilometre axis. The dump embeds these prices in a
+// "prices" object {time_pen, veh_pen, money_unit} so a second engine
+// (tools/vroom_road_pdptw.py) scores its plan under the byte-identical model.
 //
 // Env knobs:
 //   MR_DIR      road dir (default vendor/road)
 //   MR_TW_DIR   .tw overlay dir (default vendor/road)
 //   MR_FILE     instance name (default nyc-100)
 //   MR_PAIRS    cap on n_pairs (default (DIM-1)/2, i.e. as many as fit)
-//   MR_SERVICE  per-stop service seconds (default 300 = 5min)
+//   MR_PAIR     pairing mode: "shuffle" (default, seeded random pairing, bit-
+//               identical when unset) | "window" (deterministic window-feasible
+//               greedy pairing; loads <name>.tw and keeps its windows verbatim,
+//               errors NoFeasiblePairing if a pickup has no feasible mate)
+//   MR_SERVICE  per-stop service seconds (default 300 = 5min); IGNORED in window
+//               mode and whenever MR_USE_TW loads per-node service from the .tw
 //   MR_SLACK    window slack seconds added past the reference arrival (default 3600)
-//   MR_TIMEPEN  solver time_penalty: internal cost per second of duration (default 30)
-//   MR_VEH_PEN  solver veh_penalty: internal cost per vehicle (default 8400)
+//   MR_TIMEPEN  solver time_penalty AND USD time price: cost per second of
+//               duration (default 30)
+//   MR_VEH_PEN  solver veh_penalty AND USD vehicle price: cost per vehicle
+//               (default 8400)
 //   MR_TIME_MS  fleet-min wall budget in ms (default 5000)
 //   MR_SEED     pairing + solver seed (default 1)
-//   MR_USD_VEH  dollars per vehicle for the reported USD (default 140)
-//   MR_USD_MIN  dollars per minute of duration for the reported USD (default 0.50)
 //   MR_USE_TW   1 = load <name>.tw if present instead of synthesizing (default 0)
 //   MR_STAGGER  >0 = staggered pickup openings, ready[p] in [0,MR_STAGGER] seeded,
 //               ready[q]=ready[p]; makes waiting bite. 0 = ready=0 (default, bit-id)
 //   MR_DUMP     path: write the synthesized instance as JSON before solving
 //   MR_SOLVE    0 = with MR_DUMP set, exit after dumping (no solve). default 1
-//
-// The default MR_TIMEPEN/MR_VEH_PEN keep the internal money weights at real
-// ratio: 30 per sec = $0.50/min at a $1 == 60 internal-unit scale, and
-// 8400 = $140 at the same scale. They are only the SEARCH weights; the reported
-// USD uses MR_USD_VEH / MR_USD_MIN directly.
 //
 // Prints a CSV header then one line per run:
 //   instance,n_pairs,vehicles,dist_sec,dur_sec,service_sec,wait_sec,usd_total,ms
@@ -75,9 +78,8 @@ pub fn main(init: std.process.Init) !void {
     const veh_pen = try std.fmt.parseInt(u64, env.get("MR_VEH_PEN") orelse "8400", 10);
     const time_ms = try std.fmt.parseInt(u64, env.get("MR_TIME_MS") orelse "5000", 10);
     const seed = try std.fmt.parseInt(u64, env.get("MR_SEED") orelse "1", 10);
-    const usd_veh = try std.fmt.parseFloat(f64, env.get("MR_USD_VEH") orelse "140");
-    const usd_min = try std.fmt.parseFloat(f64, env.get("MR_USD_MIN") orelse "0.50");
     const use_tw = std.mem.eql(u8, env.get("MR_USE_TW") orelse "0", "1");
+    const window_pairing = std.mem.eql(u8, env.get("MR_PAIR") orelse "shuffle", "window");
     const stagger_s = try std.fmt.parseInt(u32, env.get("MR_STAGGER") orelse "0", 10);
     const dump_path = env.get("MR_DUMP");
     const do_solve = !std.mem.eql(u8, env.get("MR_SOLVE") orelse "1", "0");
@@ -138,59 +140,86 @@ pub fn main(init: std.process.Init) !void {
     ready[0] = 0;
     service[0] = 0;
 
-    for (0..n_pairs) |i| {
-        const p = custs[2 * i]; // pickup
-        const q = custs[2 * i + 1]; // its dropoff
-        pair_of[p] = q;
-        pair_of[q] = p;
-        is_pickup[p] = true;
-        is_pickup[q] = false;
-        // pair quantity q_amt from the pickup node's real road demand (>=1);
-        // dropoff mirrors it so the pair nets to zero load.
-        var q_amt: i64 = @intCast(road.demand[p]);
-        if (q_amt < 1) q_amt = 1;
-        if (q_amt > road.capacity) q_amt = @intCast(@max(@as(u32, 1), road.capacity));
-        demand_signed[p] = q_amt;
-        demand_signed[q] = -q_amt;
-        service[p] = service_s;
-        service[q] = service_s;
-    }
-
-    // --- time windows ---
-    if (use_tw) {
+    if (window_pairing) {
+        // Window mode (MR_PAIR=window): load the .tw windows FIRST because the
+        // pairing needs ready/due/service to test reference feasibility, then
+        // pair customers window-compatibly. The .tw windows are kept verbatim;
+        // the reference schedule inside windowPair is only the feasibility
+        // certificate, never written back to due[].
         try loadTw(init, allocator, tw_dir, name, K, ready, due, service);
-    } else {
-        // Synthesize windows from a provably-feasible reference schedule: each
-        // pair on its own vehicle depot->p->q->depot is feasible by
-        // construction, so the whole instance is feasible and the money search
-        // consolidates from there. due = reference arrival + slack. Depot horizon
-        // covers every reference return.
-        //
-        // MR_STAGGER > 0: staggered pickup openings so waiting bites during
-        // consolidation. ready[p] drawn deterministically in [0, MR_STAGGER],
-        // ready[q] = ready[p] (>= ready[p]). The reference schedule departs the
-        // depot at 0 and WAITS at each stop until its window opens, so arrive =
-        // max(ready, earliest-travel-arrival) and due = arrive + slack stays
-        // feasible for any stagger. MR_STAGGER == 0 draws no RNG and is
-        // bit-identical to the original ready=0 construction.
-        var horizon: u64 = 0;
+        try windowPair(allocator, K, matrix, ready, due, service, custs);
+        // wire pair_of / is_pickup / demand_signed from the produced pairs;
+        // service stays the per-node .tw value and is NOT overwritten here.
         for (0..n_pairs) |i| {
-            const p = custs[2 * i];
-            const q = custs[2 * i + 1];
-            const rp: u32 = if (stagger_s > 0) rng.intRangeAtMost(u32, 0, stagger_s) else 0;
-            const rq: u32 = rp; // ready[q] >= ready[p]
-            const arrive_p: u64 = @max(@as(u64, rp), @as(u64, matrix[0 * K + p]));
-            const depart_p: u64 = arrive_p + service[p];
-            const arrive_q: u64 = @max(@as(u64, rq), depart_p + matrix[p * K + q]);
-            const ret: u64 = arrive_q + service[q] + matrix[q * K + 0];
-            ready[p] = rp;
-            ready[q] = rq;
-            due[p] = @intCast(arrive_p + slack_s);
-            due[q] = @intCast(arrive_q + slack_s);
-            if (ret > horizon) horizon = ret;
+            const p = custs[2 * i]; // pickup
+            const q = custs[2 * i + 1]; // its dropoff
+            pair_of[p] = q;
+            pair_of[q] = p;
+            is_pickup[p] = true;
+            is_pickup[q] = false;
+            // pair quantity q_amt from the pickup node's real road demand (>=1);
+            // dropoff mirrors it so the pair nets to zero load.
+            var q_amt: i64 = @intCast(road.demand[p]);
+            if (q_amt < 1) q_amt = 1;
+            if (q_amt > road.capacity) q_amt = @intCast(@max(@as(u32, 1), road.capacity));
+            demand_signed[p] = q_amt;
+            demand_signed[q] = -q_amt;
         }
-        ready[0] = 0;
-        due[0] = @intCast(horizon + slack_s);
+    } else {
+        for (0..n_pairs) |i| {
+            const p = custs[2 * i]; // pickup
+            const q = custs[2 * i + 1]; // its dropoff
+            pair_of[p] = q;
+            pair_of[q] = p;
+            is_pickup[p] = true;
+            is_pickup[q] = false;
+            // pair quantity q_amt from the pickup node's real road demand (>=1);
+            // dropoff mirrors it so the pair nets to zero load.
+            var q_amt: i64 = @intCast(road.demand[p]);
+            if (q_amt < 1) q_amt = 1;
+            if (q_amt > road.capacity) q_amt = @intCast(@max(@as(u32, 1), road.capacity));
+            demand_signed[p] = q_amt;
+            demand_signed[q] = -q_amt;
+            service[p] = service_s;
+            service[q] = service_s;
+        }
+
+        // --- time windows ---
+        if (use_tw) {
+            try loadTw(init, allocator, tw_dir, name, K, ready, due, service);
+        } else {
+            // Synthesize windows from a provably-feasible reference schedule: each
+            // pair on its own vehicle depot->p->q->depot is feasible by
+            // construction, so the whole instance is feasible and the money search
+            // consolidates from there. due = reference arrival + slack. Depot horizon
+            // covers every reference return.
+            //
+            // MR_STAGGER > 0: staggered pickup openings so waiting bites during
+            // consolidation. ready[p] drawn deterministically in [0, MR_STAGGER],
+            // ready[q] = ready[p] (>= ready[p]). The reference schedule departs the
+            // depot at 0 and WAITS at each stop until its window opens, so arrive =
+            // max(ready, earliest-travel-arrival) and due = arrive + slack stays
+            // feasible for any stagger. MR_STAGGER == 0 draws no RNG and is
+            // bit-identical to the original ready=0 construction.
+            var horizon: u64 = 0;
+            for (0..n_pairs) |i| {
+                const p = custs[2 * i];
+                const q = custs[2 * i + 1];
+                const rp: u32 = if (stagger_s > 0) rng.intRangeAtMost(u32, 0, stagger_s) else 0;
+                const rq: u32 = rp; // ready[q] >= ready[p]
+                const arrive_p: u64 = @max(@as(u64, rp), @as(u64, matrix[0 * K + p]));
+                const depart_p: u64 = arrive_p + service[p];
+                const arrive_q: u64 = @max(@as(u64, rq), depart_p + matrix[p * K + q]);
+                const ret: u64 = arrive_q + service[q] + matrix[q * K + 0];
+                ready[p] = rp;
+                ready[q] = rq;
+                due[p] = @intCast(arrive_p + slack_s);
+                due[q] = @intCast(arrive_q + slack_s);
+                if (ret > horizon) horizon = ret;
+            }
+            ready[0] = 0;
+            due[0] = @intCast(horizon + slack_s);
+        }
     }
 
     // --- assert pairing/precedence well-formed before we solve ---
@@ -206,7 +235,7 @@ pub fn main(init: std.process.Init) !void {
     //     a second engine (VROOM via tools/vroom_road_pdptw.py) gets a bit-for-bit
     //     identical instance. MR_SOLVE=0 exits here without burning solver time. ---
     if (dump_path) |dp| {
-        try dumpInstance(init, allocator, dp, name, n_pairs, road.capacity, K, matrix, custs, demand_signed, ready, due, service);
+        try dumpInstance(init, allocator, dp, name, n_pairs, road.capacity, K, matrix, custs, demand_signed, ready, due, service, time_pen, veh_pen);
     }
     if (!do_solve) return;
 
@@ -239,10 +268,20 @@ pub fn main(init: std.process.Init) !void {
         .time_penalty = time_pen,
     };
     const t0 = nanos();
-    var res = if (std.mem.eql(u8, driver, "plain"))
-        try commiv.internal.pdptw_sisr.solvePdptwSisr(allocator, inst, params)
-    else
-        try commiv.internal.pdptw_sisr.solvePdptwSisrFleetMin(allocator, inst, params, time_ms);
+    // A solver-level failure (e.g. NoCompleteSolution on an over-tight instance)
+    // must still leave a greppable CSV row for an unattended harness, not just a
+    // Zig error trace with no line.
+    var res = blk: {
+        const r = if (std.mem.eql(u8, driver, "plain"))
+            commiv.internal.pdptw_sisr.solvePdptwSisr(allocator, inst, params)
+        else
+            commiv.internal.pdptw_sisr.solvePdptwSisrFleetMin(allocator, inst, params, time_ms);
+        break :blk r catch |err| {
+            std.debug.print("instance,n_pairs,vehicles,dist_sec,dur_sec,service_sec,wait_sec,usd_total,ms\n", .{});
+            std.debug.print("{s},SOLVE_ERROR_{s}\n", .{ name, @errorName(err) });
+            return err;
+        };
+    };
     defer res.deinit();
     const ms = (nanos() - t0) / 1_000_000;
 
@@ -267,9 +306,12 @@ pub fn main(init: std.process.Init) !void {
     }
     const wait_sec = dur_sec - dist_sec - service_sec;
 
-    // --- real-price dollars from the physical outputs ---
-    const usd_total = @as(f64, @floatFromInt(res.vehicles)) * usd_veh +
-        (@as(f64, @floatFromInt(dur_sec)) / 60.0) * usd_min;
+    // --- dollars under the ONE money model: the SAME weights the solver
+    //     optimized (time_pen, veh_pen) times money_unit. No academic column. ---
+    const money_unit: f64 = 0.0015;
+    const usd_total = (@as(f64, @floatFromInt(dist_sec)) +
+        @as(f64, @floatFromInt(time_pen)) * @as(f64, @floatFromInt(dur_sec)) +
+        @as(f64, @floatFromInt(veh_pen)) * @as(f64, @floatFromInt(res.vehicles))) * money_unit;
 
     std.debug.print("instance,n_pairs,vehicles,dist_sec,dur_sec,service_sec,wait_sec,usd_total,ms\n", .{});
     std.debug.print("{s},{d},{d},{d},{d},{d},{d},{d:.2},{d}\n", .{
@@ -287,7 +329,10 @@ fn nanos() u64 {
 // Writes exactly the arrays the solver receives so both engines solve the same
 // instance. Schema:
 //   {"name","n_pairs","capacity","matrix":[[KxK directed seconds]],
-//    "pairs":[{"pickup","delivery","amount"}], "ready":[K],"due":[K],"service":[K]}
+//    "pairs":[{"pickup","delivery","amount"}], "ready":[K],"due":[K],"service":[K],
+//    "prices":{"time_pen","veh_pen","money_unit"}}
+// The "prices" object embeds the SAME weights the solver optimized so a second
+// engine scores its plan under the byte-identical money model.
 
 fn appendUint(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, v: anytype) !void {
     var tmp: [24]u8 = undefined;
@@ -318,6 +363,8 @@ fn dumpInstance(
     ready: []const u32,
     due: []const u32,
     service: []const u32,
+    time_pen: u64,
+    veh_pen: u64,
 ) !void {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
@@ -363,9 +410,83 @@ fn dumpInstance(
     try appendArr(&buf, allocator, u32, due[0..K]);
     try buf.appendSlice(allocator, ",\"service\":");
     try appendArr(&buf, allocator, u32, service[0..K]);
+
+    // prices: the SAME weights the solver optimized, so a second engine scores
+    // its plan under the byte-identical money model. money_unit is fixed 0.0015.
+    try buf.appendSlice(allocator, ",\"prices\":{\"time_pen\":");
+    try appendUint(&buf, allocator, time_pen);
+    try buf.appendSlice(allocator, ",\"veh_pen\":");
+    try appendUint(&buf, allocator, veh_pen);
+    try buf.appendSlice(allocator, ",\"money_unit\":0.0015}");
+
     try buf.appendSlice(allocator, "}\n");
 
     try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = path, .data = buf.items });
+}
+
+/// Window-compatible deterministic pairing (MR_PAIR=window). Requires ready/due/
+/// service already loaded (from the .tw). Sorts customers 1..K-1 by (ready, node
+/// id) ascending, then greedily pairs: the first unpaired customer is a pickup p
+/// and takes the first LATER unpaired q whose pair passes the reference schedule
+///   t_p = max(ready[p], d(0,p)),                 t_p            <= due[p]
+///   t_q = max(ready[q], t_p + service[p] + d(p,q)), t_q         <= due[q]
+///   t_q + service[q] + d(q,0)                                   <= due[0]
+/// That schedule IS the feasibility certificate, so the .tw windows are kept
+/// verbatim (never overwritten). Errors NoFeasiblePairing if any pickup has no
+/// feasible mate. Fills custs as [pickup0,delivery0, pickup1,delivery1, ...].
+/// Deterministic: uses no RNG.
+fn windowPair(
+    allocator: std.mem.Allocator,
+    K: usize,
+    matrix: []const u32,
+    ready: []const u32,
+    due: []const u32,
+    service: []const u32,
+    custs: []usize,
+) !void {
+    const n = K - 1; // customers 1..K-1 (always even = 2*n_pairs)
+    const order = try allocator.alloc(usize, n);
+    defer allocator.free(order);
+    for (0..n) |i| order[i] = i + 1;
+
+    const Ctx = struct {
+        ready: []const u32,
+        fn lessThan(ctx: @This(), a: usize, b: usize) bool {
+            if (ctx.ready[a] != ctx.ready[b]) return ctx.ready[a] < ctx.ready[b];
+            return a < b;
+        }
+    };
+    std.mem.sort(usize, order, Ctx{ .ready = ready }, Ctx.lessThan);
+
+    const paired = try allocator.alloc(bool, K);
+    defer allocator.free(paired);
+    @memset(paired, false);
+
+    var pc: usize = 0;
+    for (order, 0..) |p, pi| {
+        if (paired[p]) continue;
+        // pickup must be reachable from the depot within its own window
+        const t_p = @max(@as(u64, ready[p]), @as(u64, matrix[0 * K + p]));
+        if (t_p > @as(u64, due[p])) return error.NoFeasiblePairing;
+        var found: ?usize = null;
+        var qi = pi + 1;
+        while (qi < n) : (qi += 1) {
+            const q = order[qi];
+            if (paired[q]) continue;
+            const t_q = @max(@as(u64, ready[q]), t_p + @as(u64, service[p]) + @as(u64, matrix[p * K + q]));
+            if (t_q > @as(u64, due[q])) continue;
+            if (t_q + @as(u64, service[q]) + @as(u64, matrix[q * K + 0]) > @as(u64, due[0])) continue;
+            found = q;
+            break;
+        }
+        const q = found orelse return error.NoFeasiblePairing;
+        paired[p] = true;
+        paired[q] = true;
+        custs[2 * pc] = p;
+        custs[2 * pc + 1] = q;
+        pc += 1;
+    }
+    std.debug.assert(pc == n / 2);
 }
 
 /// Load a <name>.tw overlay (same format as examples/twroadbench.zig: first

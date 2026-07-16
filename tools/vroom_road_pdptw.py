@@ -6,7 +6,12 @@
 # route DURATION or WAITING, which is exactly the commiv edge), runs the vroom
 # binary at equal wall, then scores VROOM's plan under the MONEY_REAL Prices model.
 #
-# Prices model (MONEY_REAL.md §2): dollars = (drive_sec + 7*dur_sec + 30000*veh) * 0.0015
+# Prices model: dollars = (drive_sec + time_pen*dur_sec + veh_pen*veh) * money_unit
+#   Prices (time_pen, veh_pen, money_unit) are read from the dump's "prices" object
+#   - the SAME weights commiv optimized and reported USD under - so VROOM is both
+#   STEERED (fixed cost) and SCORED under the byte-identical model (no two-price
+#   footgun). Legacy dumps without "prices" are refused unless the operator sets
+#   MR_TIMEPEN and MR_VEH_PEN explicitly; there is deliberately no silent default.
 #   drive_sec = travel only  (VROOM summary "duration" = travel time only, verified
 #               against VROOM API docs and mirrored from tools/vroom_pdptw.py)
 #   dur_sec   = drive + service + waiting  (total route duration commiv prices)
@@ -20,23 +25,44 @@
 # Env:
 #   VROOM_BIN     path to vroom binary (default ~/cbench/vroom/bin/vroom)
 #   VROOM_TIME    equal-wall exploration budget seconds (default 10) -> vroom -l
-#   VROOM_FIXED   per-vehicle fixed cost fed to VROOM to steer fleet-min
-#                 (default 30000 = MR_VEH_PEN; only steers VROOM, not our scoring)
+#   VROOM_FIXED   per-vehicle fixed cost fed to VROOM to steer fleet-min.
+#                 DEFAULT: the dump's prices.veh_pen, so VROOM is steered with
+#                 the SAME fleet price it is scored under. Override only for
+#                 steering experiments; scoring always uses the dump prices.
 #   MR_DUMP       dump path (alternative to argv[1])
+#   MR_TIMEPEN / MR_VEH_PEN / MR_MONEY_UNIT
+#                 REQUIRED ONLY for legacy dumps lacking a "prices" object;
+#                 refuses to score such a dump without them (a silent default
+#                 here is exactly the optimize-under-one-model-score-under-
+#                 another footgun this script exists to prevent).
 #   VROOM_PRINT_REQUEST=1  print the constructed request JSON to stdout and exit
 #                          (no vroom run; for local unit verification)
 import json, os, subprocess, sys, time
 
 BIN = os.environ.get("VROOM_BIN", os.path.expanduser("~/cbench/vroom/bin/vroom"))
 T = int(os.environ.get("VROOM_TIME", "10"))
-# Prices model constants (MONEY_REAL.md §2). Overridable but default to the real model.
-TIMEPEN = float(os.environ.get("MR_TIMEPEN", "7"))       # driver/operating rate ratio
-VEHPEN = float(os.environ.get("MR_VEH_PEN", "30000"))    # fixed-cost in money units
-UNIT = float(os.environ.get("MR_MONEY_UNIT", "0.0015"))  # dollars per money unit
-FIXED = int(os.environ.get("VROOM_FIXED", "30000"))      # VROOM steering fixed cost
 
 
-def build_request(d):
+def resolve_prices(d):
+    """Prices MUST come from the dump (written by the bench with the exact
+    weights the solver optimized). Legacy dumps without a "prices" object are
+    scored only when the operator explicitly supplies every price via env."""
+    prices = d.get("prices")
+    if prices:
+        return float(prices["time_pen"]), float(prices["veh_pen"]), float(prices["money_unit"])
+    try:
+        return (float(os.environ["MR_TIMEPEN"]),
+                float(os.environ["MR_VEH_PEN"]),
+                float(os.environ.get("MR_MONEY_UNIT", "0.0015")))
+    except KeyError:
+        sys.stderr.write(
+            "dump has no \"prices\" object (legacy dump). Re-dump with the current "
+            "moneyroadbench, or set MR_TIMEPEN and MR_VEH_PEN explicitly to the "
+            "weights that run optimized. Refusing to guess.\n")
+        sys.exit(2)
+
+
+def build_request(d, fixed):
     """Construct the VROOM request from the moneyroadbench dump dict."""
     matrix = d["matrix"]
     cap = d["capacity"]
@@ -60,7 +86,7 @@ def build_request(d):
     horizon = due[0]
     vehicles = [{"id": i + 1, "start_index": 0, "end_index": 0,
                  "capacity": [cap], "time_window": [0, horizon],
-                 "costs": {"fixed": FIXED}} for i in range(n_pairs)]
+                 "costs": {"fixed": fixed}} for i in range(n_pairs)]
     return {"shipments": shipments, "vehicles": vehicles,
             "matrices": {"car": {"durations": matrix, "costs": matrix}}}
 
@@ -77,7 +103,12 @@ def run(path):
     d = json.load(open(path))
     name = d.get("name", os.path.basename(path))
     n_pairs = d["n_pairs"]
-    req = build_request(d)
+    # One price model: commiv optimized AND reported USD under the dump's exact
+    # weights; VROOM is BOTH steered (fixed cost) and scored with the same ones,
+    # so neither engine can be optimized under one model and scored under another.
+    timepen, vehpen, unit = resolve_prices(d)
+    fixed = int(os.environ.get("VROOM_FIXED", str(int(vehpen))))
+    req = build_request(d, fixed)
 
     if os.environ.get("VROOM_PRINT_REQUEST") == "1":
         print(json.dumps(req, indent=2))
@@ -109,7 +140,7 @@ def run(path):
     dur_sec = drive_sec + wait_sec + svc                   # total route duration
     used = sum(1 for rt in out.get("routes", []) if rt.get("steps"))
     unassigned = count_unassigned_shipments(out)
-    usd = (drive_sec + TIMEPEN * dur_sec + VEHPEN * used) * UNIT
+    usd = (drive_sec + timepen * dur_sec + vehpen * used) * unit
     # An incomplete plan (unassigned>0) served fewer stops with fewer vehicles, so
     # its dollar figure is artificially LOW and must never be scored as a win. Emit
     # a non-numeric sentinel in the usd column so no downstream overspend%.
