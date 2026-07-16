@@ -56,9 +56,21 @@ dollar gap across 6 cells, sellable threshold >= +5% for commiv.
 as-run** — BELOW the +5% sellable threshold. On the four cells where VROOM honored the
 wall (n<=1000) the mean is **+3.1%** and commiv sweeps 4/4. The two n=2000 cells — VROOM's
 only win and the near-tie — are exactly where VROOM overshot the 120 s limit to 215/229 s
-(1.8–1.9x commiv's compute); `-l` is evidently soft at scale. Reported as-run anyway; an
-enforced-equal-compute rerun would need external kill or commiv walls matched to VROOM's
-actual spend.
+(1.8–1.9x commiv's compute); `-l` is evidently soft at scale.
+
+**EQUAL-COMPUTE RERUN (same night):** commiv re-ran the two n=2000 cells at VROOM's
+ACTUAL spend (215.2 s / 228.7 s, same dumps, seed 1, quiet machine):
+
+| cell | commiv $ @VROOM's wall (veh) | VROOM $ (veh) | gap |
+|---|---|---|---|
+| moscow-2000 | 19912.67 (54, fleetmin) | **19806.90** (53) | **-0.5%** (VROOM keeps it) |
+| nyc-2000    | **16966.60** (46, fleetmin) | 17148.22 (48) | **+1.1%** |
+
+Honest read: equal compute narrows moscow-2000 from -2.2% to -0.5% but does NOT flip it —
+VROOM legitimately edges that one cell (2 h slots at n=2000 are its comfort zone; the
+one-fewer-vehicle plan holds). nyc-2000 widens from +0.3% to +1.1% for commiv. Six-cell
+mean at equal compute: **+2.2%** for commiv, 5 wins / 1 loss. Reproduce:
+`~/equalcomp_2000.sh`, results `~/campaign/results/money-equalcomp-2026-07-16/`.
 
 **The waiting wedge is now measured, not theoretical:** with real slots VROOM eats
 31k–62k seconds of driver waiting per instance (17.2 h at moscow-1000, ~$650 of the
