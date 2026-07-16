@@ -222,7 +222,15 @@ pub fn main(init: std.process.Init) !void {
         .service = service,
     };
 
-    // --- money-mode fleet-min solve, SINGLE THREAD ---
+    // --- money-mode solve, SINGLE THREAD. MR_DRIVER picks the engine driver:
+    //     "fleetmin" (default, the original behavior) = hierarchical fleet-min,
+    //     which minimizes vehicle count LEXICOGRAPHICALLY and will trade
+    //     unbounded duration for one fewer route — distorts a money objective
+    //     where a vehicle has a finite price. "plain" = the flat SISR engine
+    //     with veh_penalty/time_penalty inside acceptance (the same shape the
+    //     published Li&Lim money bench used): the correct driver when the
+    //     objective is dollars, not fleet size. ---
+    const driver = env.get("MR_DRIVER") orelse "fleetmin";
     const params = commiv.PdpSisrParams{
         .seed = seed,
         .iters = 1_000_000_000,
@@ -231,7 +239,10 @@ pub fn main(init: std.process.Init) !void {
         .time_penalty = time_pen,
     };
     const t0 = nanos();
-    var res = try commiv.internal.pdptw_sisr.solvePdptwSisrFleetMin(allocator, inst, params, time_ms);
+    var res = if (std.mem.eql(u8, driver, "plain"))
+        try commiv.internal.pdptw_sisr.solvePdptwSisr(allocator, inst, params)
+    else
+        try commiv.internal.pdptw_sisr.solvePdptwSisrFleetMin(allocator, inst, params, time_ms);
     defer res.deinit();
     const ms = (nanos() - t0) / 1_000_000;
 
