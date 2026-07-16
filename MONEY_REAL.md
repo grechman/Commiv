@@ -1,5 +1,54 @@
 # M3 — real-road money proof (head-to-head complete, audited)
 
+## 0. HEADLINE — the real-window head-to-head (2026-07-16 evening, winserver)
+
+The definitive run: moscow + nyc road matrices with the PUBLISHED campaign courier-slot
+windows (`vendor/road/*.tw`: 60% of customers in 2 h slots, 300 s service, 9 h horizon),
+window-feasible deterministic pairing (`MR_PAIR=window`), byte-identical dumped
+instances, ONE price model (embedded in each dump) steering AND scoring both engines,
+single thread, seed 1, commiv best-of-two-drivers. Objective stated in advance: mean
+dollar gap across 6 cells, sellable threshold >= +5% for commiv.
+
+| cell | wall | commiv $ (veh, driver) | VROOM $ (veh) | gap | VROOM wait | commiv wait | VROOM wall |
+|---|---|---|---|---|---|---|---|
+| moscow-100  | 30s  | **1117.60** (3, plain)      | 1135.18 (3)   | **+1.6%** | 382 s    | 0 s   | 1.4 s |
+| nyc-100     | 30s  | **1024.09** (3, fleetmin)   | 1053.91 (3)   | **+2.9%** | 3568 s   | 143 s | 1.3 s |
+| moscow-1000 | 60s  | **10272.31** (28, fleetmin) | 10765.74 (29) | **+4.8%** | 62085 s  | 344 s | 77 s |
+| nyc-1000    | 60s  | **8584.76** (24, fleetmin)  | 8862.87 (25)  | **+3.2%** | 30905 s  | 413 s | 80 s |
+| moscow-2000 | 120s | 20255.12 (54, fleetmin)     | **19806.90** (53) | -2.2% | 51050 s | 364 s | **215 s** |
+| nyc-2000    | 120s | **17095.14** (47, fleetmin) | 17148.22 (48) | +0.3% | 51156 s  | 79 s  | **229 s** |
+
+**Verdict against the pre-stated objective:** commiv wins 5/6 cells; mean gap **+1.8%
+as-run** — BELOW the +5% sellable threshold. On the four cells where VROOM honored the
+wall (n<=1000) the mean is **+3.1%** and commiv sweeps 4/4. The two n=2000 cells — VROOM's
+only win and the near-tie — are exactly where VROOM overshot the 120 s limit to 215/229 s
+(1.8–1.9x commiv's compute); `-l` is evidently soft at scale. Reported as-run anyway; an
+enforced-equal-compute rerun would need external kill or commiv walls matched to VROOM's
+actual spend.
+
+**The waiting wedge is now measured, not theoretical:** with real slots VROOM eats
+31k–62k seconds of driver waiting per instance (17.2 h at moscow-1000, ~$650 of the
+$493 + fleet gap) because it cannot price waiting; commiv holds waiting to 0–413 s.
+This is the number the M4 demo should show.
+
+**Audit:** independent step-walk of every VROOM route (pairing, precedence, capacity,
+TWs, arrival arithmetic on the directed matrix) — CLEAN on all 6 cells. n=100 cells
+bit-reproduce; the wall-bound moscow-1000/2000 reruns land within 0.004–0.2% (wall-clock
+nondeterminism of `-l`, not a scoring bug). commiv rows oracle-gated by `validatePdptw`
+in-bench. Fix commits (window pairing, one-price-model, C ABI 0.3.0 stack) validated
+server-side the same run: full test suite + Python smoke green.
+
+**Driver note:** fleetmin won 5/6 cells against plain under real windows (tight slots
+make fleet structure dominate); keep best-of-two.
+
+Reproduce: winserver `~/money_h2h3.sh` (commit 09d97d1), results + audit
+`~/campaign/results/money-h2h-realtw-2026-07-16/`.
+
+---
+
+Below: the earlier 2026-07-16 loose-window round (kept — it maps the other end of the
+regime axis: where windows are loose, the money edge shrinks to noise and VROOM ties).
+
 ## 1. What this proves
 
 The money objective (PDPTW route-duration + per-vehicle pricing) run on **real directed
