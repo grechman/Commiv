@@ -55,6 +55,8 @@ const commiv = @import("commiv");
 //   MR_VEH_PEN  solver veh_penalty AND USD vehicle price: cost per vehicle
 //               (default 8400)
 //   MR_TIME_MS  fleet-min wall budget in ms (default 5000)
+//   MR_THREADS  >1 = parallel fleet-min waves (full-might mode, fleetmin driver
+//               only; plain stays serial). Default 1 = bit-identical serial.
 //   MR_SEED     pairing + solver seed (default 1)
 //   MR_USE_TW   1 = load <name>.tw if present instead of synthesizing (default 0)
 //   MR_STAGGER  >0 = staggered pickup openings, ready[p] in [0,MR_STAGGER] seeded,
@@ -260,6 +262,11 @@ pub fn main(init: std.process.Init) !void {
     //     published Li&Lim money bench used): the correct driver when the
     //     objective is dollars, not fleet size. ---
     const driver = env.get("MR_DRIVER") orelse "fleetmin";
+    // MR_THREADS: >1 = parallel fleet-min waves (solvePdptwSisrFleetMinParallel,
+    // the same full-might path pdptwbench exposes as PB_THREADS). Default 1 =
+    // serial, bit-identical to before this knob existed. Only meaningful for
+    // the fleetmin driver; plain stays single-thread.
+    const n_threads = try std.fmt.parseInt(usize, env.get("MR_THREADS") orelse "1", 10);
     const params = commiv.PdpSisrParams{
         .seed = seed,
         .iters = 1_000_000_000,
@@ -274,6 +281,8 @@ pub fn main(init: std.process.Init) !void {
     var res = blk: {
         const r = if (std.mem.eql(u8, driver, "plain"))
             commiv.internal.pdptw_sisr.solvePdptwSisr(allocator, inst, params)
+        else if (n_threads > 1)
+            commiv.internal.pdptw_sisr.solvePdptwSisrFleetMinParallel(allocator, inst, params, time_ms, n_threads)
         else
             commiv.internal.pdptw_sisr.solvePdptwSisrFleetMin(allocator, inst, params, time_ms);
         break :blk r catch |err| {
