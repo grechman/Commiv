@@ -1,5 +1,41 @@
 # M3 — real-road money proof (head-to-head complete, audited)
 
+## 0b. FULL-MIGHT (equal machine, 12 threads both) — the multicore verdict (2026-07-17)
+
+Same six audited real-window dumps; VROOM `-t 12` runs first at the nominal wall, commiv
+(parallel fleet-min waves, `MR_THREADS=12`, commit 863d02d) gets VROOM's ACTUAL measured
+spend. No handicaps either side.
+
+| cell | commiv $ (veh) | VROOM $ (veh) | gap |
+|---|---|---|---|
+| moscow-100 | **1122.76** (3) | 1135.18 (3) | +1.1% |
+| nyc-100 | **1047.97** (3) | 1053.91 (3) | +0.6% |
+| moscow-1000 | **10199.91** (28) | 10228.95 (28) | +0.3% |
+| nyc-1000 | **8591.79** (24) | 8651.24 (24) | +0.7% |
+| moscow-2000 | 20418.61 (54) | **19490.18** (53) | **-4.8%** |
+| nyc-2000 | 17381.90 (46) | **17050.97** (48) | **-1.9%** |
+
+**commiv 4W/2L and loses the 6-cell mean (-0.5%).** Threads help VROOM far more than us:
+its work-sharing LS deepens ONE search 12x faster, while our PDPTW parallelism is
+best-of-K independent waves (width). Width probes at moscow-2000, same 143.9s wall:
+serial $20175.85 < 6 waves $20404.81 < 12 waves $20418.61 — **width is strictly
+counterproductive at n=2000** (consistent with the long-standing islands verdict:
+parallelism = speed, not accuracy). Even our best serial config loses that cell to
+VROOM-12T by 3.5%: the multicore lever for PDPTW simply does not exist yet. This is the
+top engine work item (intra-search parallelism — parallel recreate evaluation — the
+"VROOM move").
+
+**The waiting wedge SURVIVES full machine** (15-min-window probe, moscow-1000, VROOM
+-t 12): commiv plain-1T $16294.91 (16.9 h waiting) vs VROOM-12T $17347.38 (**85.5 h
+waiting**) = **commiv +6.5% with VROOM at full machine and commiv on one thread.**
+Structural, as expected: no thread count teaches VROOM to price waiting.
+
+Battlefield map, complete: tight windows = commiv turf at any thread count (+5.7–8%);
+loose n<=1000 = thin commiv wins at equal machine (+0.3–1.1%); loose n=2000 multicore =
+VROOM's turf (-1.9/-4.8%) until the PDPTW parallel-depth lever is built. Reproduce:
+`~/money_fullmight.sh`, `~/might_probes.sh`, results
+`~/campaign/results/money-fullmight-2026-07-17/`.
+
 ## 0a. WINDOW-TIGHTNESS SWEEP — the appointment-window economics (2026-07-16 night)
 
 The dose-response curve: slot openings spread across the 8 h shift
