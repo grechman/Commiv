@@ -83,8 +83,9 @@ curl -X POST http://127.0.0.1:8080/solve/cvrp -d '{
 
 That is the whole integration: a directed cost matrix (row `a`, column `b` = cost of
 `a -> b`, depot = node 0), demands, a capacity. `/solve/vrptw` adds time windows,
-`/solve/atsp` does pure directed ordering. Full schema and Python/JS/Go client snippets
-in [`docs/rest.md`](docs/rest.md).
+`/solve/atsp` does pure directed ordering, `/solve/pdptw/dispatch` re-solves a
+rolling-horizon plan around committed (locked) stops. Full schema and Python/JS/Go
+client snippets in [`docs/rest.md`](docs/rest.md).
 
 ### Python, natively
 
@@ -96,7 +97,9 @@ print(sol.total_cost, sol.routes)  # 58 [[2, 1], [3]]
 ```
 
 numpy matrices take a fast path; infeasible instances raise instead of returning
-garbage. Details in [`bindings/python/README.md`](bindings/python/README.md).
+garbage. `solve_pdptw_dispatch` and `DispatchSession` cover rolling-horizon
+re-solve around a committed plan. Details in
+[`bindings/python/README.md`](bindings/python/README.md).
 
 ### Zig, embedded
 
@@ -360,6 +363,13 @@ is_pickup, demand_signed, ready, due, service }`; returns `PdpResult`
   goal (uncapped warm-up, retrying descent, all remaining time polishing at the pin).
   On the hardest long-route cells this halves the distance gap vs a cold capped run
   (lr2_2_7 22.8% -> 5.0%) and solves cells where a cold capped run finds nothing.
+- `solvePdptwSisrDispatch(allocator, inst, params, current, locked)` — rolling-horizon
+  re-solve: `current[i]` is vehicle `i`'s present route, `locked[i]` how many of its
+  leading stops are committed and must not move (a locked delivery's pickup must be
+  locked too, in the same route). Unlocked stops and new/banked pairs are re-optimized
+  around the locks. Exposed through all three doors as `solve_pdptw_dispatch` /
+  `commiv_solve_pdptw_dispatch` / `POST /solve/pdptw/dispatch`; see
+  [`docs/rest.md`](docs/rest.md) and [`bindings/python/`](bindings/python/).
 - `solvePdptw(allocator, inst, PdpParams)` — correctness baseline (pair insertion +
   pair relocate, brute-force-verified); use the SISR engine for real work.
 - `validatePdptw(inst, routes) ?u64` — independent pairing + precedence + capacity-prefix +
@@ -630,8 +640,9 @@ curl -X POST http://127.0.0.1:8080/solve/cvrp -d '{
 
 Это вся интеграция: направленная матрица стоимостей (строка `a`, столбец `b` = стоимость
 `a -> b`, депо = узел 0), спрос, вместимость. `/solve/vrptw` добавляет временные окна,
-`/solve/atsp` — чистое направленное упорядочивание. Полная схема и примеры клиентов на
-Python/JS/Go — в [`docs/rest.md`](docs/rest.md).
+`/solve/atsp` — чистое направленное упорядочивание, `/solve/pdptw/dispatch` пересчитывает
+план на скользящем горизонте вокруг уже зафиксированных остановок. Полная схема и примеры
+клиентов на Python/JS/Go — в [`docs/rest.md`](docs/rest.md).
 
 ### Python — нативно
 
@@ -643,7 +654,9 @@ print(sol.total_cost, sol.routes)  # 58 [[2, 1], [3]]
 ```
 
 Матрицы numpy идут по быстрому пути; недопустимая задача поднимает исключение, а не
-возвращает мусор. Подробности — в [`bindings/python/README.md`](bindings/python/README.md).
+возвращает мусор. `solve_pdptw_dispatch` и `DispatchSession` покрывают пересчёт на
+скользящем горизонте вокруг уже зафиксированного плана. Подробности — в
+[`bindings/python/README.md`](bindings/python/README.md).
 
 ### Zig — встраивание
 
@@ -847,6 +860,13 @@ matrix, capacity, pair_of, is_pickup, demand_signed, ready, due, service }` с �
 - `solvePdptwSisrPinned(allocator, inst, params, total_time_ms, pin)` — корпоративный
   драйвер с фиксированным парком: лучшее решение ровно на `pin` машинах, весь бюджет на эту
   цель.
+- `solvePdptwSisrDispatch(allocator, inst, params, current, locked)` — пересчёт на
+  скользящем горизонте: `current[i]` — текущий маршрут машины `i`, `locked[i]` — сколько
+  ведущих остановок уже зафиксировано и не должно сдвинуться (забор зафиксированной доставки
+  тоже должен быть зафиксирован, на том же маршруте). Незафиксированные остановки и новые
+  заявки переоптимизируются вокруг фиксаций. Доступен через все три двери:
+  `solve_pdptw_dispatch` / `commiv_solve_pdptw_dispatch` / `POST /solve/pdptw/dispatch`
+  ([`docs/rest.md`](docs/rest.md), [`bindings/python/`](bindings/python/)).
 - `solvePdptw(allocator, inst, PdpParams)` — эталон корректности (для реальной работы
   используйте SISR-движок).
 - `validatePdptw(inst, routes) ?u64` — независимая проверка парности, предшествования,

@@ -3,7 +3,9 @@
 ctypes binding over libcommiv (the C ABI in include/commiv.h). No required
 dependencies; numpy arrays are accepted and take a fast path when numpy is
 installed. Four solver families ship: solve_cvrp, solve_vrptw, solve_pdptw
-(pickup-and-delivery with a money objective), and solve_atsp.
+(pickup-and-delivery with a money objective), and solve_atsp — plus
+solve_pdptw_dispatch and the DispatchSession convenience class for
+rolling-horizon re-solves around a committed (locked) plan.
 
 Build the library once, from the repo root:
 
@@ -63,6 +65,8 @@ __all__ = [
     "solve_cvrp",
     "solve_vrptw",
     "solve_pdptw",
+    "solve_pdptw_dispatch",
+    "DispatchSession",
     "solve_atsp",
     "version",
 ]
@@ -158,6 +162,17 @@ _lib.commiv_solve_pdptw.argtypes = [
     ctypes.POINTER(ctypes.c_uint32), ctypes.c_uint32,
     ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint32),
     ctypes.POINTER(ctypes.c_uint32),
+    ctypes.POINTER(_Options), ctypes.POINTER(ctypes.c_void_p),
+]
+_lib.commiv_solve_pdptw_dispatch.restype = ctypes.c_int
+_lib.commiv_solve_pdptw_dispatch.argtypes = [
+    ctypes.POINTER(ctypes.c_uint32), ctypes.c_size_t,
+    ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint32),
+    ctypes.POINTER(ctypes.c_uint32), ctypes.c_uint32,
+    ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint32),
+    ctypes.POINTER(ctypes.c_uint32),
+    ctypes.POINTER(ctypes.c_size_t), ctypes.c_size_t,
+    ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_size_t),
     ctypes.POINTER(_Options), ctypes.POINTER(ctypes.c_void_p),
 ]
 _lib.commiv_solve_atsp.restype = ctypes.c_int
@@ -399,6 +414,240 @@ def solve_pdptw(
     if rc != _OK:
         _raise_for(rc, "solve_pdptw")
     return _extract_routes(out)
+
+
+def solve_pdptw_dispatch(
+    matrix,
+    pickups: Sequence[int],
+    deliveries: Sequence[int],
+    demand: Sequence[int],
+    capacity: int,
+    ready: Sequence[int],
+    due: Sequence[int],
+    service: Sequence[int],
+    current_routes: Sequence[Sequence[int]],
+    locked: Sequence[int],
+    *,
+    seed: int = 1,
+    iters: int = 0,
+    veh_penalty: int = 0,
+    time_penalty: int = 0,
+    wall_ms: int = 0,
+) -> CvrpSolution:
+    """Rolling-horizon PDPTW re-solve: same instance contract as solve_pdptw,
+    plus the CURRENT plan and its LOCKED prefixes.
+
+    current_routes: one list of node ids per vehicle (may be empty: a cold
+    start). locked: one entry per route, len(locked) == len(current_routes);
+    locked[i] is how many of current_routes[i]'s leading stops are committed
+    (in progress or already served) and must not move in the result. A locked
+    delivery's pickup must also be locked, in the SAME route, or this raises
+    ValueError.
+
+    fleet_min/max_vehicles are not accepted here: dispatch keeps the current
+    fleet shape. Node-id stability: when new orders arrive, rebuild a LARGER
+    instance keeping every existing node's index and appending the new pairs
+    at the end; old routes stay valid warm input for the next dispatch call.
+    See DispatchSession for a stateful wrapper around this loop."""
+    if len(locked) != len(current_routes):
+        raise ValueError(f"locked must have one entry per route ({len(current_routes)}), got {len(locked)}")
+    dim = _matrix_dim(matrix)
+    n_pairs = len(pickups)
+    if len(deliveries) != n_pairs:
+        raise ValueError(f"pickups and deliveries must be the same length ({n_pairs} vs {len(deliveries)})")
+    if dim != 2 * n_pairs + 1:
+        raise ValueError(f"matrix dim must be 2*n_pairs+1 = {2 * n_pairs + 1}, got {dim}")
+    m = _as_u32_array(matrix, dim * dim, "matrix")
+    pk = _as_u32_array(pickups, n_pairs, "pickups")
+    dl = _as_u32_array(deliveries, n_pairs, "deliveries")
+    dm = _as_u32_array(demand, n_pairs, "demand")
+    rd = _as_u32_array(ready, dim, "ready")
+    du = _as_u32_array(due, dim, "due")
+    sv = _as_u32_array(service, dim, "service")
+
+    n_routes = len(current_routes)
+    offsets = [0]
+    flat_nodes: list[int] = []
+    for route in current_routes:
+        flat_nodes.extend(route)
+        offsets.append(len(flat_nodes))
+    cur_offsets = (ctypes.c_size_t * (n_routes + 1))(*offsets)
+    cur_nodes = (ctypes.c_uint32 * len(flat_nodes))(*flat_nodes)
+    locked_arr = (ctypes.c_size_t * n_routes)(*locked)
+
+    opts = _Options(seed=seed, sisr_iters=iters, veh_penalty=veh_penalty,
+                    time_penalty=time_penalty, wall_ms=wall_ms)
+    out = ctypes.c_void_p()
+    rc = _lib.commiv_solve_pdptw_dispatch(
+        m, n_pairs, pk, dl, dm, capacity, rd, du, sv,
+        cur_offsets, n_routes, cur_nodes, locked_arr,
+        ctypes.byref(opts), ctypes.byref(out),
+    )
+    if rc != _OK:
+        _raise_for(rc, "solve_pdptw_dispatch")
+    return _extract_routes(out)
+
+
+class DispatchSession:
+    """Stateful convenience wrapper over solve_pdptw / solve_pdptw_dispatch for
+    a rolling-horizon shift: owns the instance arrays and the current plan,
+    grows the instance as new orders arrive, and re-solves around committed
+    (locked) prefixes as the clock advances. The C ABI and REST doors stay
+    stateless on purpose; this class is the session, in Python only.
+
+    matrix must be a plain mutable nested list (row per node) — add_order
+    grows it in place, so numpy/flat inputs are not accepted here.
+
+    Q-commerce loop example::
+
+        session = DispatchSession(matrix, pickups, deliveries, demand,
+                                   capacity, ready, due, service, wall_ms=2000)
+        session.solve()                     # initial plan
+        while shift_running:
+            session.advance_to(now)         # lock stops already reached
+            for order in new_orders():
+                session.add_order(...)      # grow the instance, unlocked
+            session.solve()                  # re-optimize around the locks
+    """
+
+    def __init__(
+        self,
+        matrix,
+        pickups: Sequence[int],
+        deliveries: Sequence[int],
+        demand: Sequence[int],
+        capacity: int,
+        ready: Sequence[int],
+        due: Sequence[int],
+        service: Sequence[int],
+        *,
+        seed: int = 1,
+        iters: int = 0,
+        veh_penalty: int = 0,
+        time_penalty: int = 0,
+        wall_ms: int = 0,
+    ) -> None:
+        dim = _matrix_dim(matrix)
+        n_pairs = len(pickups)
+        if len(deliveries) != n_pairs:
+            raise ValueError(f"pickups and deliveries must be the same length ({n_pairs} vs {len(deliveries)})")
+        if dim != 2 * n_pairs + 1:
+            raise ValueError(f"matrix dim must be 2*n_pairs+1 = {2 * n_pairs + 1}, got {dim}")
+        self._matrix: list[list[int]] = [list(row) for row in matrix]
+        self.pickups = list(pickups)
+        self.deliveries = list(deliveries)
+        self.demand = list(demand)
+        self.capacity = capacity
+        self.ready = list(ready)
+        self.due = list(due)
+        self.service = list(service)
+        self.seed = seed
+        self.iters = iters
+        self.veh_penalty = veh_penalty
+        self.time_penalty = time_penalty
+        self.wall_ms = wall_ms
+        self.t = 0
+        self.plan: list[list[int]] = []  # current routes, node ids
+        self._locked: list[int] | None = None
+
+    def solve(self, **kw) -> CvrpSolution:
+        """Solve the current instance. The first call is a cold solve_pdptw;
+        every later call warm-starts from self.plan using the locks computed
+        by the last advance_to() (all-zero locks if advance_to was never
+        called since the last solve). Stores and returns the new plan."""
+        opts = dict(seed=self.seed, iters=self.iters, veh_penalty=self.veh_penalty,
+                    time_penalty=self.time_penalty, wall_ms=self.wall_ms)
+        opts.update(kw)
+        if not self.plan:
+            sol = solve_pdptw(
+                self._matrix, self.pickups, self.deliveries, self.demand,
+                self.capacity, self.ready, self.due, self.service, **opts,
+            )
+        else:
+            locked = self._locked if self._locked is not None else [0] * len(self.plan)
+            sol = solve_pdptw_dispatch(
+                self._matrix, self.pickups, self.deliveries, self.demand,
+                self.capacity, self.ready, self.due, self.service,
+                self.plan, locked, **opts,
+            )
+        self.plan = [list(r) for r in sol.routes]
+        self._locked = None  # consumed; advance_to must recompute it for the next solve
+        return sol
+
+    def add_order(
+        self,
+        row_p: Sequence[int],
+        col_p: Sequence[int],
+        row_q: Sequence[int],
+        col_q: Sequence[int],
+        p_to_q: int,
+        q_to_p: int,
+        amount: int,
+        p_ready: int,
+        p_due: int,
+        q_ready: int,
+        q_due: int,
+        p_service: int = 300,
+        q_service: int = 300,
+    ) -> tuple[int, int]:
+        """Grow the instance with one new pickup/delivery pair, keeping every
+        existing node's index unchanged (the current plan and locks stay
+        valid warm input).
+
+        row_p/col_p: travel times pickup -> existing node / existing node ->
+        pickup, one entry per current node (len == current dim, depot
+        included). row_q/col_q: the same for the delivery. p_to_q/q_to_p:
+        direct pickup<->delivery times. amount: request load. p_ready/p_due/
+        q_ready/q_due: time windows for the pickup/delivery. p_service/
+        q_service: service durations (default 300s = 5 min).
+
+        Returns (pickup_node_id, delivery_node_id) — the new node ids, which
+        are always dim and dim+1 of the instance BEFORE this call."""
+        dim = len(self._matrix)
+        if len(row_p) != dim or len(col_p) != dim or len(row_q) != dim or len(col_q) != dim:
+            raise ValueError(f"row/col vectors must have length {dim} (current dim)")
+        new_p, new_q = dim, dim + 1
+
+        for i, row in enumerate(self._matrix):
+            row.append(col_p[i])
+            row.append(col_q[i])
+        self._matrix.append(list(row_p) + [0, p_to_q])
+        self._matrix.append(list(row_q) + [q_to_p, 0])
+
+        self.pickups.append(new_p)
+        self.deliveries.append(new_q)
+        self.demand.append(amount)
+        self.ready.extend([p_ready, q_ready])
+        self.due.extend([p_due, q_due])
+        self.service.extend([p_service, q_service])
+        return new_p, new_q
+
+    def advance_to(self, t: int) -> None:
+        """Compute locked prefixes for the CURRENT plan as of clock time t,
+        for the next solve(). Schedule recurrence per route: depart the depot
+        at time 0; for each stop, arrival = time + travel(prev, node), start
+        = max(arrival, ready[node]), departure = start + service[node]. A
+        stop is LOCKED iff its start <= t; locked[route] = count of leading
+        locked stops.
+
+        A locked delivery's pickup is always locked too: the pickup precedes
+        its delivery on the same route and start times are non-decreasing
+        along a route, so the pickup was reached (and locked) no later."""
+        self.t = t
+        locked: list[int] = []
+        for route in self.plan:
+            time = 0
+            prev = 0
+            lk = 0
+            for pos, node in enumerate(route):
+                arrival = time + self._matrix[prev][node]
+                start = max(arrival, self.ready[node])
+                if start <= t:
+                    lk = pos + 1
+                time = start + self.service[node]
+                prev = node
+            locked.append(lk)
+        self._locked = locked
 
 
 def solve_atsp(matrix, *, seed: int = 1, trials: int = 0) -> tuple[int, list[int]]:

@@ -6,6 +6,7 @@ routes without linking anything.
 
 Four solver families are exposed: `/solve/cvrp`, `/solve/vrptw`, `/solve/pdptw`
 (pickup-and-delivery with time windows and a money objective), and `/solve/atsp`.
+`/solve/pdptw/dispatch` adds rolling-horizon re-solve around a committed plan.
 
 ```sh
 zig build serve -Doptimize=ReleaseFast
@@ -134,6 +135,44 @@ curl -X POST http://127.0.0.1:8080/solve/pdptw -d '{
   "time_penalty": 3
 }'
 # {"total_cost":45,"vehicles":1,"routes":[[1,2,4,3]]}
+```
+
+## POST /solve/pdptw/dispatch
+
+Rolling-horizon PDPTW re-solve: the same instance fields as `/solve/pdptw`,
+plus the **current plan** and its **locked prefixes**. This is the
+express-delivery / live-dispatch shape — orders arrive mid-shift, some stops
+are already committed (in progress or served), and the rest re-optimizes
+around them.
+
+| field | type | required | meaning |
+|---|---|---|---|
+| ...all `/solve/pdptw` fields except `fleet_min`/`max_vehicles`... | | | dispatch keeps the current fleet shape |
+| `current` | `int[][]` | no (`[]`) | one array of node ids per existing route, in visit order; `[]` is a legal cold start |
+| `locked` | `int[]` | no (`[]`) | one entry per route in `current`; `locked[i]` = how many of that route's **leading** stops are committed and must not move in the result |
+
+The locked-prefix contract: a locked delivery's pickup must also be locked,
+in the **same** route (422 otherwise). A node absent from `current` is fine
+(unrouted, or a brand-new order). `fleet_min` and `max_vehicles` are not
+accepted here — dispatch never resizes the fleet on its own; it only opens or
+closes routes as ruin-and-recreate naturally does around the locks.
+
+Node-id stability: when new orders arrive, rebuild the request with a LARGER
+`matrix`/`pickups`/`deliveries`/etc. that keeps every existing node's index
+unchanged and appends the new pairs at the end — the old `current` plan stays
+valid input for the next call.
+
+```sh
+curl -X POST http://127.0.0.1:8080/solve/pdptw/dispatch -d '{
+  "matrix": [[0,10,12,14,16],[10,0,6,8,10],[12,6,0,7,9],[14,8,7,0,6],[16,10,9,6,0]],
+  "pickups": [1,2], "deliveries": [3,4], "demand": [4,5], "capacity": 10,
+  "ready": [0,0,0,0,0], "due": [10000,10000,10000,10000,10000], "service": [0,3,3,3,3],
+  "time_penalty": 3,
+  "current": [[1,2,4,3]], "locked": [4]
+}'
+# {"total_cost":45,"vehicles":1,"routes":[[1,2,4,3]]}
+# locked:[4] locks the WHOLE route, and both requests are already in it, so
+# the result is guaranteed to reproduce it verbatim regardless of iters/seed.
 ```
 
 ## POST /solve/atsp

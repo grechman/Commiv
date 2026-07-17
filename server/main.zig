@@ -14,6 +14,10 @@ const commiv = @import("commiv");
 //   POST /solve/pdptw  {matrix, pickups, deliveries, demand, capacity, ready,
 //                       due, service, seed?, iters?, veh_penalty?, time_penalty?,
 //                       fleet_min?, max_vehicles?, wall_ms?}
+//   POST /solve/pdptw/dispatch  same fields as /solve/pdptw (no fleet_min/
+//                       max_vehicles: dispatch keeps the current fleet shape)
+//                       plus current, locked — rolling-horizon re-solve
+//                       around a committed plan; see docs/rest.md.
 //   POST /solve/atsp   {matrix, seed?, trials?}
 //   GET  /health
 //
@@ -93,13 +97,15 @@ fn handleRequest(gpa: std.mem.Allocator, req: *std.http.Server.Request, cfg: Ser
         return respondJson(arena, req, .{ .status = "ok", .version = version_string });
     }
 
-    const Route = enum { cvrp, vrptw, pdptw, atsp };
+    const Route = enum { cvrp, vrptw, pdptw, pdptw_dispatch, atsp };
     const route: Route = if (std.mem.eql(u8, target, "/solve/cvrp"))
         .cvrp
     else if (std.mem.eql(u8, target, "/solve/vrptw"))
         .vrptw
     else if (std.mem.eql(u8, target, "/solve/pdptw"))
         .pdptw
+    else if (std.mem.eql(u8, target, "/solve/pdptw/dispatch"))
+        .pdptw_dispatch
     else if (std.mem.eql(u8, target, "/solve/atsp"))
         .atsp
     else
@@ -118,6 +124,7 @@ fn handleRequest(gpa: std.mem.Allocator, req: *std.http.Server.Request, cfg: Ser
         .cvrp => return solveCvrp(arena, req, body),
         .vrptw => return solveVrptw(arena, req, body),
         .pdptw => return solvePdptw(arena, req, body),
+        .pdptw_dispatch => return solvePdptwDispatch(arena, req, body),
         .atsp => return solveAtsp(arena, req, body),
     }
 }
@@ -357,6 +364,145 @@ fn solvePdptw(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []c
         break :blk commiv.solvePdptwSisr(arena, inst, params) catch |err|
             return respondSolverError(req, err);
     };
+    defer result.deinit();
+
+    return respondJson(arena, req, .{
+        .total_cost = result.total_cost,
+        .vehicles = result.routes.len,
+        .routes = result.routes,
+    });
+}
+
+const PdptwDispatchRequest = struct {
+    matrix: []const []const u32 = &.{}, // dim x dim, dim = 2*n_pairs+1; depot = 0 (absent in CMV1 bodies)
+    pickups: []const u32, // n_pairs pickup node ids (1..dim-1)
+    deliveries: []const u32, // n_pairs delivery node ids (1..dim-1)
+    demand: []const u32, // n_pairs loads (one per request)
+    capacity: u32,
+    ready: []const u32, // dim entries; earliest service start, ready[0] = 0
+    due: []const u32, // dim entries; latest service start, due[0] = depot horizon
+    service: []const u32, // dim entries; service durations, service[0] = 0
+    current: []const []const u32 = &.{}, // one array of node ids per existing route
+    locked: []const u64 = &.{}, // one entry per route in `current`
+    seed: u64 = 1,
+    iters: u64 = 0, // SISR iterations; 0 = default
+    veh_penalty: u64 = 0,
+    time_penalty: u64 = 0, // money objective: charge route duration (PDPTW-only)
+    wall_ms: u64 = 0, // wall-clock budget (ms); 0 = default
+};
+
+/// Rolling-horizon PDPTW re-solve: the /solve/pdptw instance contract plus
+/// the CURRENT plan and its LOCKED prefixes. fleet_min/max_vehicles are not
+/// accepted here — dispatch keeps the current fleet shape. See docs/rest.md.
+fn solvePdptwDispatch(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []const u8) !void {
+    const p = parseSolveRequest(PdptwDispatchRequest, arena, req, body) orelse return;
+    const r = p.request;
+    const flat = p.matrix;
+    const dim = p.dim;
+    const n_pairs = r.pickups.len;
+    if (dim < 3 or n_pairs == 0 or dim != 2 * n_pairs + 1)
+        return respondError(req, .unprocessable_entity, "PDPTW needs a dim x dim matrix with dim = 2*n_pairs+1 and n_pairs >= 1");
+    if (r.deliveries.len != n_pairs or r.demand.len != n_pairs)
+        return respondError(req, .unprocessable_entity, "pickups/deliveries/demand must all have length n_pairs");
+    if (r.ready.len != dim or r.due.len != dim or r.service.len != dim)
+        return respondError(req, .unprocessable_entity, "ready/due/service must all have length dim (2*n_pairs+1)");
+    if (r.capacity == 0)
+        return respondError(req, .unprocessable_entity, "capacity must be > 0");
+    if (r.ready[0] != 0 or r.service[0] != 0)
+        return respondError(req, .unprocessable_entity, "depot slots ready[0] and service[0] must be 0");
+    if (r.locked.len != r.current.len)
+        return respondError(req, .unprocessable_entity, "locked must have exactly one entry per route in current");
+
+    // Synthesize the pairing arrays the engine consumes and validate coverage
+    // (identical to /solve/pdptw): every node 1..dim-1 named exactly once.
+    const pair_of = arena.alloc(usize, dim) catch return respondError(req, .internal_server_error, "out of memory");
+    const is_pickup = arena.alloc(bool, dim) catch return respondError(req, .internal_server_error, "out of memory");
+    const demand_signed = arena.alloc(i64, dim) catch return respondError(req, .internal_server_error, "out of memory");
+    const seen = arena.alloc(bool, dim) catch return respondError(req, .internal_server_error, "out of memory");
+    @memset(seen, false);
+    pair_of[0] = 0;
+    is_pickup[0] = false;
+    demand_signed[0] = 0;
+    for (0..n_pairs) |i| {
+        const pu: usize = r.pickups[i];
+        const qu: usize = r.deliveries[i];
+        if (pu == 0 or qu == 0 or pu >= dim or qu >= dim or pu == qu)
+            return respondError(req, .unprocessable_entity, "pickup/delivery ids must be distinct and in 1..dim-1");
+        if (seen[pu] or seen[qu])
+            return respondError(req, .unprocessable_entity, "each node may appear only once across pickups/deliveries");
+        if (r.demand[i] > r.capacity)
+            return respondError(req, .unprocessable_entity, "a request's demand exceeds capacity (infeasible)");
+        seen[pu] = true;
+        seen[qu] = true;
+        pair_of[pu] = qu;
+        pair_of[qu] = pu;
+        is_pickup[pu] = true;
+        is_pickup[qu] = false;
+        demand_signed[pu] = @as(i64, r.demand[i]);
+        demand_signed[qu] = -@as(i64, r.demand[i]);
+    }
+    for (seen[1..dim]) |s| {
+        if (!s) return respondError(req, .unprocessable_entity, "every node 1..dim-1 must be named exactly once across pickups/deliveries");
+    }
+
+    // Validate the current plan + the locked-prefix contract, then convert
+    // node ids (u32 over the wire) into the usize slices the engine wants.
+    const current = arena.alloc([]const usize, r.current.len) catch return respondError(req, .internal_server_error, "out of memory");
+    const locked = arena.alloc(usize, r.locked.len) catch return respondError(req, .internal_server_error, "out of memory");
+    const plan_seen = arena.alloc(bool, dim) catch return respondError(req, .internal_server_error, "out of memory");
+    @memset(plan_seen, false);
+    for (r.current, 0..) |route, i| {
+        const conv = arena.alloc(usize, route.len) catch return respondError(req, .internal_server_error, "out of memory");
+        for (route, 0..) |c, j| conv[j] = c;
+        current[i] = conv;
+        locked[i] = @intCast(r.locked[i]);
+    }
+    for (current, 0..) |route, i| {
+        if (locked[i] > route.len)
+            return respondError(req, .unprocessable_entity, "locked[i] cannot exceed the length of current[i]");
+        for (route) |c| {
+            if (c == 0 or c >= dim or plan_seen[c])
+                return respondError(req, .unprocessable_entity, "current: node ids must be in 1..dim-1 and appear at most once across all routes (absent is fine)");
+            plan_seen[c] = true;
+        }
+    }
+    for (current, 0..) |route, i| {
+        const lk = locked[i];
+        for (route[0..lk]) |c| {
+            if (is_pickup[c]) continue;
+            var found = false;
+            for (route[0..lk]) |x| {
+                if (x == pair_of[c]) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) return respondError(req, .unprocessable_entity, "a locked delivery's pickup must also be locked, in the same route");
+        }
+    }
+
+    const inst = commiv.PdpInstance{
+        .n_pairs = n_pairs,
+        .matrix = flat,
+        .capacity = @intCast(r.capacity),
+        .pair_of = pair_of,
+        .is_pickup = is_pickup,
+        .demand_signed = demand_signed,
+        .ready = r.ready,
+        .due = r.due,
+        .service = r.service,
+    };
+
+    var params: commiv.PdpSisrParams = .{
+        .seed = r.seed,
+        .veh_penalty = r.veh_penalty,
+        .time_penalty = r.time_penalty,
+    };
+    if (r.iters != 0) params.iters = @intCast(r.iters);
+    if (r.wall_ms != 0) params.time_ms = r.wall_ms;
+
+    var result = commiv.internal.pdptw_sisr.solvePdptwSisrDispatch(arena, inst, params, current, locked) catch |err|
+        return respondSolverError(req, err);
     defer result.deinit();
 
     return respondJson(arena, req, .{

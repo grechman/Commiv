@@ -125,6 +125,42 @@ int commiv_solve_pdptw(const uint32_t *matrix, size_t n_pairs,
                        const uint32_t *service,
                        const commiv_options *options, commiv_routes **out);
 
+/* Rolling-horizon PDPTW re-solve: the same instance contract as
+ * commiv_solve_pdptw, plus the CURRENT plan and its LOCKED prefixes.
+ *
+ *   cur_offsets   n_routes + 1 entries, monotone non-decreasing,
+ *                 cur_offsets[0] == 0. Route r of the current plan is
+ *                 cur_nodes[cur_offsets[r] .. cur_offsets[r+1]].
+ *   n_routes      number of routes in the current plan; 0 is a legal cold
+ *                 start (dispatch from an empty plan) — cur_offsets,
+ *                 cur_nodes, and locked are unused then and may be NULL.
+ *   cur_nodes     cur_offsets[n_routes] entries; every value in 1..dim-1,
+ *                 each node appearing at most once across all routes (a node
+ *                 absent from the current plan is fine: unrouted / new).
+ *   locked        n_routes entries; locked[r] is how many of route r's
+ *                 LEADING stops are committed (in progress or already
+ *                 served) and must not move in the result. A locked
+ *                 delivery's pickup must also be locked, in the SAME route
+ *                 (COMMIV_ERR_INVALID_ARGUMENT otherwise).
+ *
+ * Node-id stability: when new orders arrive, rebuild a LARGER instance that
+ * keeps every existing node's index unchanged and appends the new pairs at
+ * the end — the old routes stay valid warm input for the next dispatch call.
+ *
+ * options->fleet_min and options->max_vehicles are IGNORED here: dispatch
+ * keeps the current fleet shape (routes open/close only as ruin-and-recreate
+ * naturally does around the locked prefixes). Every other option (seed,
+ * sisr_iters, veh_penalty, time_penalty, wall_ms) behaves as in
+ * commiv_solve_pdptw. */
+int commiv_solve_pdptw_dispatch(const uint32_t *matrix, size_t n_pairs,
+                                const uint32_t *pickup_node, const uint32_t *delivery_node,
+                                const uint32_t *demand, uint32_t capacity,
+                                const uint32_t *ready, const uint32_t *due,
+                                const uint32_t *service,
+                                const size_t *cur_offsets, size_t n_routes,
+                                const uint32_t *cur_nodes, const size_t *locked,
+                                const commiv_options *options, commiv_routes **out);
+
 /* Directed TSP (ATSP) over an n x n matrix. out_tour must hold n entries and
  * receives the visit order (a permutation of 0..n-1); out_cost receives the
  * directed tour length. */

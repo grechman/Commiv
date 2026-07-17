@@ -126,7 +126,16 @@ with the honest caveat inline.
 Acceptance: `pip install commiv` on a clean machine, then a 10-line money-
 objective script runs green with no toolchain. `docker run` serves `/solve/pdptw`.
 
-## M6 — Dispatch / rolling-horizon session API (PULLED UP 2026-07-16)
+## M6 — Dispatch / rolling-horizon session API (PULLED UP 2026-07-16) — BUILT 2026-07-18, commit pending validation
+
+`commiv_solve_pdptw_dispatch` (C ABI), `solve_pdptw_dispatch` + `DispatchSession`
+(Python), and `POST /solve/pdptw/dispatch` (REST) now expose
+`solvePdptwSisrDispatch` through all three doors, stateless at the C/REST
+level as designed (`DispatchSession` is the Python-only convenience session).
+`examples/dispatch_shift_demo.py` simulates a shift with mid-day order
+arrivals. Written by inspection against the plan below, not yet run through
+`zig build`/the validation ladder on this machine — see the build+test pass
+before treating the acceptance criterion as met.
 
 REPRIORITIZED by owner decision 2026-07-16: M6 moves up the line, to be built
 immediately after the planned bench campaign lands (tightness sweep, cuOpt

@@ -103,6 +103,73 @@ def check_pdptw_money():
     _assert_complete_pdptw_plan(sol)
 
 
+def check_pdptw_dispatch():
+    sol = commiv.solve_pdptw(
+        PDP_MATRIX, PDP_PICKUPS, PDP_DELIVERIES, PDP_DEMAND, 10,
+        PDP_READY, PDP_DUE, PDP_SERVICE, seed=5, iters=2000,
+    )
+    # Lock the ENTIRE first nonempty route: a complete route is always
+    # pair-closed (a pair never spans two routes), so this is always valid.
+    current_routes = sol.routes
+    locked = [0] * len(current_routes)
+    lock_idx = next(i for i, r in enumerate(current_routes) if r)
+    locked[lock_idx] = len(current_routes[lock_idx])
+    locked_prefix = list(current_routes[lock_idx])
+
+    sol2 = commiv.solve_pdptw_dispatch(
+        PDP_MATRIX, PDP_PICKUPS, PDP_DELIVERIES, PDP_DEMAND, 10,
+        PDP_READY, PDP_DUE, PDP_SERVICE, current_routes, locked,
+        seed=9, iters=3000,
+    )
+    n = len(locked_prefix)
+    assert any(list(r[:n]) == locked_prefix for r in sol2.routes if len(r) >= n)
+    _assert_complete_pdptw_plan(sol2)
+
+
+def check_dispatch_session():
+    # 3-pair instance, generous windows so any order works timing-wise.
+    n_pairs = 3
+    dim = 2 * n_pairs + 1
+    matrix = [[abs(i - j) * 7 + (3 if i != j else 0) for j in range(dim)] for i in range(dim)]
+    pickups = [1, 2, 3]
+    deliveries = [4, 5, 6]
+    demand = [2, 3, 4]
+    ready = [0] * dim
+    due = [100_000] * dim
+    service = [0] * dim
+
+    session = commiv.DispatchSession(
+        matrix, pickups, deliveries, demand, 10, ready, due, service,
+        seed=3, iters=2000,
+    )
+    sol1 = session.solve()
+    assert sol1.total_cost > 0
+    pre_plan = [list(r) for r in session.plan]
+
+    session.advance_to(100_000)  # generous windows -> locks the entire plan
+
+    old_dim = len(session._matrix)
+    new_p, new_q = session.add_order(
+        row_p=[10] * old_dim, col_p=[10] * old_dim,
+        row_q=[12] * old_dim, col_q=[12] * old_dim,
+        p_to_q=5, q_to_p=5, amount=2,
+        p_ready=0, p_due=100_000, q_ready=0, q_due=100_000,
+        p_service=0, q_service=0,
+    )
+    assert new_p == old_dim and new_q == old_dim + 1
+
+    sol2 = session.solve(iters=3000)
+    # Locked stops unmoved: every pre-existing (fully-locked) route survives
+    # verbatim as a leading prefix of some route in the new plan.
+    for r in pre_plan:
+        if not r:
+            continue
+        assert any(list(r2[: len(r)]) == r for r2 in sol2.routes if len(r2) >= len(r)), (r, sol2.routes)
+    # The new order was served.
+    served = {c for r in sol2.routes for c in r}
+    assert new_p in served and new_q in served, (new_p, new_q, sol2.routes)
+
+
 def check_vrptw_fleet_min():
     # fleet_min with a small wall budget still serves every customer.
     sol = commiv.solve_vrptw(
@@ -158,6 +225,10 @@ if __name__ == "__main__":
     print("pdptw ok")
     check_pdptw_money()
     print("pdptw money ok")
+    check_pdptw_dispatch()
+    print("pdptw dispatch ok")
+    check_dispatch_session()
+    print("dispatch session ok")
     check_vrptw_fleet_min()
     print("vrptw fleet_min ok")
     check_atsp()

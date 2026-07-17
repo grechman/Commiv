@@ -375,6 +375,198 @@ export fn commiv_solve_pdptw(
     return COMMIV_OK;
 }
 
+/// Validate the current-plan + locked-prefix contract for
+/// commiv_solve_pdptw_dispatch. dim/pair_of/is_pickup describe the instance
+/// (already validated by checkPdpArgs). `cur_offsets` has n_routes + 1
+/// entries (route r = cur_nodes[cur_offsets[r]..cur_offsets[r+1]]), `locked`
+/// has n_routes entries. `seen` is caller scratch, length dim. Only called
+/// when n_routes > 0 (the n_routes == 0 cold-start case is trivially valid
+/// and skips this entirely). Returns 0 when the plan is usable, a
+/// COMMIV_ERR_* otherwise.
+fn checkDispatchArgs(
+    dim: usize,
+    pair_of: []const usize,
+    is_pickup: []const bool,
+    n_routes: usize,
+    cur_offsets: [*]const usize,
+    cur_nodes: ?[*]const u32,
+    locked: [*]const usize,
+    seen: []bool,
+) c_int {
+    if (cur_offsets[0] != 0) return COMMIV_ERR_INVALID_ARGUMENT;
+    for (0..n_routes) |i| {
+        if (cur_offsets[i + 1] < cur_offsets[i]) return COMMIV_ERR_INVALID_ARGUMENT;
+        if (locked[i] > cur_offsets[i + 1] - cur_offsets[i]) return COMMIV_ERR_INVALID_ARGUMENT;
+    }
+    const total = cur_offsets[n_routes];
+    if (total > 0 and cur_nodes == null) return COMMIV_ERR_INVALID_ARGUMENT;
+    const nodes: []const u32 = if (total > 0) cur_nodes.?[0..total] else &[_]u32{};
+
+    // Every node absent from `nodes` is fine (unrouted / new); every node
+    // present must be a real customer index and appear at most once total.
+    @memset(seen, false);
+    for (nodes) |c| {
+        if (c == 0 or c >= dim or seen[c]) return COMMIV_ERR_INVALID_ARGUMENT;
+        seen[c] = true;
+    }
+    // Locked-pair invariant: a locked delivery's pickup must also be locked,
+    // in the SAME route's prefix. The engine only std.debug.asserts this
+    // (compiled out under ReleaseFast), so the C boundary must catch it.
+    for (0..n_routes) |i| {
+        const route = nodes[cur_offsets[i]..cur_offsets[i + 1]];
+        const lk = locked[i];
+        for (route[0..lk]) |c| {
+            if (is_pickup[c]) continue;
+            var found = false;
+            for (route[0..lk]) |x| {
+                if (x == pair_of[c]) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) return COMMIV_ERR_INVALID_ARGUMENT;
+        }
+    }
+    return COMMIV_OK;
+}
+
+/// Rolling-horizon PDPTW re-solve: keeps the instance contract of
+/// commiv_solve_pdptw and adds the CURRENT plan plus its LOCKED prefixes.
+/// Route r of the current plan is cur_nodes[cur_offsets[r]..cur_offsets[r+1]]
+/// (n_routes + 1 offsets, monotone non-decreasing, cur_offsets[0] == 0);
+/// locked[r] is how many of route r's leading stops are committed (in
+/// progress or already served) and must not move. A locked delivery's pickup
+/// must also be locked, in the same route (COMMIV_ERR_INVALID_ARGUMENT
+/// otherwise). n_routes == 0 is a legal cold start (dispatch from an empty
+/// plan): cur_offsets/cur_nodes/locked are unused then and may be NULL.
+///
+/// Node-id stability: when new orders arrive, rebuild a LARGER instance that
+/// keeps every existing node's index unchanged and appends the new pairs at
+/// the end — the old routes stay valid warm input for the next call.
+///
+/// options->fleet_min and options->max_vehicles are IGNORED here: dispatch
+/// keeps the current fleet shape (routes open/close only as ruin-and-recreate
+/// naturally does around the locked prefixes). Every other option (seed,
+/// sisr_iters, veh_penalty, time_penalty, wall_ms) behaves as in
+/// commiv_solve_pdptw.
+export fn commiv_solve_pdptw_dispatch(
+    matrix: ?[*]const u32,
+    n_pairs: usize,
+    pickup_node: ?[*]const u32,
+    delivery_node: ?[*]const u32,
+    demand: ?[*]const u32,
+    capacity: u32,
+    ready: ?[*]const u32,
+    due: ?[*]const u32,
+    service: ?[*]const u32,
+    cur_offsets: ?[*]const usize,
+    n_routes: usize,
+    cur_nodes: ?[*]const u32,
+    locked: ?[*]const usize,
+    options: ?*const CommivOptions,
+    out: ?**CommivRoutes,
+) c_int {
+    const m = matrix orelse return COMMIV_ERR_INVALID_ARGUMENT;
+    const pick = pickup_node orelse return COMMIV_ERR_INVALID_ARGUMENT;
+    const drop = delivery_node orelse return COMMIV_ERR_INVALID_ARGUMENT;
+    const dem = demand orelse return COMMIV_ERR_INVALID_ARGUMENT;
+    const rdy = ready orelse return COMMIV_ERR_INVALID_ARGUMENT;
+    const du = due orelse return COMMIV_ERR_INVALID_ARGUMENT;
+    const srv = service orelse return COMMIV_ERR_INVALID_ARGUMENT;
+    const out_p = out orelse return COMMIV_ERR_INVALID_ARGUMENT;
+    if (n_routes > 0 and (cur_offsets == null or locked == null)) return COMMIV_ERR_INVALID_ARGUMENT;
+
+    if (n_pairs == 0 or capacity == 0) return COMMIV_ERR_INVALID_ARGUMENT;
+    // Keep node ids in u32 and dim = 2*n_pairs+1 from overflowing.
+    if (n_pairs >= (std.math.maxInt(u32) - 1) / 2) return COMMIV_ERR_INVALID_ARGUMENT;
+    const dim = 2 * n_pairs + 1;
+    _ = std.math.mul(usize, dim, dim) catch return COMMIV_ERR_INVALID_ARGUMENT;
+
+    const seen = gpa.alloc(bool, dim) catch return COMMIV_ERR_OUT_OF_MEMORY;
+    defer gpa.free(seen);
+    const rc = checkPdpArgs(n_pairs, dim, pick, drop, dem, capacity, rdy, srv, seen);
+    if (rc != COMMIV_OK) return rc;
+
+    const pair_of = gpa.alloc(usize, dim) catch return COMMIV_ERR_OUT_OF_MEMORY;
+    defer gpa.free(pair_of);
+    const is_pickup = gpa.alloc(bool, dim) catch return COMMIV_ERR_OUT_OF_MEMORY;
+    defer gpa.free(is_pickup);
+    const demand_signed = gpa.alloc(i64, dim) catch return COMMIV_ERR_OUT_OF_MEMORY;
+    defer gpa.free(demand_signed);
+
+    pair_of[0] = 0;
+    is_pickup[0] = false;
+    demand_signed[0] = 0;
+    for (0..n_pairs) |i| {
+        const p = pick[i];
+        const q = drop[i];
+        pair_of[p] = q;
+        pair_of[q] = p;
+        is_pickup[p] = true;
+        is_pickup[q] = false;
+        demand_signed[p] = @as(i64, dem[i]);
+        demand_signed[q] = -@as(i64, dem[i]);
+    }
+
+    // Dispatch-specific: validate the current plan + the locked-prefix contract.
+    if (n_routes > 0) {
+        const plan_seen = gpa.alloc(bool, dim) catch return COMMIV_ERR_OUT_OF_MEMORY;
+        defer gpa.free(plan_seen);
+        const rc2 = checkDispatchArgs(dim, pair_of, is_pickup, n_routes, cur_offsets.?, cur_nodes, locked.?, plan_seen);
+        if (rc2 != COMMIV_OK) return rc2;
+    }
+
+    const o = resolveOptions(options);
+    const inst = pdptw.PdpInstance{
+        .n_pairs = n_pairs,
+        .matrix = m[0 .. dim * dim],
+        .capacity = @intCast(capacity),
+        .pair_of = pair_of,
+        .is_pickup = is_pickup,
+        .demand_signed = demand_signed,
+        .ready = rdy[0..dim],
+        .due = du[0..dim],
+        .service = srv[0..dim],
+    };
+
+    var params: pdptw_sisr.PdpSisrParams = .{
+        .seed = o.seed,
+        .veh_penalty = o.veh_penalty,
+        .time_penalty = o.time_penalty,
+    };
+    if (o.sisr_iters != 0) params.iters = @intCast(o.sisr_iters);
+    if (o.wall_ms != 0) params.time_ms = o.wall_ms;
+
+    // Marshal the current plan into the usize node slices the engine wants:
+    // cur_nodes is u32 but the engine indexes routes with usize, so copy into
+    // one flat buffer and point each route's slice into it.
+    const total: usize = if (n_routes > 0) cur_offsets.?[n_routes] else 0;
+    const node_buf = gpa.alloc(usize, total) catch return COMMIV_ERR_OUT_OF_MEMORY;
+    defer gpa.free(node_buf);
+    const route_slices = gpa.alloc([]const usize, n_routes) catch return COMMIV_ERR_OUT_OF_MEMORY;
+    defer gpa.free(route_slices);
+    const locked_slice = gpa.alloc(usize, n_routes) catch return COMMIV_ERR_OUT_OF_MEMORY;
+    defer gpa.free(locked_slice);
+    if (n_routes > 0) {
+        const offs = cur_offsets.?;
+        const lks = locked.?;
+        if (total > 0) {
+            const nodes = cur_nodes.?[0..total];
+            for (nodes, 0..) |c, i| node_buf[i] = c;
+        }
+        for (0..n_routes) |i| {
+            route_slices[i] = node_buf[offs[i]..offs[i + 1]];
+            locked_slice[i] = lks[i];
+        }
+    }
+
+    var result = pdptw_sisr.solvePdptwSisrDispatch(gpa, inst, params, route_slices, locked_slice) catch |err| return mapError(err);
+    defer result.deinit();
+
+    out_p.* = makeRoutes(result.routes, result.total_cost) catch |err| return mapError(err);
+    return COMMIV_OK;
+}
+
 /// Directed TSP (ATSP). matrix is n*n row-major, matrix[i*n+j] = cost i->j.
 /// out_tour must hold n entries; receives the visit order (a permutation of
 /// 0..n-1). out_cost receives the directed tour length.
@@ -667,6 +859,127 @@ test "capi pdptw rejects impossible demand and self-paired requests" {
         COMMIV_ERR_INVALID_ARGUMENT,
         commiv_solve_pdptw(&pdp_matrix, 2, &pdp_pickup, &bad_delivery, &pdp_demand, 10, &pdp_ready, &pdp_due, &pdp_service, null, &routes),
     );
+}
+
+test "capi pdptw dispatch preserves a locked prefix and validates" {
+    var routes: *CommivRoutes = undefined;
+    var opts: CommivOptions = .{ .seed = 5, .sisr_iters = 2000 };
+    const rc = commiv_solve_pdptw(&pdp_matrix, 2, &pdp_pickup, &pdp_delivery, &pdp_demand, 10, &pdp_ready, &pdp_due, &pdp_service, &opts, &routes);
+    try testing.expectEqual(COMMIV_OK, rc);
+    defer commiv_routes_free(routes);
+
+    const k = commiv_routes_count(routes);
+    var cur_offsets: [8]usize = undefined;
+    var cur_nodes: [4]u32 = undefined;
+    var locked: [8]usize = [_]usize{0} ** 8;
+    var at: usize = 0;
+    for (0..k) |i| {
+        cur_offsets[i] = at;
+        const len = commiv_routes_len(routes, i);
+        const nodes = commiv_routes_get(routes, i).?;
+        for (nodes[0..len], 0..) |c, j| cur_nodes[at + j] = c;
+        at += len;
+    }
+    cur_offsets[k] = at;
+
+    // Lock the ENTIRE first nonempty route: any complete route is
+    // pair-closed by construction (a pair never spans two routes), so
+    // locking all of it always satisfies the locked-pair invariant.
+    var lock_route: usize = k;
+    for (0..k) |i| {
+        if (cur_offsets[i + 1] > cur_offsets[i]) {
+            lock_route = i;
+            break;
+        }
+    }
+    try testing.expect(lock_route < k);
+    locked[lock_route] = cur_offsets[lock_route + 1] - cur_offsets[lock_route];
+    const locked_len = locked[lock_route];
+    const locked_prefix = cur_nodes[cur_offsets[lock_route]..cur_offsets[lock_route + 1]];
+
+    var dispatch_routes: *CommivRoutes = undefined;
+    var dopts: CommivOptions = .{ .seed = 9, .sisr_iters = 3000 };
+    const drc = commiv_solve_pdptw_dispatch(
+        &pdp_matrix,
+        2,
+        &pdp_pickup,
+        &pdp_delivery,
+        &pdp_demand,
+        10,
+        &pdp_ready,
+        &pdp_due,
+        &pdp_service,
+        &cur_offsets,
+        k,
+        &cur_nodes,
+        &locked,
+        &dopts,
+        &dispatch_routes,
+    );
+    try testing.expectEqual(COMMIV_OK, drc);
+    defer commiv_routes_free(dispatch_routes);
+
+    const dk = commiv_routes_count(dispatch_routes);
+    var found = false;
+    for (0..dk) |i| {
+        const len = commiv_routes_len(dispatch_routes, i);
+        if (len < locked_len) continue;
+        const nodes = commiv_routes_get(dispatch_routes, i).?;
+        if (std.mem.eql(u32, nodes[0..locked_len], locked_prefix)) found = true;
+    }
+    try testing.expect(found);
+
+    // Independent full-solution feasibility + cost check via the validator.
+    var slices: [5][]const usize = undefined;
+    var storage: [5][4]usize = undefined;
+    for (0..dk) |i| {
+        const len = commiv_routes_len(dispatch_routes, i);
+        const nodes = commiv_routes_get(dispatch_routes, i).?;
+        for (nodes[0..len], 0..) |c, j| storage[i][j] = c;
+        slices[i] = storage[i][0..len];
+    }
+    var pair_of: [5]usize = undefined;
+    var is_pickup: [5]bool = undefined;
+    var demand_signed: [5]i64 = undefined;
+    const inst = buildPdpTestInstance(&pair_of, &is_pickup, &demand_signed);
+    try testing.expect(pdptw.validate(inst, slices[0..dk]) != null);
+}
+
+test "capi pdptw dispatch rejects a locked delivery whose pickup is not locked" {
+    // route0 = [3, 1] (delivery then its pickup), route1 = [2, 4].
+    const cur_nodes = [_]u32{ 3, 1, 2, 4 };
+    const cur_offsets = [_]usize{ 0, 2, 4 };
+    const locked = [_]usize{ 1, 0 }; // locks only node 3 (the delivery) in route0
+    var out: *CommivRoutes = undefined;
+    const rc = commiv_solve_pdptw_dispatch(
+        &pdp_matrix, 2, &pdp_pickup, &pdp_delivery, &pdp_demand, 10, &pdp_ready, &pdp_due, &pdp_service,
+        &cur_offsets, 2, &cur_nodes, &locked, null, &out,
+    );
+    try testing.expectEqual(COMMIV_ERR_INVALID_ARGUMENT, rc);
+}
+
+test "capi pdptw dispatch rejects non-monotone offsets" {
+    const cur_nodes = [_]u32{ 1, 3, 2, 4 };
+    const cur_offsets = [_]usize{ 0, 3, 2 }; // decreases: 3 -> 2
+    const locked = [_]usize{ 0, 0 };
+    var out: *CommivRoutes = undefined;
+    const rc = commiv_solve_pdptw_dispatch(
+        &pdp_matrix, 2, &pdp_pickup, &pdp_delivery, &pdp_demand, 10, &pdp_ready, &pdp_due, &pdp_service,
+        &cur_offsets, 2, &cur_nodes, &locked, null, &out,
+    );
+    try testing.expectEqual(COMMIV_ERR_INVALID_ARGUMENT, rc);
+}
+
+test "capi pdptw dispatch rejects a node duplicated across routes" {
+    const cur_nodes = [_]u32{ 1, 3, 1, 4 }; // node 1 appears in both routes
+    const cur_offsets = [_]usize{ 0, 2, 4 };
+    const locked = [_]usize{ 0, 0 };
+    var out: *CommivRoutes = undefined;
+    const rc = commiv_solve_pdptw_dispatch(
+        &pdp_matrix, 2, &pdp_pickup, &pdp_delivery, &pdp_demand, 10, &pdp_ready, &pdp_due, &pdp_service,
+        &cur_offsets, 2, &cur_nodes, &locked, null, &out,
+    );
+    try testing.expectEqual(COMMIV_ERR_INVALID_ARGUMENT, rc);
 }
 
 test "capi pdptw C path is bit-identical to the internal engine" {
