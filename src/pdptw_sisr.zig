@@ -82,6 +82,14 @@ pub const PdpSisrParams = struct {
     // schedule (Savelsbergh shifting is inherent). 0 = off (pure
     // distance + veh_penalty, bit-identical to the historic objective).
     time_penalty: u64 = 0,
+    // Intra-search parallelism: split one pair's candidate-route insertion
+    // evaluation (the recreate hot loop) across a persistent thread pool,
+    // deterministic order-equivalent reduction. 0/1 = serial, bit-identical
+    // to the historic engine. >=2 deepens ONE search trajectory (unlike
+    // solvePdptwSisrFleetMinParallel's width). Uses a per-route deterministic
+    // blink PRNG, so >=2 is thread-count-invariant (2==6==12) but NOT
+    // bit-identical to the serial shared-stream trajectory.
+    eval_threads: usize = 0,
 };
 
 pub const NbrKey = enum { sum, min, out };
@@ -181,6 +189,7 @@ const S = struct {
     min_empty_hint: usize = 0,
     n_unassigned: usize = 0, // pairs currently in the request bank (loc_route == NO_ROUTE)
     keep_buf: std.ArrayList(usize) = .empty, // scratch for removals
+    cand_list: std.ArrayList(usize) = .empty, // recreatePar: ranked candidate routes (rank = append index)
     drop_buf: []bool, // scratch: per-position removal flags (sized 2n)
     nbr_mark_p: []u64, // granular gaps: node -> stamp of last kNN(p) marking
     nbr_mark_q: []u64,
@@ -233,6 +242,7 @@ const S = struct {
         s.snaps.deinit(s.allocator);
         s.snap_mark.deinit(s.allocator);
         s.keep_buf.deinit(s.allocator);
+        s.cand_list.deinit(s.allocator);
         s.* = undefined;
     }
 
@@ -986,6 +996,376 @@ const S = struct {
     }
 };
 
+// ---------------------------------------------------------------------------
+// Intra-search parallelism (eval_threads >= 2): the recreate candidate-route
+// evaluation is the hot loop at n >= 1000. One removed pair's candidate routes
+// are frozen (discovery + freshen on the main thread), then evaluated across a
+// persistent thread pool. The winner is chosen by a deterministic, thread-
+// count-invariant reduction over (delta asc, rank asc) where rank is the
+// discovery index of each route (unique => strict total order => result is
+// independent of the partition and worker count, and equals the same batch
+// evaluated inline on one thread). See the head-of-file design note.
+//
+// Blink source: evalPairInsertPar seeds a per-route stack-local PRNG from
+// mixSeed(seed, iter, p, ri) instead of the shared stream, because a data-
+// dependent number of shared draws per route cannot be parallelized without
+// redoing the O(L^2) scan. The draw sequence then depends only on this route's
+// frozen content, so it is identical inline, on any worker, and across thread
+// counts. This is the deviation from today's serial trajectory (a diversity
+// knob on which 1%-rate gaps get skipped); OFF (eval_threads <= 1) keeps the
+// original shared-stream serial path untouched and bit-identical.
+
+const PAR_MIN_WORK: usize = 512; // Sum-of-candidate-route-lengths gate: below this a batch evaluates inline (barrier would not pay). Tune on the winserver.
+
+// Park/wake barrier primitive. Zig 0.16's std moved threading sync into the Io
+// async model (std.Io.Mutex/Condition) and dropped std.Thread.Futex, so the
+// pool parks helpers on raw Linux v1 futexes directly — consistent with this
+// file already depending on std.os.linux for nanos(). Private futex (same
+// process), no timeout; the callers re-check their atomic and tolerate spurious
+// wakeups. futex_4arg (WAIT) / futex_3arg (WAKE) both ignore the args the op
+// doesn't use. Linux-only, which the engine already is.
+const linux = std.os.linux;
+
+inline fn futexWait(v: *const std.atomic.Value(u32), expect: u32) void {
+    _ = linux.futex_4arg(@ptrCast(&v.raw), .{ .cmd = .WAIT, .private = true }, expect, null);
+}
+inline fn futexWake(v: *const std.atomic.Value(u32), n: u32) void {
+    _ = linux.futex_3arg(@ptrCast(&v.raw), .{ .cmd = .WAKE, .private = true }, n);
+}
+
+fn mixSeed(seed: u64, iter: u64, p: usize, ri: usize) u64 {
+    var buf: [32]u8 = undefined;
+    std.mem.writeInt(u64, buf[0..8], seed, .little);
+    std.mem.writeInt(u64, buf[8..16], iter, .little);
+    std.mem.writeInt(u64, buf[16..24], @intCast(p), .little);
+    std.mem.writeInt(u64, buf[24..32], @intCast(ri), .little);
+    return std.hash.Wyhash.hash(0, &buf);
+}
+
+const EvalResult = struct { has: bool = false, delta: i64 = 0, rank: usize = 0, a: usize = 0, b: usize = 0 };
+
+/// Total order for the reduction: a candidate beats the current best iff it is
+/// present and (strictly smaller delta) or (equal delta and smaller rank).
+/// rank is unique per route => strict total order => winner is independent of
+/// how candidates are partitioned across workers.
+fn betterResult(cand: EvalResult, cur: EvalResult) bool {
+    if (!cand.has) return false;
+    if (!cur.has) return true;
+    if (cand.delta != cur.delta) return cand.delta < cur.delta;
+    return cand.rank < cur.rank;
+}
+
+const EvalWorker = struct {
+    best: EvalResult align(64) = .{}, // own cache line: the hot per-batch write
+    nbr_mark_p: []u64 = &.{}, // per-worker granular scratch (dim), alloc once
+    nbr_mark_q: []u64 = &.{},
+    nbr_gen: u64 = 0,
+    _pad: [64]u8 = undefined, // pad struct past a cache line to kill false sharing
+};
+
+const EvalBatch = struct {
+    cands: []const usize = &.{}, // ranked candidate route ids (index == rank)
+    p: usize = 0,
+    q: usize = 0,
+    iter: u64 = 0,
+};
+
+/// Persistent futex-parked pool, one per core-solve call (spawn/join is µs and
+/// happens tens of times over a fleet-min run — cheap; not threaded through the
+/// drivers). W = eval_threads participants: worker 0 is the calling thread,
+/// W-1 helpers park between batches so they burn no CPU during ruin/apply/
+/// rollback. Determinism of the batch winner is independent of the partition,
+/// so strided round-robin (worker w handles cands[w], cands[w+W], ...) is a
+/// free load-balancing choice.
+const EvalPool = struct {
+    s: *S,
+    params: PdpSisrParams,
+    helpers: []std.Thread,
+    workers: []EvalWorker,
+    batch: EvalBatch = .{},
+    W: usize,
+    spawned: usize = 0,
+    start_gen: std.atomic.Value(u32) = .init(0), // main bumps to release a batch
+    done: std.atomic.Value(u32) = .init(0), // helpers increment on finish
+    shutdown: std.atomic.Value(bool) = .init(false),
+
+    /// Allocate workers + per-worker scratch + the helper handle array. Does
+    /// NOT spawn threads (the returned value is moved to its final address by
+    /// the caller first); call start() afterwards.
+    fn init(allocator: std.mem.Allocator, s: *S, params: PdpSisrParams, w_count: usize) !EvalPool {
+        const dim = s.inst.dim();
+        const workers = try allocator.alloc(EvalWorker, w_count);
+        errdefer allocator.free(workers);
+        var alloced: usize = 0;
+        errdefer for (workers[0..alloced]) |*wk| {
+            allocator.free(wk.nbr_mark_p);
+            allocator.free(wk.nbr_mark_q);
+        };
+        for (workers) |*wk| {
+            wk.* = .{
+                .nbr_mark_p = try allocator.alloc(u64, dim),
+                .nbr_mark_q = try allocator.alloc(u64, dim),
+            };
+            @memset(wk.nbr_mark_p, 0);
+            @memset(wk.nbr_mark_q, 0);
+            alloced += 1;
+        }
+        const helpers = try allocator.alloc(std.Thread, w_count - 1);
+        return .{ .s = s, .params = params, .helpers = helpers, .workers = workers, .W = w_count };
+    }
+
+    /// Spawn the W-1 helper threads. Must be called after the pool sits at its
+    /// final stable address (helpers capture `self`). On partial spawn failure
+    /// the already-spawned helpers are shut down and the error bubbles up.
+    fn start(self: *EvalPool) !void {
+        self.spawned = 0;
+        for (self.helpers, 0..) |*h, i| {
+            h.* = std.Thread.spawn(.{}, helperLoop, .{ self, i + 1 }) catch |err| {
+                self.shutdownHelpers();
+                return err;
+            };
+            self.spawned += 1;
+        }
+    }
+
+    fn shutdownHelpers(self: *EvalPool) void {
+        if (self.spawned == 0) return;
+        self.shutdown.store(true, .release);
+        _ = self.start_gen.fetchAdd(1, .release);
+        futexWake(&self.start_gen, @intCast(self.spawned));
+        for (self.helpers[0..self.spawned]) |h| h.join();
+        self.spawned = 0;
+    }
+
+    fn deinit(self: *EvalPool, allocator: std.mem.Allocator) void {
+        self.shutdownHelpers();
+        allocator.free(self.helpers);
+        for (self.workers) |*wk| {
+            allocator.free(wk.nbr_mark_p);
+            allocator.free(wk.nbr_mark_q);
+        }
+        allocator.free(self.workers);
+    }
+
+    fn helperLoop(self: *EvalPool, wid: usize) void {
+        var seen: u32 = 0;
+        while (true) {
+            futexWait(&self.start_gen, seen);
+            const g = self.start_gen.load(.acquire);
+            if (g == seen) continue; // spurious wakeup
+            seen = g;
+            if (self.shutdown.load(.acquire)) return;
+            self.runPartition(wid);
+            _ = self.done.fetchAdd(1, .acq_rel);
+            futexWake(&self.done, 1);
+        }
+    }
+
+    /// Evaluate worker `wid`'s strided share of the batch into workers[wid].best.
+    fn runPartition(self: *EvalPool, wid: usize) void {
+        const w = &self.workers[wid];
+        w.best = .{};
+        const cands = self.batch.cands;
+        var i = wid;
+        while (i < cands.len) : (i += self.W) {
+            const ri = cands[i];
+            if (evalPairInsertPar(self.s, ri, self.batch.p, self.batch.q, self.params, self.batch.iter, w)) |ins| {
+                const cand = EvalResult{ .has = true, .delta = ins.delta, .rank = i, .a = ins.a, .b = ins.b };
+                if (betterResult(cand, w.best)) w.best = cand;
+            }
+        }
+    }
+
+    /// Small batch: evaluate every candidate inline on worker 0. rank == index,
+    /// identical reduction to dispatch() — a pure perf switch, never changes the
+    /// result.
+    fn evalInline(self: *EvalPool, cands: []const usize, p: usize, q: usize, iter: u64) EvalResult {
+        const w = &self.workers[0];
+        w.best = .{};
+        for (cands, 0..) |ri, i| {
+            if (evalPairInsertPar(self.s, ri, p, q, self.params, iter, w)) |ins| {
+                const cand = EvalResult{ .has = true, .delta = ins.delta, .rank = i, .a = ins.a, .b = ins.b };
+                if (betterResult(cand, w.best)) w.best = cand;
+            }
+        }
+        return w.best;
+    }
+
+    /// Release the batch to the helpers, run worker 0's share inline, join, then
+    /// reduce the W worker-local bests into the global winner.
+    fn dispatch(self: *EvalPool, cands: []const usize, p: usize, q: usize, iter: u64) EvalResult {
+        self.batch = .{ .cands = cands, .p = p, .q = q, .iter = iter };
+        self.done.store(0, .release);
+        _ = self.start_gen.fetchAdd(1, .release); // publishes batch to helpers
+        futexWake(&self.start_gen, @intCast(self.W - 1));
+
+        self.runPartition(0);
+
+        while (true) {
+            const obs = self.done.load(.acquire);
+            if (obs >= self.W - 1) break;
+            futexWait(&self.done, obs);
+        }
+
+        var g = self.workers[0].best;
+        for (self.workers[1..self.W]) |wk| {
+            if (betterResult(wk.best, g)) g = wk.best;
+        }
+        return g;
+    }
+};
+
+/// Parallel-safe copy of evalPairInsert: reads only immutable batch state of
+/// route `ri` (freshened by the discovery pass), blinks from a per-route local
+/// PRNG, and uses the per-worker granular scratch. No shared writes, so any
+/// number of workers may run this on distinct routes concurrently.
+fn evalPairInsertPar(s: *const S, ri: usize, p: usize, q: usize, params: PdpSisrParams, iter: u64, w: *EvalWorker) ?S.Ins {
+    var lr = std.Random.DefaultPrng.init(mixSeed(params.seed, iter, p, ri));
+    const lrng = lr.random();
+    const blink = params.blink;
+    const inst = s.inst;
+    const r = &s.routes.items[ri];
+    const it = r.items.items;
+    const L = it.len;
+    var best: ?S.Ins = null;
+    const q_t = Tws.client(inst, q);
+    const q_l = pdp.Lseg.node(inst, q);
+
+    var granular = params.gran_gaps != 0 and (params.max_vehicles == 0 or s.iter_start_complete) and
+        L >= params.gran_gap_min_len and s.nonempty <= params.gran_max_routes;
+    var genp: u64 = 0;
+    if (granular) {
+        w.nbr_gen += 1;
+        genp = w.nbr_gen;
+        for (0..s.gk) |ti| {
+            const np = s.gran[(p - 1) * s.gk + ti];
+            if (np != 0) w.nbr_mark_p[np] = genp;
+            const nq = s.gran[(q - 1) * s.gk + ti];
+            if (nq != 0) w.nbr_mark_p[nq] = genp;
+        }
+        var hits: usize = 0;
+        for (it) |c| hits += @intFromBool(w.nbr_mark_p[c] == genp);
+        if (hits < 4) granular = false;
+    }
+
+    for (s.lockOf(ri)..L + 1) |a| {
+        if (granular and (params.gran_gaps & 1) != 0 and a != 0 and a != L and
+            w.nbr_mark_p[it[a - 1]] != genp and w.nbr_mark_p[it[a]] != genp) continue;
+        const prev_a: usize = if (a == 0) 0 else it[a - 1];
+        var m_t = Tws.merge(r.pre_t.items[a], @intCast(inst.d(prev_a, p)), Tws.client(inst, p));
+        if (m_t.tw != 0) continue;
+        var m_l = pdp.Lseg.merge(r.pre_l.items[a], pdp.Lseg.node(inst, p));
+        if (m_l.lo < 0 or m_l.hi > inst.capacity) continue;
+        var m_d: u64 = r.pre_d.items[a] + inst.d(prev_a, p);
+        var last = p;
+
+        var b = a;
+        while (b <= L) : (b += 1) {
+            blk: {
+                if (lrng.float(f64) < blink) break :blk;
+                const nxt: usize = if (b == L) 0 else it[b];
+                if (granular and (params.gran_gaps & 2) != 0 and b != a and b != L and
+                    w.nbr_mark_p[last] != genp and w.nbr_mark_p[nxt] != genp) break :blk;
+                const f1 = Tws.merge(m_t, @intCast(inst.d(last, q)), q_t);
+                const f2 = Tws.merge(f1, @intCast(inst.d(q, nxt)), r.suf_t.items[b]);
+                if (f2.tw != 0) break :blk;
+                const f_l = pdp.Lseg.merge(pdp.Lseg.merge(m_l, q_l), r.suf_l.items[b]);
+                if (!(f_l.lo >= 0 and f_l.hi <= inst.capacity)) break :blk;
+                const new_dist = m_d + inst.d(last, q) + inst.d(q, nxt) + r.tail_d.items[b];
+                var delta = @as(i64, @intCast(new_dist)) - @as(i64, @intCast(r.dist));
+                if (s.time_penalty > 0)
+                    delta += @as(i64, @intCast(s.time_penalty)) * (f2.dur - @as(i64, @intCast(r.dur)));
+                if (best == null or delta < best.?.delta) best = .{ .a = a, .b = b, .delta = delta };
+            }
+            if (b < L) {
+                m_t = Tws.merge(m_t, @intCast(inst.d(last, it[b])), Tws.client(inst, it[b]));
+                if (m_t.tw != 0) break;
+                m_l = pdp.Lseg.merge(m_l, pdp.Lseg.node(inst, it[b]));
+                if (m_l.lo < 0 or m_l.hi > inst.capacity) break;
+                m_d += inst.d(last, it[b]);
+                last = it[b];
+            }
+        }
+    }
+    return best;
+}
+
+/// Parallel-eval copy of recreate: identical shuffle / open-new / singleton /
+/// empty-slot logic, but the inner candidate scan is a serial discovery pass
+/// (dedup + freshen + ranked collect) followed by a parallel/inline evaluation
+/// and a deterministic (delta, rank) reduction. Bit-for-bit equivalent to
+/// recreate would require today's shared blink stream (impossible under real
+/// parallelism); the winner-selection order is preserved exactly.
+fn recreatePar(s: *S, params: PdpSisrParams, rng: std.Random, pool: *EvalPool, iter: u64) !void {
+    rng.shuffle(usize, s.removed.items);
+    for (s.removed.items) |p| {
+        const q = s.inst.pair_of[p];
+        s.generation += 1;
+        var best_ri: usize = NO_ROUTE;
+        var best_ins: S.Ins = undefined;
+
+        while (s.min_empty_hint < s.routes.items.len and s.routes.items[s.min_empty_hint].items.items.len != 0) : (s.min_empty_hint += 1) {}
+        const empty_slot: usize = if (s.min_empty_hint < s.routes.items.len) s.min_empty_hint else NO_ROUTE;
+
+        // Serial discovery: dedup candidate routes (anchor-major, ti-minor,
+        // first-seen — identical order to recreate), freshen each, and collect
+        // into cand_list so the append index is the route's rank.
+        s.cand_list.clearRetainingCapacity();
+        var est_work: usize = 0;
+        for ([_]usize{ p, q }) |anchor| {
+            for (0..s.gk) |ti| {
+                const nb = s.gran[(anchor - 1) * s.gk + ti];
+                if (nb == 0) continue;
+                const cri = s.loc_route[nb];
+                if (cri == NO_ROUTE) continue;
+                if (s.cand_mark.items[cri] == s.generation) continue;
+                s.cand_mark.items[cri] = s.generation;
+                try s.freshen(cri);
+                try s.cand_list.append(s.allocator, cri);
+                est_work += s.routes.items[cri].items.items.len;
+            }
+        }
+
+        const cands = s.cand_list.items;
+        if (cands.len != 0) {
+            // Auto-gate: inline when the batch is too small to pay for the
+            // barrier. Inline and pooled use the same evalPairInsertPar + the
+            // same (delta, rank) reduction, so the gate never changes the result.
+            const g = if (cands.len < 2 or est_work < PAR_MIN_WORK)
+                pool.evalInline(cands, p, q, iter)
+            else
+                pool.dispatch(cands, p, q, iter);
+            if (g.has) {
+                best_ri = cands[g.rank];
+                best_ins = .{ .a = g.a, .b = g.b, .delta = g.delta };
+            }
+        }
+
+        const may_open = params.max_vehicles == 0 or s.nonempty < params.max_vehicles;
+        var singleton: i64 = @intCast(s.inst.d(0, p) + s.inst.d(p, q) + s.inst.d(q, 0) + s.veh_penalty);
+        if (s.time_penalty > 0)
+            singleton += @intCast(s.time_penalty * routeDuration(s.inst, &[_]usize{ p, q }));
+        if (best_ri == NO_ROUTE and !may_open) {
+            if (params.eject and try s.squeezeInsert(p, q, params)) {
+                s.n_unassigned -= 1;
+            }
+            continue; // otherwise stays in the request bank
+        }
+        if ((best_ri == NO_ROUTE or singleton < best_ins.delta) and may_open) {
+            const slot = if (empty_slot != NO_ROUTE) empty_slot else try s.addSlot();
+            try s.snapshot(slot);
+            s.keep_buf.clearRetainingCapacity();
+            try s.keep_buf.append(s.allocator, p);
+            try s.keep_buf.append(s.allocator, q);
+            try s.install(slot, s.keep_buf.items);
+        } else {
+            try s.insertPair(best_ri, p, q, best_ins.a, best_ins.b);
+        }
+        s.n_unassigned -= 1;
+    }
+    s.removed.clearRetainingCapacity();
+}
+
 fn buildNeighbors(allocator: std.mem.Allocator, inst: pdp.PdpInstance, k: usize, key_mode: NbrKey) ![]usize {
     const n = 2 * inst.n_pairs;
     const gran = try allocator.alloc(usize, n * k);
@@ -1083,6 +1463,14 @@ fn solvePdptwSisrFromLocked(allocator: std.mem.Allocator, inst: pdp.PdpInstance,
 
     var s = try S.init(allocator, inst, params.veh_penalty, params.time_penalty, gran, gk);
     defer s.deinit();
+
+    // Intra-search eval pool: eval_threads <= 1 keeps the untouched serial
+    // recreate; >= 2 builds a persistent pool (deferred deinit joins helpers
+    // before s.deinit). start() runs after the pool sits at its stable address.
+    const ew: usize = if (params.eval_threads <= 1) 0 else params.eval_threads;
+    var pool: ?EvalPool = if (ew >= 2) try EvalPool.init(allocator, &s, params, ew) else null;
+    defer if (pool) |*pl| pl.deinit(allocator);
+    if (pool) |*pl| try pl.start();
     for (seed_sol.items, 0..) |r, wi| {
         if (r.items.len == 0) continue;
         const ri = try s.addSlot();
@@ -1145,7 +1533,11 @@ fn solvePdptwSisrFromLocked(allocator: std.mem.Allocator, inst: pdp.PdpInstance,
         s.beginIter();
         s.iter_start_complete = s.n_unassigned == 0;
         try s.ruin(params, rng);
-        try s.recreate(params, rng);
+        if (pool) |*pl| {
+            try recreatePar(&s, params, rng, pl, it);
+        } else {
+            try s.recreate(params, rng);
+        }
         const eff = s.cost + UNASSIGNED_PEN * @as(u64, @intCast(s.n_unassigned));
         const saved_eff = saved_cost + UNASSIGNED_PEN * @as(u64, @intCast(saved_unassigned));
         const dt = @as(i64, @intCast(eff)) - @as(i64, @intCast(saved_eff));
@@ -2276,4 +2668,70 @@ test "PDPTW SISR dispatch: new orders enter via the bank" {
         }
         try std.testing.expect(found);
     }
+}
+
+test "PDPTW SISR eval_threads: off (0 == 1) is the serial path and validates" {
+    // eval_threads <= 1 => ew = 0 => the untouched serial recreate. 0 and 1
+    // must be identical to each other (and, by construction, to the historic
+    // engine, whose default is 0).
+    const allocator = std.testing.allocator;
+    var seed: u64 = 1;
+    while (seed <= 6) : (seed += 1) {
+        var ri = try pdp.randomInstanceClocked(allocator, 12, seed);
+        defer ri.deinit(allocator);
+        const inst = ri.inst();
+        var a = try solvePdptwSisr(allocator, inst, .{ .seed = seed, .iters = 3000, .eval_threads = 0 });
+        defer a.deinit();
+        var b = try solvePdptwSisr(allocator, inst, .{ .seed = seed, .iters = 3000, .eval_threads = 1 });
+        defer b.deinit();
+        try std.testing.expectEqual(a.total_cost, b.total_cost);
+        try std.testing.expectEqual(a.vehicles, b.vehicles);
+        const rc = try allocator.alloc([]const usize, a.routes.len);
+        defer allocator.free(rc);
+        for (a.routes, 0..) |r, i| rc[i] = r;
+        const vc = pdp.validate(inst, rc) orelse return error.Infeasible;
+        try std.testing.expectEqual(vc, a.total_cost);
+    }
+}
+
+test "PDPTW SISR eval_threads: parallel reduction is thread-count invariant (2 == 6 == 12)" {
+    // The achievable GATE-1 identity: the per-route deterministic blink + the
+    // (delta, rank) reduction make the ON trajectory independent of worker
+    // count, so 2 == 6 == 12 bit-for-bit on an iteration-bound run. (Money
+    // objective on to also exercise the time_penalty branch of the reduction.)
+    const allocator = std.testing.allocator;
+    var ri = try pdp.randomInstanceClocked(allocator, 20, 9);
+    defer ri.deinit(allocator);
+    const inst = ri.inst();
+    const base = PdpSisrParams{ .seed = 9, .iters = 4000, .veh_penalty = 500, .time_penalty = 3 };
+
+    var r2 = try solvePdptwSisr(allocator, inst, blk: {
+        var p = base;
+        p.eval_threads = 2;
+        break :blk p;
+    });
+    defer r2.deinit();
+    var r6 = try solvePdptwSisr(allocator, inst, blk: {
+        var p = base;
+        p.eval_threads = 6;
+        break :blk p;
+    });
+    defer r6.deinit();
+    var r12 = try solvePdptwSisr(allocator, inst, blk: {
+        var p = base;
+        p.eval_threads = 12;
+        break :blk p;
+    });
+    defer r12.deinit();
+
+    try std.testing.expectEqual(r2.total_cost, r6.total_cost);
+    try std.testing.expectEqual(r2.total_cost, r12.total_cost);
+    try std.testing.expectEqual(r2.vehicles, r6.vehicles);
+    try std.testing.expectEqual(r2.vehicles, r12.vehicles);
+
+    const rc = try allocator.alloc([]const usize, r2.routes.len);
+    defer allocator.free(rc);
+    for (r2.routes, 0..) |r, i| rc[i] = r;
+    const vc = pdp.validate(inst, rc) orelse return error.Infeasible;
+    try std.testing.expectEqual(vc, r2.total_cost);
 }
