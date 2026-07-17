@@ -36,6 +36,66 @@ VROOM's turf (-1.9/-4.8%) until the PDPTW parallel-depth lever is built. Reprodu
 `~/money_fullmight.sh`, `~/might_probes.sh`, results
 `~/campaign/results/money-fullmight-2026-07-17/`.
 
+## 0c. PARALLEL-EVAL LEVER — measured verdict (2026-07-17): REFUTED at this granularity
+
+The "steal VROOM's move" attempt: parallel candidate-route evaluation inside recreate
+(deterministic thread-count-invariant reduction, per-route blink PRNGs, futex-parked
+persistent pool; `eval_threads` in PdpSisrParams, `MR_EVAL_THREADS`/`PB_EVAL_THREADS`;
+commit 088b9fb, default OFF = serial path byte-identical). Gates at moscow-2000 window
+dump, seed 1 (server, `~/campaign/results/peval-2026-07-17/run.log`):
+
+- **GATE 1 (determinism): PASS.** eval=2 == 6 == 12 bit-identical on an iteration-bound
+  run (57 veh / 978889 / $20608.33 at every thread count).
+- **GATE 2 (speed): CATASTROPHIC FAIL.** Iteration-bound walls: serial 14.1 s, 2T 13.8 s
+  (+2%), 6T 18.1 s (-28%), **12T 25.9 s (-84%)**. Target was >=2x; measured 0.54x at 12T.
+- **GATE 3 (quality): FAIL** accordingly: 12T $20562 < serial rebaseline $20251; 6T
+  $20168 (noise-level edge); VROOM-12T ref $19490 not approached. n=100 overhead +44%.
+
+**Root cause is structural, not tuning:** the per-pair candidate scan is ~5-20 routes
+= tens of microseconds of work, and even futex park/wake per batch costs a comparable
+amount x12 workers x ~15 batches/iteration. The granularity is too fine for this CPU;
+2T's +2% (overhead ~ work/2) proves it. VROOM's LS parallelism works because its batch
+unit is orders of magnitude coarser. Lever stays in the tree flag-gated OFF as the
+experiment record (same convention as eject_k). The PDPTW multicore gap REMAINS OPEN;
+the recorded next candidates are coarse-grain (speculative parallel iterations, or
+neighborhood-round batching a la VROOM), not finer sync tuning.
+
+**Silver lining from the fresh rebaselines:** serial nyc-2000 at 145.7 s = **$17044.40,
+which BEATS VROOM-12T ($17050.97)** — nyc-2000 flips to a commiv win at equal-plus wall;
+run-to-run noise is ±0.4% (moscow-2000 serial $20251 vs $20176 across runs). The only
+solidly lost cell remains moscow-2000 (-3.5% vs VROOM-12T).
+
+## 0d. cuOpt (GPU) — the money round on the GTX 1660 Ti (2026-07-17)
+
+**The strategic headline: cuOpt expresses the FULL money objective natively, waiting
+included** (`COST + 7*TRAVEL_TIME + VEHICLE_FIXED_COST`, objective decomposition verified
+exact; TRAVEL_TIME includes drive+service+wait per the installed 26.06 source). It is the
+first competitor that fights on our terms — VROOM's blind spot does not apply. Harness:
+`tools/cuopt_road_pdptw.py` (independent feasibility walk, dump-embedded prices).
+
+8-cell round, cuOpt GPU vs the audited CPU numbers (all cuOpt plans feasibility-CLEAN,
+zero OOM; GPU 82% mean util, <=1.2 GB of 6 GB):
+
+| cell | commiv best $ | cuOpt $ | gap | VROOM $ |
+|---|---|---|---|---|
+| moscow-100 | **1117.60** | 1138.35 | +1.9% | 1135.18 |
+| nyc-100 | **1024.09** | 1066.90 | +4.2% | 1053.91 |
+| moscow-1000 | 10272.31 | **9870.10** | **-3.9%** | 10765.74 |
+| nyc-1000 | **8584.76** | 8667.92 | +1.0% | 8862.87 |
+| moscow-2000 | 20255.12 | **19631.79** | **-3.1%** | 19806.90 |
+| nyc-2000 | 17095.14 | **16562.81** | **-3.1%** | 17148.22 |
+| s900/moscow-1000 | 16314.11 | **16296.19** | -0.1% | 17260.44 |
+| s900/nyc-1000 | **14615.94** | 14863.95 | +1.7% | 15779.38 |
+
+Scoreboard: cuOpt 4W/4L vs commiv (wins the large real-window cells by ~3%, loses both
+n=100 + nyc-1000 + s900/nyc); 6W/2L vs VROOM. **Wall honesty:** cuOpt's wall includes
+cudf model-build overhead — at n=2000 it took 142-144 s vs commiv's 124 s (+15%), so its
+~3% large-cell wins carry a ~19 s handicap in its favor. And this is GPU-vs-CPU on a $280
+card at 82% utilization; on a data-center GPU with the build cost amortized the large-n
+margin would likely widen. In the tight-window cells commiv holds (split 1-1, both within
+2%): cuOpt also prices waiting, so the waiting wedge does NOT differentiate against
+cuOpt — only against VROOM. Results: `~/campaign/results/cuopt-money-h2h-2026-07-17/`.
+
 ## 0a. WINDOW-TIGHTNESS SWEEP — the appointment-window economics (2026-07-16 night)
 
 The dose-response curve: slot openings spread across the 8 h shift
