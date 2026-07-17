@@ -97,7 +97,7 @@ fn handleRequest(gpa: std.mem.Allocator, req: *std.http.Server.Request, cfg: Ser
         return respondJson(arena, req, .{ .status = "ok", .version = version_string });
     }
 
-    const Route = enum { cvrp, vrptw, pdptw, pdptw_dispatch, atsp };
+    const Route = enum { cvrp, vrptw, pdptw, pdptw_dispatch, atsp, compat_vroom };
     const route: Route = if (std.mem.eql(u8, target, "/solve/cvrp"))
         .cvrp
     else if (std.mem.eql(u8, target, "/solve/vrptw"))
@@ -108,6 +108,8 @@ fn handleRequest(gpa: std.mem.Allocator, req: *std.http.Server.Request, cfg: Ser
         .pdptw_dispatch
     else if (std.mem.eql(u8, target, "/solve/atsp"))
         .atsp
+    else if (std.mem.eql(u8, target, "/compat/vroom"))
+        .compat_vroom
     else
         return respondError(req, .not_found, "unknown path; see /health and docs/rest.md");
     if (req.head.method != .POST) return respondError(req, .method_not_allowed, "use POST");
@@ -126,6 +128,7 @@ fn handleRequest(gpa: std.mem.Allocator, req: *std.http.Server.Request, cfg: Ser
         .pdptw => return solvePdptw(arena, req, body),
         .pdptw_dispatch => return solvePdptwDispatch(arena, req, body),
         .atsp => return solveAtsp(arena, req, body),
+        .compat_vroom => return solveCompatVroom(arena, req, body),
     }
 }
 
@@ -532,6 +535,443 @@ fn solveAtsp(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []co
         return respondSolverError(req, err);
 
     return respondJson(arena, req, .{ .cost = result.length, .tour = result.tour });
+}
+
+// ---- VROOM-compatible adapter ------------------------------------------------
+//
+// POST /compat/vroom accepts a VROOM request JSON and answers in VROOM's own
+// response shape, so an existing VROOM client can point at commiv unchanged and
+// pick up the money objective (route-duration + waiting pricing) VROOM cannot
+// express. v1 is matrix-based and single-depot on a homogeneous fleet:
+//
+//   * matrices.car.durations REQUIRED (no geocoding). Optional matrices.car.costs
+//     is the basis for the reported "cost"; it defaults to durations.
+//   * vehicles[] must all have start_index/end_index 0 or absent (single depot),
+//     the same capacity:[c], and the same optional costs.fixed (-> veh_penalty).
+//     vehicles[0].time_window[1] is the depot horizon (due[0]).
+//   * EITHER shipments[] (-> PDPTW) OR jobs[] (-> VRPTW), never both. The tasks'
+//     location_index values ARE the matrix rows: v1 requires the matrix to cover
+//     exactly the depot plus every task node once (no unused rows).
+//   * An optional "commiv" block {wall_ms, time_penalty, seed} opts into the
+//     money objective (time_penalty is PDPTW/shipments-only).
+//
+// Errors are VROOM-shaped: {"code":1,"error":"..."} with a 4xx status.
+
+const VroomCosts = struct {
+    fixed: u64 = 0,
+};
+
+const VroomProfile = struct {
+    durations: []const []const u32 = &.{},
+    costs: []const []const u32 = &.{},
+};
+
+const VroomMatrices = struct {
+    car: VroomProfile = .{},
+};
+
+const VroomTask = struct {
+    id: ?u64 = null,
+    location_index: u32,
+    time_windows: []const []const u32 = &.{}, // [[a,b],...]; v1 uses the first
+    service: u32 = 0,
+};
+
+const VroomShipment = struct {
+    amount: []const u32 = &.{}, // [q]
+    pickup: VroomTask,
+    delivery: VroomTask,
+};
+
+const VroomJob = struct {
+    id: ?u64 = null,
+    location_index: u32,
+    delivery: []const u32 = &.{}, // [q]
+    amount: []const u32 = &.{}, // fallback when delivery absent
+    time_windows: []const []const u32 = &.{},
+    service: u32 = 0,
+};
+
+const VroomVehicle = struct {
+    id: ?u64 = null,
+    start_index: ?i64 = null, // v1: 0 or absent
+    end_index: ?i64 = null, // v1: 0 or absent
+    capacity: []const u32 = &.{}, // [c]
+    time_window: []const u32 = &.{}, // [a,b]; [1] = depot horizon
+    costs: VroomCosts = .{},
+};
+
+const VroomCommiv = struct {
+    wall_ms: u64 = 0,
+    time_penalty: u64 = 0,
+    seed: u64 = 1,
+};
+
+const VroomRequest = struct {
+    matrices: VroomMatrices = .{},
+    vehicles: []const VroomVehicle = &.{},
+    shipments: []const VroomShipment = &.{},
+    jobs: []const VroomJob = &.{},
+    commiv: VroomCommiv = .{},
+};
+
+const NodeKind = enum(u8) { none, pickup, delivery, job };
+
+/// One task's [ready, due], falling back to [0, horizon] when it has no window.
+fn taskWindow(tw: []const []const u32, horizon: u32) [2]u32 {
+    if (tw.len > 0 and tw[0].len >= 2) return .{ tw[0][0], tw[0][1] };
+    return .{ 0, horizon };
+}
+
+fn solveCompatVroom(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []const u8) !void {
+    const vr = std.json.parseFromSliceLeaky(VroomRequest, arena, body, .{ .ignore_unknown_fields = true }) catch
+        return respondVroomError(req, .bad_request, "invalid VROOM JSON body; see docs/rest.md /compat/vroom");
+
+    // --- matrix (durations REQUIRED, no geocoding) ---
+    const durations = vr.matrices.car.durations;
+    if (durations.len == 0)
+        return respondVroomError(req, .unprocessable_entity, "matrices.car.durations is required (v1 is matrix-based; no geocoding)");
+    const flat = flattenSquare(arena, durations) orelse
+        return respondVroomError(req, .unprocessable_entity, "matrices.car.durations must be square (dim rows of dim entries)");
+    const dim = durations.len;
+    // cost basis: matrices.car.costs when a matching square, else durations.
+    var cost_flat = flat;
+    if (vr.matrices.car.costs.len == dim) {
+        if (flattenSquare(arena, vr.matrices.car.costs)) |cf| cost_flat = cf;
+    }
+
+    // --- fleet: single depot, homogeneous capacity + fixed cost ---
+    if (vr.vehicles.len == 0)
+        return respondVroomError(req, .unprocessable_entity, "at least one vehicle is required");
+    for (vr.vehicles) |v| {
+        if (v.start_index) |s| if (s != 0)
+            return respondVroomError(req, .unprocessable_entity, "v1 is single-depot: every vehicle start_index must be 0 or absent");
+        if (v.end_index) |e| if (e != 0)
+            return respondVroomError(req, .unprocessable_entity, "v1 is single-depot: every vehicle end_index must be 0 or absent");
+        if (v.capacity.len == 0)
+            return respondVroomError(req, .unprocessable_entity, "every vehicle needs a capacity:[c]");
+    }
+    const cap = vr.vehicles[0].capacity[0];
+    if (cap == 0)
+        return respondVroomError(req, .unprocessable_entity, "capacity must be > 0");
+    const fixed = vr.vehicles[0].costs.fixed;
+    for (vr.vehicles) |v| {
+        if (v.capacity[0] != cap)
+            return respondVroomError(req, .unprocessable_entity, "v1 requires a homogeneous fleet: all vehicles must share capacity");
+        if (v.costs.fixed != fixed)
+            return respondVroomError(req, .unprocessable_entity, "v1 requires a homogeneous fleet: all vehicles must share costs.fixed");
+    }
+    const horizon: u32 = if (vr.vehicles[0].time_window.len >= 2) vr.vehicles[0].time_window[1] else 1_000_000_000;
+
+    // --- exactly one of jobs / shipments ---
+    const has_jobs = vr.jobs.len > 0;
+    const has_ships = vr.shipments.len > 0;
+    if (has_jobs and has_ships)
+        return respondVroomError(req, .unprocessable_entity, "v1 supports jobs or shipments, not both");
+    if (!has_jobs and !has_ships)
+        return respondVroomError(req, .unprocessable_entity, "provide jobs (VRPTW) or shipments (PDPTW)");
+
+    // Per-node arrays shared by the solver instance and the schedule walk.
+    const ready = arena.alloc(u32, dim) catch return respondVroomError(req, .internal_server_error, "out of memory");
+    const due = arena.alloc(u32, dim) catch return respondVroomError(req, .internal_server_error, "out of memory");
+    const service = arena.alloc(u32, dim) catch return respondVroomError(req, .internal_server_error, "out of memory");
+    const node_id = arena.alloc(u64, dim) catch return respondVroomError(req, .internal_server_error, "out of memory");
+    const node_kind = arena.alloc(NodeKind, dim) catch return respondVroomError(req, .internal_server_error, "out of memory");
+    for (0..dim) |i| {
+        ready[i] = 0;
+        due[i] = horizon;
+        service[i] = 0;
+        node_id[i] = @intCast(i);
+        node_kind[i] = .none;
+    }
+
+    var result_routes: [][]usize = undefined;
+
+    if (has_ships) {
+        // ---- shipments -> PDPTW ----
+        const n_pairs = vr.shipments.len;
+        if (dim != 2 * n_pairs + 1)
+            return respondVroomError(req, .unprocessable_entity, "v1 shipments: matrix dim must equal 2*n_pairs+1 (depot + one row per pickup and delivery; no unused rows)");
+
+        const pair_of = arena.alloc(usize, dim) catch return respondVroomError(req, .internal_server_error, "out of memory");
+        const is_pickup = arena.alloc(bool, dim) catch return respondVroomError(req, .internal_server_error, "out of memory");
+        const demand_signed = arena.alloc(i64, dim) catch return respondVroomError(req, .internal_server_error, "out of memory");
+        const seen = arena.alloc(bool, dim) catch return respondVroomError(req, .internal_server_error, "out of memory");
+        @memset(seen, false);
+        pair_of[0] = 0;
+        is_pickup[0] = false;
+        demand_signed[0] = 0;
+
+        for (vr.shipments) |sh| {
+            const p: usize = sh.pickup.location_index;
+            const q: usize = sh.delivery.location_index;
+            if (p == 0 or q == 0 or p >= dim or q >= dim or p == q)
+                return respondVroomError(req, .unprocessable_entity, "pickup/delivery location_index must be distinct and in 1..dim-1");
+            if (seen[p] or seen[q])
+                return respondVroomError(req, .unprocessable_entity, "each location may appear at most once across pickups/deliveries");
+            const amt: u32 = if (sh.amount.len > 0) sh.amount[0] else 0;
+            if (amt > cap)
+                return respondVroomError(req, .unprocessable_entity, "a shipment's amount exceeds capacity (infeasible)");
+            seen[p] = true;
+            seen[q] = true;
+            pair_of[p] = q;
+            pair_of[q] = p;
+            is_pickup[p] = true;
+            is_pickup[q] = false;
+            demand_signed[p] = @as(i64, amt);
+            demand_signed[q] = -@as(i64, amt);
+            const pw = taskWindow(sh.pickup.time_windows, horizon);
+            const dw = taskWindow(sh.delivery.time_windows, horizon);
+            ready[p] = pw[0];
+            due[p] = pw[1];
+            service[p] = sh.pickup.service;
+            ready[q] = dw[0];
+            due[q] = dw[1];
+            service[q] = sh.delivery.service;
+            node_id[p] = sh.pickup.id orelse @as(u64, @intCast(p));
+            node_id[q] = sh.delivery.id orelse @as(u64, @intCast(q));
+            node_kind[p] = .pickup;
+            node_kind[q] = .delivery;
+        }
+        for (seen[1..dim]) |s| {
+            if (!s) return respondVroomError(req, .unprocessable_entity, "the matrix must cover exactly depot + every pickup/delivery node once");
+        }
+
+        const inst = commiv.PdpInstance{
+            .n_pairs = n_pairs,
+            .matrix = flat,
+            .capacity = @intCast(cap),
+            .pair_of = pair_of,
+            .is_pickup = is_pickup,
+            .demand_signed = demand_signed,
+            .ready = ready,
+            .due = due,
+            .service = service,
+        };
+        var params: commiv.PdpSisrParams = .{
+            .seed = vr.commiv.seed,
+            .veh_penalty = fixed,
+            .time_penalty = vr.commiv.time_penalty,
+        };
+        if (vr.commiv.wall_ms != 0) params.time_ms = vr.commiv.wall_ms;
+        const res = commiv.solvePdptwSisr(arena, inst, params) catch |err|
+            return respondVroomSolverError(req, err);
+        result_routes = res.routes;
+    } else {
+        // ---- jobs -> VRPTW ----
+        if (vr.commiv.time_penalty != 0)
+            return respondVroomError(req, .unprocessable_entity, "time_penalty (money objective) is PDPTW-only; supply shipments for it");
+        const n = dim - 1;
+        const demand = arena.alloc(u32, dim) catch return respondVroomError(req, .internal_server_error, "out of memory");
+        const seen = arena.alloc(bool, dim) catch return respondVroomError(req, .internal_server_error, "out of memory");
+        @memset(demand, 0);
+        @memset(seen, false);
+
+        for (vr.jobs) |jb| {
+            const L: usize = jb.location_index;
+            if (L == 0 or L >= dim)
+                return respondVroomError(req, .unprocessable_entity, "job location_index must be in 1..dim-1");
+            if (seen[L])
+                return respondVroomError(req, .unprocessable_entity, "each location may host at most one job");
+            const amt: u32 = if (jb.delivery.len > 0) jb.delivery[0] else if (jb.amount.len > 0) jb.amount[0] else 0;
+            if (amt > cap)
+                return respondVroomError(req, .unprocessable_entity, "a job's demand exceeds capacity (infeasible)");
+            seen[L] = true;
+            demand[L] = amt;
+            const w = taskWindow(jb.time_windows, horizon);
+            ready[L] = w[0];
+            due[L] = w[1];
+            service[L] = jb.service;
+            node_id[L] = jb.id orelse @as(u64, @intCast(L));
+            node_kind[L] = .job;
+        }
+        for (seen[1..dim]) |s| {
+            if (!s) return respondVroomError(req, .unprocessable_entity, "v1 jobs: the matrix must cover exactly depot + every job node once (no unused rows)");
+        }
+        demand[0] = 0;
+
+        const inst = commiv.VrptwInstance{
+            .n = n,
+            .matrix = flat,
+            .demand = demand,
+            .capacity = cap,
+            .ready = ready,
+            .due = due,
+            .service = service,
+        };
+        var params: commiv.VrptwSisrParams = .{ .veh_penalty = fixed };
+        if (vr.commiv.wall_ms != 0) params.time_ms = vr.commiv.wall_ms;
+        const res = commiv.solveVrptwSisr(arena, inst, .{ .seed = vr.commiv.seed }, params) catch |err|
+            return respondVroomSolverError(req, err);
+        result_routes = res.routes;
+    }
+
+    return emitVroomResponse(arena, req, .{
+        .routes = result_routes,
+        .dim = dim,
+        .time_matrix = flat,
+        .cost_matrix = cost_flat,
+        .ready = ready,
+        .due = due,
+        .service = service,
+        .node_id = node_id,
+        .node_kind = node_kind,
+        .vehicles = vr.vehicles,
+        .fixed = fixed,
+    });
+}
+
+const VroomEmit = struct {
+    routes: [][]usize,
+    dim: usize,
+    time_matrix: []const u32,
+    cost_matrix: []const u32,
+    ready: []const u32,
+    due: []const u32,
+    service: []const u32,
+    node_id: []const u64,
+    node_kind: []const NodeKind,
+    vehicles: []const VroomVehicle,
+    fixed: u64,
+};
+
+fn jNum(buf: *std.ArrayList(u8), a: std.mem.Allocator, v: u64) !void {
+    var tmp: [24]u8 = undefined;
+    try buf.appendSlice(a, std.fmt.bufPrint(&tmp, "{d}", .{v}) catch unreachable);
+}
+
+/// Serialize a solved instance into VROOM's response shape, deriving all summary
+/// numbers by walking the same schedule recurrence the audits use: leave the
+/// depot at t=0, travel, wait for free until ready[j], serve, and return.
+fn emitVroomResponse(arena: std.mem.Allocator, req: *std.http.Server.Request, e: VroomEmit) !void {
+    const dim = e.dim;
+    var buf: std.ArrayList(u8) = .empty;
+
+    var sum_travel: u64 = 0;
+    var sum_service: u64 = 0;
+    var sum_wait: u64 = 0;
+    var sum_cost: u64 = 0;
+
+    try buf.appendSlice(arena, "{\"code\":0,\"summary\":");
+    // Reserve summary spot by building routes first into a separate buffer.
+    var rbuf: std.ArrayList(u8) = .empty;
+    try rbuf.appendSlice(arena, "[");
+    for (e.routes, 0..) |route, ri| {
+        if (ri != 0) try rbuf.append(arena, ',');
+        const veh_id: u64 = if (ri < e.vehicles.len) (e.vehicles[ri].id orelse @as(u64, @intCast(ri + 1))) else @as(u64, @intCast(ri + 1));
+        var r_travel: u64 = 0; // travel time (durations)
+        var r_cost: u64 = 0; // travel cost (cost matrix)
+        var r_service: u64 = 0;
+        var r_wait: u64 = 0;
+
+        try rbuf.appendSlice(arena, "{\"vehicle\":");
+        try jNum(&rbuf, arena, veh_id);
+        try rbuf.appendSlice(arena, ",\"steps\":[{\"type\":\"start\",\"location_index\":0,\"arrival\":0,\"duration\":0}");
+
+        var prev: usize = 0;
+        var t: u64 = 0; // departure clock from prev
+        for (route) |node| {
+            const travel: u64 = e.time_matrix[prev * dim + node];
+            const cost_travel: u64 = e.cost_matrix[prev * dim + node];
+            r_travel += travel;
+            r_cost += cost_travel;
+            const arrival = t + travel;
+            const rdy: u64 = e.ready[node];
+            const wait: u64 = if (rdy > arrival) rdy - arrival else 0;
+            r_wait += wait;
+            const svc: u64 = e.service[node];
+            r_service += svc;
+            const kind = e.node_kind[node];
+            const type_str = switch (kind) {
+                .pickup => "pickup",
+                .delivery => "delivery",
+                .job => "job",
+                .none => "job",
+            };
+            try rbuf.appendSlice(arena, ",{\"type\":\"");
+            try rbuf.appendSlice(arena, type_str);
+            try rbuf.appendSlice(arena, "\",\"location_index\":");
+            try jNum(&rbuf, arena, @intCast(node));
+            try rbuf.appendSlice(arena, ",\"id\":");
+            try jNum(&rbuf, arena, e.node_id[node]);
+            try rbuf.appendSlice(arena, ",\"arrival\":");
+            try jNum(&rbuf, arena, arrival);
+            try rbuf.appendSlice(arena, ",\"duration\":");
+            try jNum(&rbuf, arena, r_travel);
+            try rbuf.appendSlice(arena, ",\"waiting_time\":");
+            try jNum(&rbuf, arena, wait);
+            try rbuf.appendSlice(arena, ",\"service\":");
+            try jNum(&rbuf, arena, svc);
+            try rbuf.append(arena, '}');
+            t = arrival + wait + svc;
+            prev = node;
+        }
+        // return to depot
+        const back: u64 = e.time_matrix[prev * dim + 0];
+        const back_cost: u64 = e.cost_matrix[prev * dim + 0];
+        r_travel += back;
+        r_cost += back_cost;
+        const depot_arrival = t + back;
+        try rbuf.appendSlice(arena, ",{\"type\":\"end\",\"location_index\":0,\"arrival\":");
+        try jNum(&rbuf, arena, depot_arrival);
+        try rbuf.appendSlice(arena, ",\"duration\":");
+        try jNum(&rbuf, arena, r_travel);
+        try rbuf.appendSlice(arena, "}]");
+
+        const route_cost = r_cost + e.fixed;
+        try rbuf.appendSlice(arena, ",\"cost\":");
+        try jNum(&rbuf, arena, route_cost);
+        try rbuf.appendSlice(arena, ",\"duration\":");
+        try jNum(&rbuf, arena, r_travel);
+        try rbuf.appendSlice(arena, ",\"service\":");
+        try jNum(&rbuf, arena, r_service);
+        try rbuf.appendSlice(arena, ",\"waiting_time\":");
+        try jNum(&rbuf, arena, r_wait);
+        try rbuf.append(arena, '}');
+
+        sum_travel += r_travel;
+        sum_service += r_service;
+        sum_wait += r_wait;
+        sum_cost += route_cost;
+    }
+    try rbuf.append(arena, ']');
+
+    // summary
+    try buf.appendSlice(arena, "{\"cost\":");
+    try jNum(&buf, arena, sum_cost);
+    try buf.appendSlice(arena, ",\"routes\":");
+    try jNum(&buf, arena, @intCast(e.routes.len));
+    try buf.appendSlice(arena, ",\"unassigned\":0,\"duration\":");
+    try jNum(&buf, arena, sum_travel);
+    try buf.appendSlice(arena, ",\"service\":");
+    try jNum(&buf, arena, sum_service);
+    try buf.appendSlice(arena, ",\"waiting_time\":");
+    try jNum(&buf, arena, sum_wait);
+    try buf.appendSlice(arena, "},\"routes\":");
+    try buf.appendSlice(arena, rbuf.items);
+    try buf.appendSlice(arena, ",\"unassigned\":[]}");
+
+    try req.respond(buf.items, .{
+        .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }},
+    });
+}
+
+fn respondVroomSolverError(req: *std.http.Server.Request, err: anyerror) !void {
+    return switch (err) {
+        error.Infeasible, error.NoFeasibleSplit, error.NoCompleteSolution => respondVroomError(req, .unprocessable_entity, "instance is infeasible under the given capacity/time windows/fleet"),
+        error.InvalidInstance, error.InvalidMatrix => respondVroomError(req, .unprocessable_entity, "instance is invalid: check matrix shape and task windows"),
+        error.OutOfMemory => respondVroomError(req, .internal_server_error, "out of memory"),
+        else => respondVroomError(req, .internal_server_error, "solver failed"),
+    };
+}
+
+fn respondVroomError(req: *std.http.Server.Request, status: std.http.Status, message: []const u8) !void {
+    var buf: [512]u8 = undefined;
+    const json = std.fmt.bufPrint(&buf, "{{\"code\":1,\"error\":\"{s}\"}}", .{message}) catch "{\"code\":1,\"error\":\"internal\"}";
+    try req.respond(json, .{
+        .status = status,
+        .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }},
+    });
 }
 
 // ---- plumbing ----------------------------------------------------------------

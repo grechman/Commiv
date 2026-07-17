@@ -175,6 +175,66 @@ curl -X POST http://127.0.0.1:8080/solve/pdptw/dispatch -d '{
 # the result is guaranteed to reproduce it verbatim regardless of iters/seed.
 ```
 
+## POST /compat/vroom
+
+Drop-in [VROOM](https://github.com/VROOM-Project/vroom) compatibility: send a
+VROOM request JSON, get a VROOM-shaped response back. An existing VROOM client
+points at this URL unchanged and picks up the money objective (route-duration +
+waiting pricing) that VROOM cannot express. v1 is **matrix-based and
+single-depot on a homogeneous fleet** — it maps the request onto commiv's PDPTW
+(from `shipments`) or VRPTW (from `jobs`) and answers in VROOM's own shape.
+
+Request fields honored:
+
+| VROOM field | requirement | maps to |
+|---|---|---|
+| `matrices.car.durations` | **required**, square `int[dim][dim]` | commiv cost/time matrix (no geocoding; a missing matrix is a 422) |
+| `matrices.car.costs` | optional, square `int[dim][dim]` | basis for the reported `cost`; defaults to `durations` |
+| `vehicles[].start_index` / `end_index` | `0` or absent | single depot (any other value is a 422) |
+| `vehicles[].capacity` | `[c]`, same for all | per-vehicle capacity (heterogeneous fleet is a 422) |
+| `vehicles[].time_window` | `[a,b]` | `vehicles[0].time_window[1]` is the depot horizon (`due[0]`) |
+| `vehicles[].costs.fixed` | same `F` for all (or all absent) | `veh_penalty = F` (heterogeneous fixed cost is a 422) |
+| `shipments[]` | `{amount:[q], pickup{...}, delivery{...}}` | **PDPTW**: one pickup + one delivery per request, same route, pickup first |
+| `jobs[]` | `{location_index, delivery/amount, time_windows, service}` | **VRPTW**: one delivery stop per job |
+| `pickup`/`delivery`/job `time_windows` | `[[a,b],...]` | first window is used; absent → `[0, horizon]` |
+| `commiv` | `{wall_ms, time_penalty, seed}` (optional) | opt into the money objective (`time_penalty` is shipments/PDPTW-only) |
+
+`shipments` and `jobs` are mutually exclusive (both → 422). The task
+`location_index` values **are** the matrix rows: v1 requires the matrix to cover
+exactly the depot plus every task node once (no unused rows), which is precisely
+what `tools/vroom_road_pdptw.py` produces from a `moneyroadbench` dump.
+
+Response is VROOM's shape — `{code, summary, routes, unassigned}` — so a VROOM
+client parses it as-is. Every summary/route/step time number is derived by
+walking the schedule recurrence over the returned routes (depart depot at
+`t=0`, travel, wait until `ready`, serve, return): `summary.duration` and each
+`route.duration` are travel time only; `service` and `waiting_time` are broken
+out separately; `cost` is travel cost over the cost matrix plus `fixed` per used
+vehicle. Errors are VROOM-shaped: `{"code":1,"error":"..."}` with a 4xx status.
+
+```sh
+curl -X POST http://127.0.0.1:8080/compat/vroom -d '{
+  "matrices": {"car": {"durations": [[0,10,12,14,16],[10,0,6,8,10],
+    [12,6,0,7,9],[14,8,7,0,6],[16,10,9,6,0]]}},
+  "vehicles": [{"id":1,"start_index":0,"end_index":0,"capacity":[10],
+    "time_window":[0,10000],"costs":{"fixed":1000}}],
+  "shipments": [
+    {"amount":[4],"pickup":{"id":11,"location_index":1,"service":3},
+     "delivery":{"id":12,"location_index":3,"service":3}},
+    {"amount":[5],"pickup":{"id":21,"location_index":2,"service":3},
+     "delivery":{"id":22,"location_index":4,"service":3}}]
+}'
+# {"code":0,"summary":{"cost":...,"routes":1,"unassigned":0,"duration":...,
+#   "service":...,"waiting_time":...},"routes":[{"vehicle":1,"steps":[
+#   {"type":"start","location_index":0,...}, {"type":"pickup",...}, ...,
+#   {"type":"end","location_index":0,...}],...}],"unassigned":[]}
+```
+
+Acceptance self-test: `tools/vroom_compat_selftest.py` POSTs a real
+`vroom_road_pdptw.py` request unmodified, plus a hand-built `jobs` request and a
+no-matrix negative case, and asserts `code:0`, full service, and that every
+response number reconciles with an independent schedule walk.
+
 ## POST /solve/atsp
 
 Pure directed ordering, no capacity. `matrix` is `n x n`; optional `seed`,
