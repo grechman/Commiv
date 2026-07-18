@@ -15,3 +15,8 @@ vendor/road/moscow-5000.road
 .claude/
 .zig-cache*/
 .kiro/
+dist/
+bindings/python/build/
+bindings/python/commiv.egg-info/
+bindings/python/commiv/libcommiv.so
+bindings/python/commiv/libcommiv.dylib

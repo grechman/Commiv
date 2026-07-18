@@ -1,0 +1,13 @@
+commiv_routes_cost
+commiv_routes_count
+commiv_routes_free
+commiv_routes_get
+commiv_routes_len
+commiv_routes_type
+commiv_solve_atsp
+commiv_solve_cvrp
+commiv_solve_pdptw
+commiv_solve_pdptw_dispatch
+commiv_solve_pdptw_typed
+commiv_solve_vrptw
+commiv_version

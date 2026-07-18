@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const pdp = @import("pdptw.zig");
 
 // SISR engine for PDPTW: ruin-and-recreate under threshold accepting, ported
@@ -1753,9 +1754,18 @@ fn buildNeighbors(allocator: std.mem.Allocator, inst: pdp.PdpInstance, k: usize,
 }
 
 fn nanos() u64 {
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &ts);
-    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
+    // Linux: raw vDSO syscall, libc-free (the historic path, byte-identical).
+    // Elsewhere (macOS wheels): libc clock_gettime — Zig always links
+    // libSystem on macOS, so this is safe even in the "libc-free" library.
+    if (builtin.os.tag == .linux) {
+        var ts: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &ts);
+        return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
+    } else {
+        var ts: std.c.timespec = undefined;
+        _ = std.c.clock_gettime(.MONOTONIC, &ts);
+        return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
+    }
 }
 
 pub fn solvePdptwSisr(allocator: std.mem.Allocator, inst: pdp.PdpInstance, params: PdpSisrParams) !pdp.PdpResult {
@@ -1776,6 +1786,9 @@ fn solvePdptwSisrFromLocked(allocator: std.mem.Allocator, inst: pdp.PdpInstance,
     const n_nodes = 2 * inst.n_pairs;
     if (inst.n_pairs == 0) return error.InvalidInstance;
     if (params.veh_types.len > MAX_VEH_TYPES) return error.InvalidInstance;
+    // The eval pool parks helpers on raw Linux futexes; on any other OS the
+    // lever (default-off, refuted anyway) is simply unavailable.
+    if (builtin.os.tag != .linux and params.eval_threads >= 2) return error.InvalidInstance;
     if (params.brk) |bk| {
         if (bk.earliest > bk.latest) return error.InvalidInstance;
         // The parallel-eval path has no break-aware evaluator (gated-off

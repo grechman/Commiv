@@ -87,10 +87,14 @@ That is the whole integration: a directed cost matrix (row `a`, column `b` = cos
 rolling-horizon plan around committed (locked) stops. Full schema and Python/JS/Go
 client snippets in [`docs/rest.md`](docs/rest.md).
 
+Container: `zig build serve -Dtarget=x86_64-linux-musl -Doptimize=ReleaseFast &&
+docker build -t commiv-serve . && docker run --rm -p 8080:8080 commiv-serve` —
+one static binary in a from-scratch image, ~10 MB.
+
 ### Python, natively
 
 ```python
-import commiv  # pip install -e bindings/python; needs zig build lib once
+import commiv  # pip install commiv  (prebuilt wheels: linux x86_64, macOS; no toolchain)
 
 sol = commiv.solve_cvrp(matrix, demand=[0, 4, 6, 5], capacity=10, seed=1)
 print(sol.total_cost, sol.routes)  # 58 [[2, 1], [3]]
@@ -659,7 +663,7 @@ curl -X POST http://127.0.0.1:8080/solve/cvrp -d '{
 ### Python — нативно
 
 ```python
-import commiv  # pip install -e bindings/python; один раз zig build lib
+import commiv  # pip install commiv (готовые wheels: linux x86_64, macOS; без тулчейна)
 
 sol = commiv.solve_cvrp(matrix, demand=[0, 4, 6, 5], capacity=10, seed=1)
 print(sol.total_cost, sol.routes)  # 58 [[2, 1], [3]]

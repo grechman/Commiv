@@ -1237,3 +1237,32 @@ test "capi pdptw typed: rejects fleet drivers and impossible demand" {
     defer commiv_routes_free(plain);
     try testing.expectEqual(std.math.maxInt(u32), commiv_routes_type(plain, 0));
 }
+
+// ---- ABI stability canaries (docs/abi.md) ----------------------------------
+// commiv_options is the append-only ABI contract: size and every field offset
+// are pinned so an accidental reorder, retype, or non-appended insertion
+// fails the test suite instead of shipping a silent ABI break.
+
+test "capi ABI: commiv_options layout is pinned (104 bytes, append-only)" {
+    try testing.expectEqual(@as(usize, 104), @sizeOf(CommivOptions));
+    try testing.expectEqual(@as(usize, 0), @offsetOf(CommivOptions, "seed"));
+    try testing.expectEqual(@as(usize, 8), @offsetOf(CommivOptions, "sisr_iters"));
+    try testing.expectEqual(@as(usize, 16), @offsetOf(CommivOptions, "trials"));
+    try testing.expectEqual(@as(usize, 24), @offsetOf(CommivOptions, "vrptw_rounds"));
+    try testing.expectEqual(@as(usize, 32), @offsetOf(CommivOptions, "vrptw_restarts"));
+    try testing.expectEqual(@as(usize, 40), @offsetOf(CommivOptions, "veh_penalty"));
+    try testing.expectEqual(@as(usize, 48), @offsetOf(CommivOptions, "threads"));
+    try testing.expectEqual(@as(usize, 52), @offsetOf(CommivOptions, "fleet_min"));
+    try testing.expectEqual(@as(usize, 56), @offsetOf(CommivOptions, "wall_ms"));
+    try testing.expectEqual(@as(usize, 64), @offsetOf(CommivOptions, "max_vehicles"));
+    try testing.expectEqual(@as(usize, 72), @offsetOf(CommivOptions, "time_penalty"));
+    try testing.expectEqual(@as(usize, 80), @offsetOf(CommivOptions, "max_route_duration"));
+    try testing.expectEqual(@as(usize, 88), @offsetOf(CommivOptions, "break_duration"));
+    try testing.expectEqual(@as(usize, 92), @offsetOf(CommivOptions, "break_earliest"));
+    try testing.expectEqual(@as(usize, 96), @offsetOf(CommivOptions, "break_latest"));
+    try testing.expectEqual(@as(usize, 100), @offsetOf(CommivOptions, "reserved"));
+    // Zero value = documented defaults: the append-only contract's foundation.
+    const zeroed = std.mem.zeroes(CommivOptions);
+    try testing.expectEqual(@as(u64, 0), zeroed.seed);
+    try testing.expectEqual(@as(u32, 0), zeroed.break_duration);
+}

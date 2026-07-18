@@ -37,7 +37,7 @@ const commiv = @import("commiv");
 // so admission control is the client's job for now (front it with a queue if
 // you need one). Parallelism inside one solve comes from `threads` in the body.
 
-const version_string = "0.3.0";
+const version_string = "0.4.0";
 
 const ServerConfig = struct {
     host: []const u8,

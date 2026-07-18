@@ -1,18 +1,33 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "commiv"
-version = "0.3.0"
+version = "0.4.0"
 description = "Near-optimal directed (asymmetric) TSP / ATSP / CVRP / VRPTW / PDPTW routes — Python binding over libcommiv"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }
 keywords = ["vrp", "cvrp", "tsp", "atsp", "vrptw", "pdptw", "pickup-delivery", "routing", "logistics", "optimization"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Programming Language :: Python :: 3",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+]
 
 [project.urls]
 Homepage = "https://github.com/grechman/Commiv"
 
 [tool.setuptools.packages.find]
 include = ["commiv*"]
+
+# The prebuilt shared library rides inside the wheel next to __init__.py —
+# _candidate_paths() finds it there first, so `pip install commiv` needs no
+# Zig toolchain. Which one is present depends on the wheel's platform tag
+# (see tools/build_wheels.sh).
+[tool.setuptools.package-data]
+commiv = ["libcommiv.so", "libcommiv.dylib"]
