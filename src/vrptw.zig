@@ -2136,6 +2136,13 @@ pub const VrptwSisrParams = struct {
     // uncapped run, in percent. The SISR paper front-loads route minimization;
     // lower values hand the descent more time.
     fleet_p0_pct: u8 = 40,
+    // Max route duration (shift-length cap): reject any insertion whose
+    // resulting depot->...->depot Tws duration (travel + service + unavoidable
+    // waiting) exceeds this cap. 0 = off (byte-identical to before this knob
+    // existed). A hard feasibility bound, enforced at every gapDelta eval site
+    // and at singleton route creation; best-capture is gated on it so the
+    // returned plan is cap-clean even when the giant-tour seed is not.
+    max_route_dur: u64 = 0,
 };
 
 const SisrTwRoute = struct {
@@ -2176,6 +2183,7 @@ const SisrTw = struct {
     nonempty: usize = 0,
     cost: u64 = 0, // total distance + veh_penalty * nonempty
     veh_penalty: u64,
+    max_route_dur: u64 = 0, // shift-length cap; 0 = off (see VrptwSisrParams.max_route_dur)
     gran: []const usize, // shared kNN lists, gran[(c-1)*gk + i], 0-padded
     gk: usize,
     loc_route: []usize, // NO_ROUTE when absent
@@ -2454,6 +2462,9 @@ const SisrTw = struct {
         const with_c = Tws.merge(r.pre.items[g], @intCast(s.inst.d(prev, c)), Tws.client(s.inst, c));
         const full = Tws.merge(with_c, @intCast(s.inst.d(c, next)), r.suf.items[g]);
         if (full.tw != 0) return null;
+        // Shift-length cap: full spans depot->..->depot, so full.dur is the
+        // whole resulting route's duration. Reject insertions that exceed it.
+        if (s.max_route_dur > 0 and full.dur > @as(i64, @intCast(s.max_route_dur))) return null;
         return @as(i64, @intCast(s.inst.d(prev, c) + s.inst.d(c, next))) - @as(i64, @intCast(s.inst.d(prev, next)));
     }
 
@@ -2802,7 +2813,12 @@ const SisrTw = struct {
                 }
             }
 
-            const may_open = params.max_vehicles == 0 or s.nonempty < params.max_vehicles;
+            // A fresh single-customer route must also fit the shift cap; fold
+            // that into may_open so an over-cap singleton is never opened (the
+            // customer stays banked / goes to squeeze instead).
+            const single_ok = s.max_route_dur == 0 or
+                @as(u64, @intCast(@max(routeTws(s.inst, &[_]usize{c}).dur, 0))) <= s.max_route_dur;
+            const may_open = (params.max_vehicles == 0 or s.nonempty < params.max_vehicles) and single_ok;
             const singleton: i64 = @intCast(s.inst.d(0, c) + s.inst.d(c, 0) + s.veh_penalty);
             if (best_ri == NO_ROUTE and !may_open) {
                 if (params.eject) _ = try s.squeezeInsert(c, params);
@@ -3122,6 +3138,38 @@ const SisrTw = struct {
         }
     }
 
+    /// True unless a shift cap is active and some nonempty route exceeds it.
+    /// This engine keeps no per-route duration field (no money objective), so
+    /// it recomputes each route's Tws duration here — an O(sum route len) read
+    /// done only at best-capture and only when the cap is on. Off path returns
+    /// immediately. Gating capture on this keeps the returned plan cap-clean
+    /// even when the giant-tour seed hands over an over-cap route.
+    fn withinDurCap(s: *const SisrTw) bool {
+        if (s.max_route_dur == 0) return true;
+        for (s.routes.items) |r| {
+            if (r.items.items.len == 0) continue;
+            if (@as(u64, @intCast(@max(routeTws(s.inst, r.items.items).dur, 0))) > s.max_route_dur) return false;
+        }
+        return true;
+    }
+
+    /// Number of nonempty routes exceeding the shift cap. 0 when the cap is off.
+    /// Folded into the acceptance objective (CAP_PEN weight) so the search is
+    /// driven OUT of over-cap states the way UNASSIGNED_PEN drives it out of an
+    /// incomplete bank. Without this, the giant-tour seed's over-cap route can
+    /// be a cheaper (by distance) incumbent than the only cap-feasible layout,
+    /// so the threshold-accept rolls back every feasible-but-costlier split and
+    /// best is never captured — a feasible instance reported infeasible.
+    fn overCapCount(s: *const SisrTw) u64 {
+        if (s.max_route_dur == 0) return 0;
+        var n: u64 = 0;
+        for (s.routes.items) |r| {
+            if (r.items.items.len == 0) continue;
+            if (@as(u64, @intCast(@max(routeTws(s.inst, r.items.items).dur, 0))) > s.max_route_dur) n += 1;
+        }
+        return n;
+    }
+
     fn toResult(s: *SisrTw, allocator: std.mem.Allocator) !VrptwResult {
         const routes = try allocator.alloc([]usize, s.nonempty);
         var filled: usize = 0;
@@ -3178,6 +3226,7 @@ pub fn solveVrptwSisrFrom(allocator: std.mem.Allocator, inst: VrptwInstance, opt
     defer allocator.free(gran);
 
     var cur = try SisrTw.init(allocator, inst, params.veh_penalty, gran, gk);
+    cur.max_route_dur = params.max_route_dur;
     defer cur.deinit();
     if (params.tabu_tenure > 0) {
         cur.tabu_until = try allocator.alloc(u64, n + 1);
@@ -3245,7 +3294,7 @@ pub fn solveVrptwSisrFrom(allocator: std.mem.Allocator, inst: VrptwInstance, opt
         cur.commit();
     }
 
-    var best: ?VrptwResult = if (cur.n_unassigned == 0) try cur.toResult(allocator) else null;
+    var best: ?VrptwResult = if (cur.n_unassigned == 0 and cur.withinDurCap()) try cur.toResult(allocator) else null;
     errdefer if (best) |*b| b.deinit();
     var best_cost = cur.cost;
 
@@ -3289,16 +3338,21 @@ pub fn solveVrptwSisrFrom(allocator: std.mem.Allocator, inst: VrptwInstance, opt
     // On the uncapped default path n_unassigned is always 0 on both sides of
     // every dt, so this term is always 0 there — bit-identical to before.
     const UNASSIGNED_PEN: u64 = 1_000_000_000;
+    // Over-cap penalty: same magnitude, drives the search out of shift-cap
+    // violations. Always 0 when max_route_dur == 0 (overCapCount short-circuits),
+    // so the uncapped acceptance objective is bit-identical to before.
+    const CAP_PEN: u64 = 1_000_000_000;
     const t_start = nanos();
     var it: usize = 0;
     while (it < iters) : (it += 1) {
         if (params.time_ms > 0 and it % 256 == 0 and (nanos() - t_start) / std.time.ns_per_ms >= params.time_ms) break;
         const saved_cost = cur.cost;
         const saved_unassigned = cur.n_unassigned;
+        const saved_overcap = cur.overCapCount();
         try cur.ruin(eff_params, rng, it);
         try cur.recreate(eff_params, rng);
-        const eff = cur.cost + UNASSIGNED_PEN * @as(u64, @intCast(cur.n_unassigned));
-        const saved_eff = saved_cost + UNASSIGNED_PEN * @as(u64, @intCast(saved_unassigned));
+        const eff = cur.cost + UNASSIGNED_PEN * @as(u64, @intCast(cur.n_unassigned)) + CAP_PEN * cur.overCapCount();
+        const saved_eff = saved_cost + UNASSIGNED_PEN * @as(u64, @intCast(saved_unassigned)) + CAP_PEN * saved_overcap;
         const dt = @as(i64, @intCast(eff)) - @as(i64, @intCast(saved_eff));
         if (@as(f64, @floatFromInt(dt)) < temp) {
             var do_polish = false;
@@ -3337,7 +3391,7 @@ pub fn solveVrptwSisrFrom(allocator: std.mem.Allocator, inst: VrptwInstance, opt
                 try cur.polish(touched_scratch.items);
                 cur.commit(); // fold polish's own journal in — never rollback-able
             }
-            if (cur.n_unassigned == 0 and (best == null or cur.cost < best_cost)) {
+            if (cur.n_unassigned == 0 and cur.withinDurCap() and (best == null or cur.cost < best_cost)) {
                 best_cost = cur.cost;
                 if (best) |*b| b.deinit();
                 best = try cur.toResult(allocator);
@@ -3363,6 +3417,7 @@ pub fn solveVrptwSisrFrom(allocator: std.mem.Allocator, inst: VrptwInstance, opt
         // improvements only, so the returned cost is never worse than
         // without this pass.
         var fin = try SisrTw.init(allocator, inst, params.veh_penalty, gran, gk);
+        fin.max_route_dur = params.max_route_dur;
         defer fin.deinit();
         for (best.?.routes) |route| {
             const ri = try fin.addSlot();

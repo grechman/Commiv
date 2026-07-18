@@ -48,6 +48,7 @@ pub fn main(init: std.process.Init) !void {
     const p0_pct = try std.fmt.parseInt(u8, env.get("PB_P0") orelse "40", 10); // uncapped phase % of fleet-min budget
     const pin_mode = std.mem.eql(u8, env.get("PB_PIN") orelse "0", "1"); // pinned-fleet driver: pin = PB_CAP, or BKS fleet if unset
     const time_pen = try std.fmt.parseInt(u64, env.get("PB_TIMEPEN") orelse "0", 10); // money mode: cost per time unit of route duration
+    const max_dur = try std.fmt.parseInt(u64, env.get("PB_MAXDUR") orelse "0", 10); // shift-length cap (route duration); 0 = uncapped
 
     std.debug.print("instance,n_pairs,bks_veh,veh,bks_dist,dist,gap_pct,ms,dur,wait\n", .{});
     var sum_gap: f64 = 0;
@@ -97,6 +98,7 @@ pub fn main(init: std.process.Init) !void {
             .swap_kick = swap_kick,
             .fleet_p0_pct = p0_pct,
             .time_penalty = time_pen,
+            .max_route_dur = max_dur,
             .eval_threads = eval_threads,
         };
         var res = if (pin_mode) blk: {

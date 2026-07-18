@@ -79,6 +79,8 @@ pub fn main(init: std.process.Init) !void {
     const time_pen = try std.fmt.parseInt(u64, env.get("MR_TIMEPEN") orelse "30", 10);
     const veh_pen = try std.fmt.parseInt(u64, env.get("MR_VEH_PEN") orelse "8400", 10);
     const time_ms = try std.fmt.parseInt(u64, env.get("MR_TIME_MS") orelse "5000", 10);
+    // MR_MAXDUR: shift-length cap in matrix time-units (seconds). 0 = uncapped.
+    const max_dur = try std.fmt.parseInt(u64, env.get("MR_MAXDUR") orelse "0", 10);
     const seed = try std.fmt.parseInt(u64, env.get("MR_SEED") orelse "1", 10);
     const use_tw = std.mem.eql(u8, env.get("MR_USE_TW") orelse "0", "1");
     const window_pairing = std.mem.eql(u8, env.get("MR_PAIR") orelse "shuffle", "window");
@@ -290,6 +292,7 @@ pub fn main(init: std.process.Init) !void {
         .time_ms = time_ms,
         .veh_penalty = veh_pen,
         .time_penalty = time_pen,
+        .max_route_dur = max_dur,
         .eval_threads = eval_threads,
     };
     const t0 = nanos();
@@ -327,9 +330,19 @@ pub fn main(init: std.process.Init) !void {
     // --- physical outputs: duration (travel+service+wait), service, wait ---
     var dur_sec: u64 = 0;
     var service_sec: u64 = 0;
+    var max_route_sec: u64 = 0;
     for (res.routes) |r| {
-        dur_sec += commiv.internal.pdptw_sisr.routeDuration(inst, r);
+        const rd = commiv.internal.pdptw_sisr.routeDuration(inst, r);
+        dur_sec += rd;
+        if (rd > max_route_sec) max_route_sec = rd;
         for (r) |c| service_sec += inst.service[c];
+    }
+    // MR_MAXDUR verification: recompute every route's duration and confirm the
+    // solver honored the shift cap (independent of the engine's internal gate).
+    if (max_dur > 0 and max_route_sec > max_dur) {
+        std.debug.print("instance,n_pairs,vehicles,dist_sec,dur_sec,service_sec,wait_sec,usd_total,ms\n", .{});
+        std.debug.print("{s},FAIL_MAXDUR_{d}_over_{d}\n", .{ name, max_route_sec, max_dur });
+        return error.MaxRouteDurExceeded;
     }
     const wait_sec = dur_sec - dist_sec - service_sec;
 

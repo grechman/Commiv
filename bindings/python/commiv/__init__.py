@@ -86,7 +86,7 @@ class InfeasibleError(CommivError):
 
 
 class _Options(ctypes.Structure):
-    # Must mirror commiv_options in include/commiv.h byte-for-byte (80 bytes).
+    # Must mirror commiv_options in include/commiv.h byte-for-byte (88 bytes).
     _fields_ = [
         ("seed", ctypes.c_uint64),
         ("sisr_iters", ctypes.c_uint64),
@@ -99,6 +99,7 @@ class _Options(ctypes.Structure):
         ("wall_ms", ctypes.c_uint64),
         ("max_vehicles", ctypes.c_uint64),
         ("time_penalty", ctypes.c_uint64),
+        ("max_route_duration", ctypes.c_uint64),
     ]
 
 
@@ -194,7 +195,7 @@ _lib.commiv_routes_free.argtypes = [ctypes.c_void_p]
 
 
 def version() -> str:
-    """libcommiv version string, e.g. '0.3.0'."""
+    """libcommiv version string, e.g. '0.4.0'."""
     return _lib.commiv_version().decode()
 
 
@@ -320,6 +321,7 @@ def solve_vrptw(
     veh_penalty: int = 0,
     fleet_min: bool = False,
     max_vehicles: int = 0,
+    max_route_duration: int = 0,
     wall_ms: int = 0,
 ) -> CvrpSolution:
     """Solve a directed VRPTW with SISR (the flagship engine). ready/due bound
@@ -335,7 +337,9 @@ def solve_vrptw(
     (defaults to 10s otherwise) and it takes precedence over threads.
     max_vehicles > 0 caps the number of routes. wall_ms is a wall-clock budget
     in milliseconds for the SISR / fleet-min search (0 = bounded by iters only).
-    There is NO time_penalty on VRPTW — the money objective is PDPTW-only."""
+    There is NO time_penalty on VRPTW — the money objective is PDPTW-only.
+    max_route_duration > 0 caps every route's duration (travel + service +
+    unavoidable waiting) at that shift length; 0 = uncapped."""
     dim = _matrix_dim(matrix)
     n = dim - 1
     m = _as_u32_array(matrix, dim * dim, "matrix")
@@ -345,7 +349,8 @@ def solve_vrptw(
     sv = _as_u32_array(service, dim, "service")
     opts = _Options(seed=seed, sisr_iters=iters, threads=threads,
                     vrptw_rounds=rounds, vrptw_restarts=restarts, veh_penalty=veh_penalty,
-                    fleet_min=1 if fleet_min else 0, max_vehicles=max_vehicles, wall_ms=wall_ms)
+                    fleet_min=1 if fleet_min else 0, max_vehicles=max_vehicles, wall_ms=wall_ms,
+                    max_route_duration=max_route_duration)
     out = ctypes.c_void_p()
     rc = _lib.commiv_solve_vrptw(m, n, d, capacity, rd, du, sv, ctypes.byref(opts), ctypes.byref(out))
     if rc != _OK:
@@ -369,6 +374,7 @@ def solve_pdptw(
     time_penalty: int = 0,
     fleet_min: bool = False,
     max_vehicles: int = 0,
+    max_route_duration: int = 0,
     wall_ms: int = 0,
 ) -> CvrpSolution:
     """Solve a directed PDPTW (pickup-and-delivery with time windows), SISR.
@@ -391,7 +397,11 @@ def solve_pdptw(
     max_vehicles > 0 the PDPTW solver runs the PINNED driver: it targets EXACTLY
     that many vehicles (the enterprise fixed-fleet case), not merely an upper
     cap. Both wall-driven drivers use wall_ms as their budget (0 defaults to
-    10s). iters=0 means the SISR default. Note: threads is IGNORED for PDPTW."""
+    10s). iters=0 means the SISR default. Note: threads is IGNORED for PDPTW.
+
+    max_route_duration > 0 caps every route's duration (travel + service +
+    unavoidable waiting) at that shift length; 0 = uncapped. This is a hard
+    feasibility bound, distinct from the soft time_penalty cost term."""
     dim = _matrix_dim(matrix)
     n_pairs = len(pickups)
     if len(deliveries) != n_pairs:
@@ -407,7 +417,8 @@ def solve_pdptw(
     sv = _as_u32_array(service, dim, "service")
     opts = _Options(seed=seed, sisr_iters=iters, veh_penalty=veh_penalty,
                     time_penalty=time_penalty, fleet_min=1 if fleet_min else 0,
-                    max_vehicles=max_vehicles, wall_ms=wall_ms)
+                    max_vehicles=max_vehicles, wall_ms=wall_ms,
+                    max_route_duration=max_route_duration)
     out = ctypes.c_void_p()
     rc = _lib.commiv_solve_pdptw(m, n_pairs, pk, dl, dm, capacity, rd, du, sv,
                                  ctypes.byref(opts), ctypes.byref(out))
@@ -432,6 +443,7 @@ def solve_pdptw_dispatch(
     iters: int = 0,
     veh_penalty: int = 0,
     time_penalty: int = 0,
+    max_route_duration: int = 0,
     wall_ms: int = 0,
 ) -> CvrpSolution:
     """Rolling-horizon PDPTW re-solve: same instance contract as solve_pdptw,
@@ -476,7 +488,8 @@ def solve_pdptw_dispatch(
     locked_arr = (ctypes.c_size_t * n_routes)(*locked)
 
     opts = _Options(seed=seed, sisr_iters=iters, veh_penalty=veh_penalty,
-                    time_penalty=time_penalty, wall_ms=wall_ms)
+                    time_penalty=time_penalty, wall_ms=wall_ms,
+                    max_route_duration=max_route_duration)
     out = ctypes.c_void_p()
     rc = _lib.commiv_solve_pdptw_dispatch(
         m, n_pairs, pk, dl, dm, capacity, rd, du, sv,
@@ -525,6 +538,7 @@ class DispatchSession:
         iters: int = 0,
         veh_penalty: int = 0,
         time_penalty: int = 0,
+        max_route_duration: int = 0,
         wall_ms: int = 0,
     ) -> None:
         dim = _matrix_dim(matrix)
@@ -545,6 +559,7 @@ class DispatchSession:
         self.iters = iters
         self.veh_penalty = veh_penalty
         self.time_penalty = time_penalty
+        self.max_route_duration = max_route_duration
         self.wall_ms = wall_ms
         self.t = 0
         self.plan: list[list[int]] = []  # current routes, node ids
@@ -556,7 +571,8 @@ class DispatchSession:
         by the last advance_to() (all-zero locks if advance_to was never
         called since the last solve). Stores and returns the new plan."""
         opts = dict(seed=self.seed, iters=self.iters, veh_penalty=self.veh_penalty,
-                    time_penalty=self.time_penalty, wall_ms=self.wall_ms)
+                    time_penalty=self.time_penalty, max_route_duration=self.max_route_duration,
+                    wall_ms=self.wall_ms)
         opts.update(kw)
         if not self.plan:
             sol = solve_pdptw(

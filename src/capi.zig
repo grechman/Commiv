@@ -19,7 +19,7 @@ const asymmetric = @import("asymmetric.zig");
 //   * return codes, never Zig errors: 0 ok, negative = COMMIV_ERR_*.
 // =============================================================================
 
-const version_string = "0.3.0";
+const version_string = "0.4.0";
 
 // Thread-safe, libc-free allocator: the library must work when dlopen'd from
 // arbitrary hosts, so no global init/deinit entry points to forget.
@@ -51,6 +51,9 @@ pub const COMMIV_ERR_INTERNAL: c_int = -4;
 ///   time_penalty    PDPTW ONLY money objective: cost per matrix time-unit of
 ///                   route DURATION (travel + service + waiting); 0 = pure
 ///                   distance. Ignored by CVRP and VRPTW.
+///   max_route_duration  Shift-length cap (VRPTW, PDPTW): no route may exceed
+///                   this depot->..->depot duration (travel + service +
+///                   waiting). 0 = uncapped. Ignored by CVRP.
 pub const CommivOptions = extern struct {
     seed: u64 = 0,
     sisr_iters: u64 = 0,
@@ -63,6 +66,7 @@ pub const CommivOptions = extern struct {
     wall_ms: u64 = 0, // wall-clock budget in ms (VRPTW/PDPTW SISR); 0 = none
     max_vehicles: u64 = 0, // hard route cap; 0 = uncapped
     time_penalty: u64 = 0, // PDPTW money objective; ignored by CVRP/VRPTW
+    max_route_duration: u64 = 0, // shift-length cap (VRPTW/PDPTW); 0 = uncapped
 };
 
 /// Opaque to C; accessed through commiv_routes_* only. Routes are flattened:
@@ -223,6 +227,7 @@ export fn commiv_solve_vrptw(
         if (o.sisr_iters != 0) params.iters = @intCast(o.sisr_iters);
         if (o.wall_ms != 0) params.time_ms = o.wall_ms;
         if (o.max_vehicles != 0) params.max_vehicles = @intCast(o.max_vehicles);
+        params.max_route_dur = o.max_route_duration;
         if (o.fleet_min != 0) {
             // Hierarchical fleet minimization needs a wall budget; default 10s if unset.
             // fleet_min takes precedence over threads (the fleet-min driver is serial).
@@ -353,6 +358,7 @@ export fn commiv_solve_pdptw(
         .seed = o.seed,
         .veh_penalty = o.veh_penalty,
         .time_penalty = o.time_penalty,
+        .max_route_dur = o.max_route_duration,
     };
     if (o.sisr_iters != 0) params.iters = @intCast(o.sisr_iters);
     if (o.wall_ms != 0) params.time_ms = o.wall_ms;
@@ -533,6 +539,7 @@ export fn commiv_solve_pdptw_dispatch(
         .seed = o.seed,
         .veh_penalty = o.veh_penalty,
         .time_penalty = o.time_penalty,
+        .max_route_dur = o.max_route_duration,
     };
     if (o.sisr_iters != 0) params.iters = @intCast(o.sisr_iters);
     if (o.wall_ms != 0) params.time_ms = o.wall_ms;

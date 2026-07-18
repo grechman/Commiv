@@ -70,6 +70,8 @@ pub fn main(init: std.process.Init) !void {
         const nbr_env = env.get("VT_NBR") orelse "sum";
         const nbr_key: commiv.VrptwNbrKey = if (std.mem.eql(u8, nbr_env, "min")) .min else if (std.mem.eql(u8, nbr_env, "out")) .out else .sum;
         const vt_gk = try std.fmt.parseInt(usize, env.get("VT_GK") orelse "0", 10);
+        // VT_MAXDUR: shift-length cap (route duration); 0 = uncapped.
+        const vt_maxdur = try std.fmt.parseInt(u64, env.get("VT_MAXDUR") orelse "0", 10);
         const t0 = nanos();
         var res = if (use_hgs) try commiv.solveVrptwHgs(allocator, inst, solve_opts, .{
             .mu = try std.fmt.parseInt(usize, env.get("VT_MU") orelse "25", 10),
@@ -77,7 +79,7 @@ pub fn main(init: std.process.Init) !void {
             .generations = try std.fmt.parseInt(usize, env.get("VT_GENS") orelse "30", 10),
             .veh_penalty = veh_penalty,
         }) else if (use_sisr) blk: {
-            const sisr_params = commiv.VrptwSisrParams{ .iters = sisr_iters, .veh_penalty = veh_penalty, .adjacent_gaps = adjacent_gaps, .polish = polish, .stress_rate = stress, .tabu_tenure = tabu, .marathon = marathon, .nbr_key = nbr_key, .gk = vt_gk, .final_ls = std.mem.eql(u8, env.get("VT_FINAL_LS") orelse "0", "1"), .eject = vt_eject, .eject_k = vt_eject_k, .fleet_p0_pct = vt_p0 };
+            const sisr_params = commiv.VrptwSisrParams{ .iters = sisr_iters, .veh_penalty = veh_penalty, .adjacent_gaps = adjacent_gaps, .polish = polish, .stress_rate = stress, .tabu_tenure = tabu, .marathon = marathon, .nbr_key = nbr_key, .gk = vt_gk, .final_ls = std.mem.eql(u8, env.get("VT_FINAL_LS") orelse "0", "1"), .eject = vt_eject, .eject_k = vt_eject_k, .fleet_p0_pct = vt_p0, .max_route_dur = vt_maxdur };
             break :blk if (vt_fleetmin)
                 try commiv.solveVrptwSisrFleetMin(allocator, inst, solve_opts, sisr_params, vt_time_ms)
             else

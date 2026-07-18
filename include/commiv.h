@@ -53,6 +53,10 @@ typedef struct commiv_routes commiv_routes;
  *                   of route DURATION (travel + service + unavoidable waiting),
  *                   added to distance and veh_penalty. 0 = pure distance.
  *                   IGNORED by CVRP and VRPTW.
+ *   max_route_duration  Shift-length cap (VRPTW, PDPTW): a hard bound on each
+ *                   route's depot->..->depot DURATION (travel + service +
+ *                   unavoidable waiting). No route in the result exceeds it.
+ *                   0 = uncapped. IGNORED by CVRP.
  */
 typedef struct commiv_options {
     uint64_t seed;
@@ -66,9 +70,10 @@ typedef struct commiv_options {
     uint64_t wall_ms;        /* wall-clock budget (ms); 0 = none */
     uint64_t max_vehicles;   /* hard route cap; 0 = uncapped */
     uint64_t time_penalty;   /* PDPTW money knob; 0 = off */
+    uint64_t max_route_duration; /* shift-length cap (VRPTW/PDPTW); 0 = uncapped */
 } commiv_options;
 
-/* Library version, e.g. "0.3.0". Static storage; do not free. */
+/* Library version, e.g. "0.4.0". Static storage; do not free. */
 const char *commiv_version(void);
 
 /* Directed CVRP with an uncapped fleet (SISR solver).

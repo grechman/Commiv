@@ -170,6 +170,86 @@ def check_dispatch_session():
     assert new_p in served and new_q in served, (new_p, new_q, sol2.routes)
 
 
+def _route_tws_duration(matrix, ready, due, service, route):
+    """Ground-truth route duration via the SAME Tws schedule recurrence the
+    engine uses (travel + service + unavoidable waiting at the
+    duration-minimizing departure time). Ports src Tws.merge/routeDuration
+    exactly so the smoke can verify the cap independently of the solver."""
+    def merge(left, edge, right):
+        ldur, ltw, lear, llate = left
+        rdur, rtw, rear, rlate = right
+        delta = ldur - ltw + edge
+        d_wait = max(rear - delta - llate, 0)
+        d_tw = max(lear + delta - rlate, 0)
+        return (
+            ldur + rdur + edge + d_wait,
+            ltw + rtw + d_tw,
+            max(rear - delta, lear) - d_wait,
+            min(rlate - delta, llate) + d_tw,
+        )
+    depot = (0, 0, 0, due[0])
+    acc = depot
+    prev = 0
+    for c in route:
+        acc = merge(acc, matrix[prev][c], (service[c], 0, ready[c], due[c]))
+        prev = c
+    acc = merge(acc, matrix[prev][0], depot)
+    return max(acc[0], 0)
+
+
+def check_pdptw_max_route_duration():
+    # Both pairs on ONE route (0,1,2,3,4,0) has duration 45 travel + 12 service
+    # = 57; the min-distance uncapped answer. A cap of 50 makes that infeasible
+    # and forces a split into two single-pair routes (durations 38 and 43).
+    cap = 50
+    one_route = _route_tws_duration(
+        PDP_MATRIX, PDP_READY, PDP_DUE, PDP_SERVICE, [1, 2, 3, 4])
+    assert one_route > cap, one_route  # the cap really bites
+    sol = commiv.solve_pdptw(
+        PDP_MATRIX, PDP_PICKUPS, PDP_DELIVERIES, PDP_DEMAND, 10,
+        PDP_READY, PDP_DUE, PDP_SERVICE, seed=5, iters=6000,
+        max_route_duration=cap,
+    )
+    _assert_complete_pdptw_plan(sol)
+    assert len(sol.routes) >= 2, ("cap must force a split", sol.routes)
+    for r in sol.routes:
+        d = _route_tws_duration(PDP_MATRIX, PDP_READY, PDP_DUE, PDP_SERVICE, r)
+        assert d <= cap, ("route over shift cap", r, d, cap)
+
+
+# Duration-only VRPTW instance: capacity is slack (100 >> demand) so the ONLY
+# binding split pressure is the shift cap. Wide windows -> zero waiting, so a
+# route's duration is just travel + service.
+DUR_MATRIX = [
+    [0, 10, 10, 10],
+    [10, 0, 10, 10],
+    [10, 10, 0, 10],
+    [10, 10, 10, 0],
+]
+DUR_DEMAND = [0, 1, 1, 1]
+DUR_READY = [0, 0, 0, 0]
+DUR_DUE = [100_000, 100_000, 100_000, 100_000]
+DUR_SERVICE = [0, 5, 5, 5]
+
+
+def check_vrptw_max_route_duration():
+    # One route 0,1,2,3,0 = 40 travel + 15 service = 55; cap 45 forces a split.
+    cap = 45
+    one_route = _route_tws_duration(
+        DUR_MATRIX, DUR_READY, DUR_DUE, DUR_SERVICE, [1, 2, 3])
+    assert one_route > cap, one_route
+    sol = commiv.solve_vrptw(
+        DUR_MATRIX, DUR_DEMAND, 100,
+        ready=DUR_READY, due=DUR_DUE, service=DUR_SERVICE,
+        seed=7, iters=50_000, max_route_duration=cap,
+    )
+    assert {c for r in sol.routes for c in r} == {1, 2, 3}
+    assert len(sol.routes) >= 2, ("cap must force a split", sol.routes)
+    for r in sol.routes:
+        d = _route_tws_duration(DUR_MATRIX, DUR_READY, DUR_DUE, DUR_SERVICE, r)
+        assert d <= cap, ("route over shift cap", r, d, cap)
+
+
 def check_vrptw_fleet_min():
     # fleet_min with a small wall budget still serves every customer.
     sol = commiv.solve_vrptw(
@@ -227,6 +307,10 @@ if __name__ == "__main__":
     print("pdptw money ok")
     check_pdptw_dispatch()
     print("pdptw dispatch ok")
+    check_pdptw_max_route_duration()
+    print("pdptw max_route_duration ok")
+    check_vrptw_max_route_duration()
+    print("vrptw max_route_duration ok")
     check_dispatch_session()
     print("dispatch session ok")
     check_vrptw_fleet_min()

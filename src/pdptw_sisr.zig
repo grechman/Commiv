@@ -82,6 +82,13 @@ pub const PdpSisrParams = struct {
     // schedule (Savelsbergh shifting is inherent). 0 = off (pure
     // distance + veh_penalty, bit-identical to the historic objective).
     time_penalty: u64 = 0,
+    // Max route duration (shift-length cap): reject any insertion / route
+    // mutation whose resulting depot->...->depot Tws duration (travel +
+    // service + unavoidable waiting) exceeds this cap. 0 = off (no cap,
+    // byte-identical to before this knob existed). Independent of
+    // time_penalty: the cap is a hard feasibility bound, the penalty a soft
+    // cost term; either being nonzero turns on route-duration maintenance.
+    max_route_dur: u64 = 0,
     // Intra-search parallelism: split one pair's candidate-route insertion
     // evaluation (the recreate hot loop) across a persistent thread pool,
     // deterministic order-equivalent reduction. 0/1 = serial, bit-identical
@@ -174,6 +181,7 @@ const S = struct {
     cost: u64 = 0, // total dist + veh_penalty * nonempty + time_penalty * total dur
     veh_penalty: u64,
     time_penalty: u64,
+    max_route_dur: u64, // shift-length cap; 0 = off (see PdpSisrParams.max_route_dur)
     gran: []const usize,
     gk: usize,
     loc_route: []usize, // node -> route index (NO_ROUTE when removed)
@@ -200,13 +208,14 @@ const S = struct {
     // Granular pruning is safe there (see the gran gate in evalPairInsert).
     iter_start_complete: bool = false,
 
-    fn init(allocator: std.mem.Allocator, inst: pdp.PdpInstance, veh_penalty: u64, time_penalty: u64, gran: []const usize, gk: usize) !S {
+    fn init(allocator: std.mem.Allocator, inst: pdp.PdpInstance, veh_penalty: u64, time_penalty: u64, max_route_dur: u64, gran: []const usize, gk: usize) !S {
         const dim = inst.dim();
         const s = S{
             .allocator = allocator,
             .inst = inst,
             .veh_penalty = veh_penalty,
             .time_penalty = time_penalty,
+            .max_route_dur = max_route_dur,
             .gran = gran,
             .gk = gk,
             .loc_route = try allocator.alloc(usize, dim),
@@ -291,7 +300,7 @@ const S = struct {
         r.items.clearRetainingCapacity();
         try r.items.appendSlice(s.allocator, nodes);
         r.dist = arcSum(s.inst, nodes);
-        r.dur = if (s.time_penalty > 0) routeDuration(s.inst, nodes) else 0;
+        r.dur = if (s.time_penalty > 0 or s.max_route_dur > 0) routeDuration(s.inst, nodes) else 0;
         r.dirty = true;
         for (nodes, 0..) |c, p| {
             s.loc_route[c] = ri;
@@ -508,6 +517,10 @@ const S = struct {
                     if (f2.tw != 0) break :blk;
                     const f_l = pdp.Lseg.merge(pdp.Lseg.merge(m_l, q_l), r.suf_l.items[b]);
                     if (!(f_l.lo >= 0 and f_l.hi <= inst.capacity)) break :blk;
+                    // Shift-length cap: reject if the resulting route duration
+                    // exceeds it. Duration is not monotone in b, so this only
+                    // skips THIS (a,b) candidate (break :blk), never the loop.
+                    if (s.max_route_dur > 0 and f2.dur > @as(i64, @intCast(s.max_route_dur))) break :blk;
                     const new_dist = m_d + inst.d(last, q) + inst.d(q, nxt) + r.tail_d.items[b];
                     var delta = @as(i64, @intCast(new_dist)) - @as(i64, @intCast(r.dist));
                     if (s.time_penalty > 0)
@@ -954,10 +967,15 @@ const S = struct {
                 }
             }
 
-            const may_open = params.max_vehicles == 0 or s.nonempty < params.max_vehicles;
+            const sdur: u64 = if (s.time_penalty > 0 or s.max_route_dur > 0) routeDuration(s.inst, &[_]usize{ p, q }) else 0;
+            // Opening a fresh [p,q] route requires it to fit the shift cap too;
+            // fold that into may_open so an over-cap singleton is never created
+            // (the pair falls through to squeeze / stays banked instead).
+            const may_open = (params.max_vehicles == 0 or s.nonempty < params.max_vehicles) and
+                (s.max_route_dur == 0 or sdur <= s.max_route_dur);
             var singleton: i64 = @intCast(s.inst.d(0, p) + s.inst.d(p, q) + s.inst.d(q, 0) + s.veh_penalty);
             if (s.time_penalty > 0)
-                singleton += @intCast(s.time_penalty * routeDuration(s.inst, &[_]usize{ p, q }));
+                singleton += @intCast(s.time_penalty * sdur);
             if (best_ri == NO_ROUTE and !may_open) {
                 if (params.eject and try s.squeezeInsert(p, q, params)) {
                     s.n_unassigned -= 1;
@@ -977,6 +995,35 @@ const S = struct {
             s.n_unassigned -= 1;
         }
         s.removed.clearRetainingCapacity();
+    }
+
+    /// True unless a shift cap is active and some nonempty route exceeds it.
+    /// r.dur is maintained (install) whenever max_route_dur > 0, so this is an
+    /// O(routes) read. Off path (cap == 0) returns true immediately — the seed
+    /// construction can hand us an over-cap route that no insertion site would,
+    /// so best-capture is gated on this to keep the returned plan cap-clean.
+    fn withinDurCap(s: *const S) bool {
+        if (s.max_route_dur == 0) return true;
+        for (s.routes.items) |r| {
+            if (r.items.items.len != 0 and r.dur > s.max_route_dur) return false;
+        }
+        return true;
+    }
+
+    /// Number of nonempty routes exceeding the shift cap. 0 when the cap is off.
+    /// Folded into the acceptance objective (CAP_PEN weight) so the search is
+    /// driven OUT of over-cap states the way UNASSIGNED_PEN drives it out of an
+    /// incomplete bank. Without this, the seed's over-cap giant route can be a
+    /// cheaper (by distance) incumbent than the only cap-feasible layout, so the
+    /// threshold-accept rolls back every feasible-but-costlier split and best is
+    /// never captured — a genuinely feasible instance reported infeasible.
+    fn overCapCount(s: *const S) u64 {
+        if (s.max_route_dur == 0) return 0;
+        var n: u64 = 0;
+        for (s.routes.items) |r| {
+            if (r.items.items.len != 0 and r.dur > s.max_route_dur) n += 1;
+        }
+        return n;
     }
 
     fn toResult(s: *S, allocator: std.mem.Allocator) !pdp.PdpResult {
@@ -1271,6 +1318,7 @@ fn evalPairInsertPar(s: *const S, ri: usize, p: usize, q: usize, params: PdpSisr
                 if (f2.tw != 0) break :blk;
                 const f_l = pdp.Lseg.merge(pdp.Lseg.merge(m_l, q_l), r.suf_l.items[b]);
                 if (!(f_l.lo >= 0 and f_l.hi <= inst.capacity)) break :blk;
+                if (s.max_route_dur > 0 and f2.dur > @as(i64, @intCast(s.max_route_dur))) break :blk;
                 const new_dist = m_d + inst.d(last, q) + inst.d(q, nxt) + r.tail_d.items[b];
                 var delta = @as(i64, @intCast(new_dist)) - @as(i64, @intCast(r.dist));
                 if (s.time_penalty > 0)
@@ -1341,10 +1389,12 @@ fn recreatePar(s: *S, params: PdpSisrParams, rng: std.Random, pool: *EvalPool, i
             }
         }
 
-        const may_open = params.max_vehicles == 0 or s.nonempty < params.max_vehicles;
+        const sdur: u64 = if (s.time_penalty > 0 or s.max_route_dur > 0) routeDuration(s.inst, &[_]usize{ p, q }) else 0;
+        const may_open = (params.max_vehicles == 0 or s.nonempty < params.max_vehicles) and
+            (s.max_route_dur == 0 or sdur <= s.max_route_dur);
         var singleton: i64 = @intCast(s.inst.d(0, p) + s.inst.d(p, q) + s.inst.d(q, 0) + s.veh_penalty);
         if (s.time_penalty > 0)
-            singleton += @intCast(s.time_penalty * routeDuration(s.inst, &[_]usize{ p, q }));
+            singleton += @intCast(s.time_penalty * sdur);
         if (best_ri == NO_ROUTE and !may_open) {
             if (params.eject and try s.squeezeInsert(p, q, params)) {
                 s.n_unassigned -= 1;
@@ -1461,7 +1511,7 @@ fn solvePdptwSisrFromLocked(allocator: std.mem.Allocator, inst: pdp.PdpInstance,
     const gran = try buildNeighbors(allocator, inst, gk, params.nbr_key);
     defer allocator.free(gran);
 
-    var s = try S.init(allocator, inst, params.veh_penalty, params.time_penalty, gran, gk);
+    var s = try S.init(allocator, inst, params.veh_penalty, params.time_penalty, params.max_route_dur, gran, gk);
     defer s.deinit();
 
     // Intra-search eval pool: eval_threads <= 1 keeps the untouched serial
@@ -1506,7 +1556,7 @@ fn solvePdptwSisrFromLocked(allocator: std.mem.Allocator, inst: pdp.PdpInstance,
         s.removed.clearRetainingCapacity(); // bank is re-derived each ruin
     }
 
-    var best: ?pdp.PdpResult = if (s.n_unassigned == 0) try s.toResult(allocator) else null;
+    var best: ?pdp.PdpResult = if (s.n_unassigned == 0 and s.withinDurCap()) try s.toResult(allocator) else null;
     errdefer if (best) |*b| b.deinit();
     var best_cost = s.cost;
 
@@ -1515,6 +1565,10 @@ fn solvePdptwSisrFromLocked(allocator: std.mem.Allocator, inst: pdp.PdpInstance,
 
     // Request-bank penalty: dominates veh_penalty, which dominates distance.
     const UNASSIGNED_PEN: u64 = 1_000_000_000;
+    // Over-cap penalty: same magnitude, drives the search out of shift-cap
+    // violations. Always 0 when max_route_dur == 0 (overCapCount short-circuits),
+    // so the uncapped acceptance objective is bit-identical to before.
+    const CAP_PEN: u64 = 1_000_000_000;
     const seed_distance = s.cost - s.veh_penalty * s.nonempty;
     const unit = @as(f64, @floatFromInt(seed_distance)) / @as(f64, @floatFromInt(n_nodes));
     const t0 = @max(1e-9, params.t0_factor * unit);
@@ -1530,6 +1584,7 @@ fn solvePdptwSisrFromLocked(allocator: std.mem.Allocator, inst: pdp.PdpInstance,
         const saved_cost = s.cost;
         const saved_nonempty = s.nonempty;
         const saved_unassigned = s.n_unassigned;
+        const saved_overcap = s.overCapCount();
         s.beginIter();
         s.iter_start_complete = s.n_unassigned == 0;
         try s.ruin(params, rng);
@@ -1538,11 +1593,11 @@ fn solvePdptwSisrFromLocked(allocator: std.mem.Allocator, inst: pdp.PdpInstance,
         } else {
             try s.recreate(params, rng);
         }
-        const eff = s.cost + UNASSIGNED_PEN * @as(u64, @intCast(s.n_unassigned));
-        const saved_eff = saved_cost + UNASSIGNED_PEN * @as(u64, @intCast(saved_unassigned));
+        const eff = s.cost + UNASSIGNED_PEN * @as(u64, @intCast(s.n_unassigned)) + CAP_PEN * s.overCapCount();
+        const saved_eff = saved_cost + UNASSIGNED_PEN * @as(u64, @intCast(saved_unassigned)) + CAP_PEN * saved_overcap;
         const dt = @as(i64, @intCast(eff)) - @as(i64, @intCast(saved_eff));
         if (@as(f64, @floatFromInt(dt)) < temp) {
-            if (s.n_unassigned == 0 and (best == null or s.cost < best_cost)) {
+            if (s.n_unassigned == 0 and s.withinDurCap() and (best == null or s.cost < best_cost)) {
                 best_cost = s.cost;
                 if (best) |*b| b.deinit();
                 best = try s.toResult(allocator);
@@ -1554,7 +1609,7 @@ fn solvePdptwSisrFromLocked(allocator: std.mem.Allocator, inst: pdp.PdpInstance,
         temp *= cf;
         if (params.swap_kick > 0 and it % params.swap_kick == params.swap_kick - 1) {
             try s.pairExchangeKick(params, rng);
-            if (s.n_unassigned == 0 and s.cost < best_cost and best != null) {
+            if (s.n_unassigned == 0 and s.withinDurCap() and s.cost < best_cost and best != null) {
                 best_cost = s.cost;
                 best.?.deinit();
                 best = try s.toResult(allocator);
@@ -2274,7 +2329,7 @@ test "PDPTW SISR eject_k: constructed 2-eject unlocks what single eject cannot" 
 
     const gran = try buildNeighbors(allocator, inst, 6, .sum);
     defer allocator.free(gran);
-    var s = try S.init(allocator, inst, 10_000_000, 0, gran, 6);
+    var s = try S.init(allocator, inst, 10_000_000, 0, 0, gran, 6);
     defer s.deinit();
     const ri = try s.addSlot();
     try s.install(ri, &[_]usize{ 1, 3, 5, 2, 4, 6 });
