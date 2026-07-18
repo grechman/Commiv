@@ -123,6 +123,79 @@ pub fn validate(inst: PdpInstance, routes: []const []const usize) ?u64 {
     return total;
 }
 
+/// validate() for a heterogeneous fleet: identical checks, but route r's
+/// capacity bound is caps[r] (per-route vehicle-type capacity) instead of the
+/// uniform inst.capacity. caps.len must equal routes.len. The existing
+/// validate() is untouched — benches and uniform-fleet callers keep using it.
+pub fn validateTyped(inst: PdpInstance, routes: []const []const usize, caps: []const i64) ?u64 {
+    if (caps.len != routes.len) return null;
+    var relaxed = inst;
+    var maxcap: i64 = 0;
+    for (caps) |c| maxcap = @max(maxcap, c);
+    relaxed.capacity = maxcap;
+    const total = validate(relaxed, routes) orelse return null;
+    for (routes, caps) |r, cap| {
+        var load: i64 = 0;
+        for (r) |c| {
+            load += inst.demand_signed[c];
+            if (load < 0 or load > cap) return null;
+        }
+    }
+    return total;
+}
+
+/// validate() plus the driver-break contract: every route whose depart-at-0
+/// schedule finishes after `earliest` must admit ONE break of `dur` time
+/// units starting within [earliest, latest] at SOME inter-stop gap (depot
+/// departure and pre-return included) with every window still met. This
+/// oracle brute-forces every gap — deliberately NOT the engine's shortcut —
+/// so the two can disagree only if one of them is wrong. Returns the total
+/// directed distance or null on any violation.
+pub fn validateWithBreak(inst: PdpInstance, routes: []const []const usize, brk_dur: u32, brk_earliest: u32, brk_latest: u32) ?u64 {
+    if (brk_earliest > brk_latest) return null;
+    // A with-break-feasible schedule is also feasible without it (dropping
+    // the break only moves arrivals earlier), so the uniform checks apply.
+    const total = validate(inst, routes) orelse return null;
+    for (routes) |r| {
+        if (r.len == 0) continue;
+        // No-break completion: ends before the window opens = no break owed.
+        var t: u64 = 0;
+        var prev: usize = 0;
+        for (r) |c| {
+            t = @max(t + inst.d(prev, c), @as(u64, inst.ready[c])) + inst.service[c];
+            prev = c;
+        }
+        if (t + inst.d(prev, 0) <= brk_earliest) continue;
+
+        var any = false;
+        gaps: for (0..r.len + 1) |g| {
+            t = 0;
+            prev = 0;
+            for (r, 0..) |c, i| {
+                if (i == g) {
+                    const bs = @max(t, @as(u64, brk_earliest));
+                    if (bs > brk_latest) continue :gaps;
+                    t = bs + brk_dur;
+                }
+                const start = @max(t + inst.d(prev, c), @as(u64, inst.ready[c]));
+                if (start > inst.due[c]) continue :gaps;
+                t = start + inst.service[c];
+                prev = c;
+            }
+            if (g == r.len) {
+                const bs = @max(t, @as(u64, brk_earliest));
+                if (bs > brk_latest) continue :gaps;
+                t = bs + brk_dur;
+            }
+            if (t + inst.d(prev, 0) > inst.due[0]) continue :gaps;
+            any = true;
+            break;
+        }
+        if (!any) return null;
+    }
+    return total;
+}
+
 /// Load-segment algebra: O(1)-concat capacity primitive. `lo`/`hi` are the
 /// min/max prefix sums over the segment, including the empty prefix (0).
 pub const Lseg = struct {
@@ -923,10 +996,15 @@ pub const PdpResult = struct {
     routes: [][]usize,
     total_cost: u64,
     vehicles: usize,
+    // Per-route vehicle-type index (heterogeneous fleet). null for uniform-fleet
+    // solves; when set, types.len == routes.len and types[r] is the index into
+    // the caller's veh_types of the vehicle assigned to route r.
+    types: ?[]usize = null,
 
     pub fn deinit(self: *PdpResult) void {
         for (self.routes) |r| self.allocator.free(r);
         self.allocator.free(self.routes);
+        if (self.types) |t| self.allocator.free(t);
         self.* = undefined;
     }
 };

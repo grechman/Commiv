@@ -54,6 +54,15 @@ pub const COMMIV_ERR_INTERNAL: c_int = -4;
 ///   max_route_duration  Shift-length cap (VRPTW, PDPTW): no route may exceed
 ///                   this depot->..->depot duration (travel + service +
 ///                   waiting). 0 = uncapped. Ignored by CVRP.
+///   break_duration / break_earliest / break_latest  Driver break (PDPTW
+///                   ONLY, v1): break_duration > 0 requires every route whose
+///                   depart-at-0 schedule finishes after break_earliest to
+///                   contain ONE break of break_duration time units starting
+///                   within [break_earliest, break_latest]. The break absorbs
+///                   waiting first and counts into route duration (and thus
+///                   the money objective). All-zero = no break. Unsupported
+///                   with fleet_min / max_vehicles (INVALID_ARGUMENT);
+///                   ignored by CVRP and VRPTW.
 pub const CommivOptions = extern struct {
     seed: u64 = 0,
     sisr_iters: u64 = 0,
@@ -67,6 +76,10 @@ pub const CommivOptions = extern struct {
     max_vehicles: u64 = 0, // hard route cap; 0 = uncapped
     time_penalty: u64 = 0, // PDPTW money objective; ignored by CVRP/VRPTW
     max_route_duration: u64 = 0, // shift-length cap (VRPTW/PDPTW); 0 = uncapped
+    break_duration: u32 = 0, // driver break length (PDPTW); 0 = no break
+    break_earliest: u32 = 0, // break must START within [earliest, latest]
+    break_latest: u32 = 0,
+    reserved: u32 = 0, // keeps the struct 8-aligned at 104 bytes
 };
 
 /// Opaque to C; accessed through commiv_routes_* only. Routes are flattened:
@@ -75,6 +88,9 @@ pub const CommivRoutes = struct {
     total_cost: u64,
     offsets: []usize, // len = route count + 1
     nodes: []u32,
+    // Per-route vehicle-type index (commiv_solve_pdptw_typed only); empty for
+    // uniform-fleet solves. Read through commiv_routes_type.
+    types: []u32 = &.{},
 };
 
 fn resolveOptions(opt: ?*const CommivOptions) CommivOptions {
@@ -93,6 +109,10 @@ fn mapError(err: anyerror) c_int {
 }
 
 fn makeRoutes(routes: []const []const usize, total_cost: u64) !*CommivRoutes {
+    return makeRoutesTyped(routes, null, total_cost);
+}
+
+fn makeRoutesTyped(routes: []const []const usize, route_types: ?[]const usize, total_cost: u64) !*CommivRoutes {
     var total_nodes: usize = 0;
     for (routes) |r| total_nodes += r.len;
 
@@ -102,6 +122,12 @@ fn makeRoutes(routes: []const []const usize, total_cost: u64) !*CommivRoutes {
     errdefer gpa.free(offsets);
     const nodes = try gpa.alloc(u32, total_nodes);
     errdefer gpa.free(nodes);
+    var types: []u32 = &.{};
+    if (route_types) |rt| {
+        types = try gpa.alloc(u32, rt.len);
+        for (rt, 0..) |t, i| types[i] = @intCast(t);
+    }
+    errdefer if (types.len != 0) gpa.free(types);
 
     var at: usize = 0;
     for (routes, 0..) |r, i| {
@@ -112,7 +138,7 @@ fn makeRoutes(routes: []const []const usize, total_cost: u64) !*CommivRoutes {
         }
     }
     offsets[routes.len] = at;
-    h.* = .{ .total_cost = total_cost, .offsets = offsets, .nodes = nodes };
+    h.* = .{ .total_cost = total_cost, .offsets = offsets, .nodes = nodes, .types = types };
     return h;
 }
 
@@ -363,6 +389,11 @@ export fn commiv_solve_pdptw(
     if (o.sisr_iters != 0) params.iters = @intCast(o.sisr_iters);
     if (o.wall_ms != 0) params.time_ms = o.wall_ms;
     if (o.max_vehicles != 0) params.max_vehicles = @intCast(o.max_vehicles);
+    if (o.break_duration != 0) {
+        // v1: the fleet-min / pinned drivers don't understand breaks.
+        if (o.fleet_min != 0 or o.max_vehicles != 0) return COMMIV_ERR_INVALID_ARGUMENT;
+        params.brk = .{ .dur = o.break_duration, .earliest = o.break_earliest, .latest = o.break_latest };
+    }
     // The wall-driven drivers (fleet-min, pinned) need a budget; default 10s.
     const budget: u64 = if (o.wall_ms != 0) o.wall_ms else 10_000;
 
@@ -378,6 +409,121 @@ export fn commiv_solve_pdptw(
     defer result.deinit();
 
     out_p.* = makeRoutes(result.routes, result.total_cost) catch |err| return mapError(err);
+    return COMMIV_OK;
+}
+
+/// Heterogeneous-fleet PDPTW: commiv_solve_pdptw with a vehicle-type table
+/// instead of one uniform capacity. veh_type_capacity / veh_type_fixed_cost /
+/// veh_type_count are parallel arrays of n_types entries (1..8): each route in
+/// the answer is served by exactly one type — its capacity bounds the route
+/// load, its fixed cost replaces options->veh_penalty in the objective, and at
+/// most `count` routes of a type run simultaneously (count 0 = unlimited).
+/// Read the assignment back with commiv_routes_type. options->fleet_min and
+/// options->max_vehicles are not supported with vehicle types (use per-type
+/// counts to bound the fleet): COMMIV_ERR_INVALID_ARGUMENT.
+export fn commiv_solve_pdptw_typed(
+    matrix: ?[*]const u32,
+    n_pairs: usize,
+    pickup_node: ?[*]const u32,
+    delivery_node: ?[*]const u32,
+    demand: ?[*]const u32,
+    ready: ?[*]const u32,
+    due: ?[*]const u32,
+    service: ?[*]const u32,
+    veh_type_capacity: ?[*]const u32,
+    veh_type_fixed_cost: ?[*]const u64,
+    veh_type_count: ?[*]const u32,
+    n_types: usize,
+    options: ?*const CommivOptions,
+    out: ?**CommivRoutes,
+) c_int {
+    const m = matrix orelse return COMMIV_ERR_INVALID_ARGUMENT;
+    const pick = pickup_node orelse return COMMIV_ERR_INVALID_ARGUMENT;
+    const drop = delivery_node orelse return COMMIV_ERR_INVALID_ARGUMENT;
+    const dem = demand orelse return COMMIV_ERR_INVALID_ARGUMENT;
+    const rdy = ready orelse return COMMIV_ERR_INVALID_ARGUMENT;
+    const du = due orelse return COMMIV_ERR_INVALID_ARGUMENT;
+    const srv = service orelse return COMMIV_ERR_INVALID_ARGUMENT;
+    const tcap = veh_type_capacity orelse return COMMIV_ERR_INVALID_ARGUMENT;
+    const tfix = veh_type_fixed_cost orelse return COMMIV_ERR_INVALID_ARGUMENT;
+    const tcnt = veh_type_count orelse return COMMIV_ERR_INVALID_ARGUMENT;
+    const out_p = out orelse return COMMIV_ERR_INVALID_ARGUMENT;
+
+    if (n_types == 0 or n_types > pdptw_sisr.MAX_VEH_TYPES) return COMMIV_ERR_INVALID_ARGUMENT;
+    var vt: [pdptw_sisr.MAX_VEH_TYPES]pdptw_sisr.VehType = undefined;
+    var maxcap: u32 = 0;
+    for (0..n_types) |i| {
+        if (tcap[i] == 0) return COMMIV_ERR_INVALID_ARGUMENT;
+        vt[i] = .{ .capacity = @intCast(tcap[i]), .fixed_cost = tfix[i], .count = tcnt[i] };
+        maxcap = @max(maxcap, tcap[i]);
+    }
+
+    const o = resolveOptions(options);
+    // Fleet-min / pinned drivers don't understand the type ledger (v1);
+    // per-type counts are the supported way to bound a heterogeneous fleet.
+    if (o.fleet_min != 0 or o.max_vehicles != 0) return COMMIV_ERR_INVALID_ARGUMENT;
+
+    if (n_pairs == 0) return COMMIV_ERR_INVALID_ARGUMENT;
+    if (n_pairs >= (std.math.maxInt(u32) - 1) / 2) return COMMIV_ERR_INVALID_ARGUMENT;
+    const dim = 2 * n_pairs + 1;
+    _ = std.math.mul(usize, dim, dim) catch return COMMIV_ERR_INVALID_ARGUMENT;
+
+    const seen = gpa.alloc(bool, dim) catch return COMMIV_ERR_OUT_OF_MEMORY;
+    defer gpa.free(seen);
+    // maxcap plays the uniform capacity's role in the shape checks (a demand
+    // no type can carry fast-fails as INFEASIBLE, same as the uniform door).
+    const rc = checkPdpArgs(n_pairs, dim, pick, drop, dem, maxcap, rdy, srv, seen);
+    if (rc != COMMIV_OK) return rc;
+
+    const pair_of = gpa.alloc(usize, dim) catch return COMMIV_ERR_OUT_OF_MEMORY;
+    defer gpa.free(pair_of);
+    const is_pickup = gpa.alloc(bool, dim) catch return COMMIV_ERR_OUT_OF_MEMORY;
+    defer gpa.free(is_pickup);
+    const demand_signed = gpa.alloc(i64, dim) catch return COMMIV_ERR_OUT_OF_MEMORY;
+    defer gpa.free(demand_signed);
+
+    pair_of[0] = 0;
+    is_pickup[0] = false;
+    demand_signed[0] = 0;
+    for (0..n_pairs) |i| {
+        const p = pick[i];
+        const q = drop[i];
+        pair_of[p] = q;
+        pair_of[q] = p;
+        is_pickup[p] = true;
+        is_pickup[q] = false;
+        demand_signed[p] = @as(i64, dem[i]);
+        demand_signed[q] = -@as(i64, dem[i]);
+    }
+
+    const inst = pdptw.PdpInstance{
+        .n_pairs = n_pairs,
+        .matrix = m[0 .. dim * dim],
+        .capacity = @intCast(maxcap),
+        .pair_of = pair_of,
+        .is_pickup = is_pickup,
+        .demand_signed = demand_signed,
+        .ready = rdy[0..dim],
+        .due = du[0..dim],
+        .service = srv[0..dim],
+    };
+
+    var params: pdptw_sisr.PdpSisrParams = .{
+        .seed = o.seed,
+        .veh_penalty = o.veh_penalty,
+        .time_penalty = o.time_penalty,
+        .max_route_dur = o.max_route_duration,
+        .veh_types = vt[0..n_types],
+    };
+    if (o.sisr_iters != 0) params.iters = @intCast(o.sisr_iters);
+    if (o.wall_ms != 0) params.time_ms = o.wall_ms;
+    if (o.break_duration != 0)
+        params.brk = .{ .dur = o.break_duration, .earliest = o.break_earliest, .latest = o.break_latest };
+
+    var result = pdptw_sisr.solvePdptwSisr(gpa, inst, params) catch |err| return mapError(err);
+    defer result.deinit();
+
+    out_p.* = makeRoutesTyped(result.routes, result.types, result.total_cost) catch |err| return mapError(err);
     return COMMIV_OK;
 }
 
@@ -543,6 +689,8 @@ export fn commiv_solve_pdptw_dispatch(
     };
     if (o.sisr_iters != 0) params.iters = @intCast(o.sisr_iters);
     if (o.wall_ms != 0) params.time_ms = o.wall_ms;
+    if (o.break_duration != 0)
+        params.brk = .{ .dur = o.break_duration, .earliest = o.break_earliest, .latest = o.break_latest };
 
     // Marshal the current plan into the usize node slices the engine wants:
     // cur_nodes is u32 but the engine indexes routes with usize, so copy into
@@ -631,8 +779,18 @@ export fn commiv_routes_get(r: ?*const CommivRoutes, route: usize) ?[*]const u32
     return h.nodes[h.offsets[route]..].ptr;
 }
 
+/// Vehicle-type index of `route` (index into the veh_type_* arrays passed to
+/// commiv_solve_pdptw_typed). Returns COMMIV_NO_TYPE (UINT32_MAX) for solves
+/// without vehicle types or an out-of-range route index.
+export fn commiv_routes_type(r: ?*const CommivRoutes, route: usize) u32 {
+    const h = r orelse return std.math.maxInt(u32);
+    if (route >= h.types.len) return std.math.maxInt(u32);
+    return h.types[route];
+}
+
 export fn commiv_routes_free(r: ?*CommivRoutes) void {
     const h = r orelse return;
+    if (h.types.len != 0) gpa.free(h.types);
     gpa.free(h.nodes);
     gpa.free(h.offsets);
     gpa.destroy(h);
@@ -1019,4 +1177,63 @@ test "capi pdptw C path is bit-identical to the internal engine" {
         const nodes = commiv_routes_get(routes, i).?;
         for (r, nodes[0..len]) |a, b| try testing.expectEqual(a, @as(usize, b));
     }
+}
+
+test "capi pdptw typed: per-type cap enforced, types readable" {
+    var routes: *CommivRoutes = undefined;
+    var opts: CommivOptions = .{ .seed = 3, .sisr_iters = 2000 };
+    // One type of capacity 5 (< the uniform 10): loads 4 and 5 can share a
+    // route only interleaved (peak 5), never nested (peak 9).
+    const tcap = [_]u32{5};
+    const tfix = [_]u64{10};
+    const tcnt = [_]u32{0};
+    const rc = commiv_solve_pdptw_typed(&pdp_matrix, 2, &pdp_pickup, &pdp_delivery, &pdp_demand, &pdp_ready, &pdp_due, &pdp_service, &tcap, &tfix, &tcnt, 1, &opts, &routes);
+    try testing.expectEqual(COMMIV_OK, rc);
+    defer commiv_routes_free(routes);
+    const k = commiv_routes_count(routes);
+    try testing.expect(k >= 1);
+    // Independent recompute: every prefix load within the TYPE cap (5), all
+    // 4 nodes served, pickup precedes delivery.
+    var pair_of: [5]usize = undefined;
+    var is_pickup: [5]bool = undefined;
+    var demand_signed: [5]i64 = undefined;
+    _ = buildPdpTestInstance(&pair_of, &is_pickup, &demand_signed);
+    var served: usize = 0;
+    for (0..k) |i| {
+        try testing.expectEqual(@as(u32, 0), commiv_routes_type(routes, i));
+        const len = commiv_routes_len(routes, i);
+        const nodes = commiv_routes_get(routes, i).?;
+        var load: i64 = 0;
+        for (nodes[0..len]) |c| {
+            load += demand_signed[c];
+            try testing.expect(load >= 0 and load <= 5);
+            served += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 4), served);
+    try testing.expectEqual(std.math.maxInt(u32), commiv_routes_type(routes, k));
+}
+
+test "capi pdptw typed: rejects fleet drivers and impossible demand" {
+    var routes: *CommivRoutes = undefined;
+    const tcap = [_]u32{5};
+    const tfix = [_]u64{10};
+    const tcnt = [_]u32{0};
+    var opts: CommivOptions = .{ .fleet_min = 1 };
+    try testing.expectEqual(
+        COMMIV_ERR_INVALID_ARGUMENT,
+        commiv_solve_pdptw_typed(&pdp_matrix, 2, &pdp_pickup, &pdp_delivery, &pdp_demand, &pdp_ready, &pdp_due, &pdp_service, &tcap, &tfix, &tcnt, 1, &opts, &routes),
+    );
+    // No type carries the 5-demand pair.
+    const small = [_]u32{4};
+    try testing.expectEqual(
+        COMMIV_ERR_INFEASIBLE,
+        commiv_solve_pdptw_typed(&pdp_matrix, 2, &pdp_pickup, &pdp_delivery, &pdp_demand, &pdp_ready, &pdp_due, &pdp_service, &small, &tfix, &tcnt, 1, null, &routes),
+    );
+    // Untyped solves answer COMMIV_NO_TYPE through the accessor.
+    var opts2: CommivOptions = .{ .seed = 3 };
+    var plain: *CommivRoutes = undefined;
+    try testing.expectEqual(COMMIV_OK, commiv_solve_pdptw(&pdp_matrix, 2, &pdp_pickup, &pdp_delivery, &pdp_demand, 10, &pdp_ready, &pdp_due, &pdp_service, &opts2, &plain));
+    defer commiv_routes_free(plain);
+    try testing.expectEqual(std.math.maxInt(u32), commiv_routes_type(plain, 0));
 }

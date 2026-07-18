@@ -85,4 +85,14 @@ pins the fleet to exactly `k` vehicles (`threads` is ignored for PDPTW). An
 unsatisfiable instance raises `commiv.InfeasibleError` instead of returning a
 quietly wrong answer.
 
+Real-fleet constraints on `solve_pdptw` (and the dispatch pair):
+`max_route_duration=14400` caps every route at a 4-hour shift.
+`vehicle_types=[(24, 15000, 6), (48, 30000, 4)]` runs a mixed fleet — each
+tuple is `(capacity, fixed_cost, count)`, count 0 = unlimited, and the result's
+`.types` says which type serves each route (incompatible with
+`fleet_min`/`max_vehicles`; bound the fleet with counts instead).
+`break_=(1800, 10800, 18000)` gives every route whose schedule reaches
+t=10800 one 30-minute break starting between 3h and 5h into the shift; the
+break absorbs waiting first and is priced into the money objective.
+
 Run the smoke test: `python bindings/python/test_smoke.py`

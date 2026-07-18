@@ -370,10 +370,22 @@ is_pickup, demand_signed, ready, due, service }`; returns `PdpResult`
   around the locks. Exposed through all three doors as `solve_pdptw_dispatch` /
   `commiv_solve_pdptw_dispatch` / `POST /solve/pdptw/dispatch`; see
   [`docs/rest.md`](docs/rest.md) and [`bindings/python/`](bindings/python/).
+- Heterogeneous fleet (v1): `PdpSisrParams.veh_types` — up to 8 vehicle types
+  `{capacity, fixed_cost, count}` (count 0 = unlimited); every route is served by one
+  type, its capacity bounds the route load, its fixed cost replaces `veh_penalty`.
+  Doors: `commiv_solve_pdptw_typed` + `commiv_routes_type` (C),
+  `solve_pdptw(vehicle_types=[(cap, fixed, count), ...])` -> `.types` (Python).
+- Driver break (v1): `PdpSisrParams.brk = {dur, earliest, latest}` — one break per
+  route, required of every route whose depart-at-0 schedule finishes after `earliest`;
+  starts within `[earliest, latest]`, absorbs waiting first, counts into route duration
+  (so the money objective prices it). Doors: `break_duration/earliest/latest` in
+  `commiv_options` (C, PDPTW entries), `break_=(dur, earliest, latest)` (Python).
 - `solvePdptw(allocator, inst, PdpParams)` — correctness baseline (pair insertion +
   pair relocate, brute-force-verified); use the SISR engine for real work.
 - `validatePdptw(inst, routes) ?u64` — independent pairing + precedence + capacity-prefix +
   time-window feasibility check; returns the recomputed cost, or null if infeasible.
+  `validatePdptwTyped` adds per-route type capacities; `validatePdptwWithBreak`
+  brute-forces the break contract.
 
 **Asymmetry analysis**
 - `conservativeness(allocator, matrix, dim) !Conservativeness` runs a Helmholtz-Hodge

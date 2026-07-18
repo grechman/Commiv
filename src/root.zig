@@ -89,6 +89,8 @@ pub const PdpResult = pdptw.PdpResult;
 pub const PdpParams = pdptw.PdpParams;
 pub const solvePdptw = pdptw.solvePdptw;
 pub const validatePdptw = pdptw.validate;
+pub const validatePdptwTyped = pdptw.validateTyped; // per-route vehicle-type capacities
+pub const validatePdptwWithBreak = pdptw.validateWithBreak; // driver-break contract oracle
 pub const solvePdptwSisr = pdptw_sisr.solvePdptwSisr; // flagship SISR engine for PDPTW
 pub const PdpSisrParams = pdptw_sisr.PdpSisrParams;
 

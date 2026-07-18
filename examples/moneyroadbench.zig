@@ -286,6 +286,22 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("MR_THREADS ({d}) and MR_EVAL_THREADS ({d}) both >1: width*depth oversubscribes cores; set one to 1\n", .{ n_threads, eval_threads });
         return error.ThreadKnobConflict;
     }
+    // MR_BREAK="dur,earliest,latest": one driver break per route (seconds).
+    // Unset = no break. Forces the plain driver semantics only through the
+    // engine params; fleetmin+break is engine-legal but capi-rejected, so the
+    // bench mirrors capi and refuses it too.
+    var mr_brk: ?commiv.internal.pdptw_sisr.Break = null;
+    if (env.get("MR_BREAK")) |spec| {
+        var itr = std.mem.splitScalar(u8, spec, ',');
+        const bd = try std.fmt.parseInt(u32, itr.next() orelse return error.BadBreakSpec, 10);
+        const be = try std.fmt.parseInt(u32, itr.next() orelse return error.BadBreakSpec, 10);
+        const bl = try std.fmt.parseInt(u32, itr.next() orelse return error.BadBreakSpec, 10);
+        mr_brk = .{ .dur = bd, .earliest = be, .latest = bl };
+        if (!std.mem.eql(u8, driver, "plain")) {
+            std.debug.print("MR_BREAK requires MR_DRIVER=plain (v1: no fleetmin with breaks)\n", .{});
+            return error.BreakNeedsPlainDriver;
+        }
+    }
     const params = commiv.PdpSisrParams{
         .seed = seed,
         .iters = mr_iters,
@@ -294,6 +310,7 @@ pub fn main(init: std.process.Init) !void {
         .time_penalty = time_pen,
         .max_route_dur = max_dur,
         .eval_threads = eval_threads,
+        .brk = mr_brk,
     };
     const t0 = nanos();
     // A solver-level failure (e.g. NoCompleteSolution on an over-tight instance)
@@ -332,10 +349,23 @@ pub fn main(init: std.process.Init) !void {
     var service_sec: u64 = 0;
     var max_route_sec: u64 = 0;
     for (res.routes) |r| {
-        const rd = commiv.internal.pdptw_sisr.routeDuration(inst, r);
+        // Break regime prices the depart-at-0 schedule incl. the break.
+        const rd = if (mr_brk) |bk|
+            commiv.internal.pdptw_sisr.walkWithBreak(inst, r, bk).dur
+        else
+            commiv.internal.pdptw_sisr.routeDuration(inst, r);
         dur_sec += rd;
         if (rd > max_route_sec) max_route_sec = rd;
         for (r) |c| service_sec += inst.service[c];
+    }
+    // MR_BREAK verification: the independent brute-force oracle must accept
+    // the plan's break placements (see pdptw.validateWithBreak).
+    if (mr_brk) |bk| {
+        if (commiv.validatePdptwWithBreak(inst, rc, bk.dur, bk.earliest, bk.latest) == null) {
+            std.debug.print("instance,n_pairs,vehicles,dist_sec,dur_sec,service_sec,wait_sec,usd_total,ms\n", .{});
+            std.debug.print("{s},FAIL_BREAK\n", .{name});
+            return error.BreakContractViolated;
+        }
     }
     // MR_MAXDUR verification: recompute every route's duration and confirm the
     // solver honored the shift cap (independent of the engine's internal gate).

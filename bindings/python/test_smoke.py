@@ -250,6 +250,106 @@ def check_vrptw_max_route_duration():
         assert d <= cap, ("route over shift cap", r, d, cap)
 
 
+def check_pdptw_vehicle_types():
+    # Single type of capacity 5 (< the uniform 10): loads 4 and 5 can share a
+    # route only interleaved (peak 5), never nested (peak 9) - the recomputed
+    # prefix loads below are the real check.
+    sol = commiv.solve_pdptw(
+        PDP_MATRIX, PDP_PICKUPS, PDP_DELIVERIES, PDP_DEMAND, 10,
+        PDP_READY, PDP_DUE, PDP_SERVICE, seed=5, iters=2000,
+        vehicle_types=[(5, 10, 0)],
+    )
+    _assert_complete_pdptw_plan(sol)
+    assert sol.types is not None and len(sol.types) == len(sol.routes), sol
+    assert all(t == 0 for t in sol.types), sol
+    # Recompute per-route load against the assigned type's capacity.
+    caps = [5]
+    demand_of = {1: 4, 3: -4, 2: 5, 4: -5}
+    for r, t in zip(sol.routes, sol.types):
+        load = 0
+        for c in r:
+            load += demand_of[c]
+            assert 0 <= load <= caps[t], ("load over type cap", r, t, load)
+    # Mixed fleet: a big expensive van and cheap small ones; the big one is
+    # only needed if a route carries both requests (it can't - see above), so
+    # the solver should stick to the cheap type for both routes.
+    sol2 = commiv.solve_pdptw(
+        PDP_MATRIX, PDP_PICKUPS, PDP_DELIVERIES, PDP_DEMAND, 10,
+        PDP_READY, PDP_DUE, PDP_SERVICE, seed=5, iters=2000,
+        vehicle_types=[(5, 10, 0), (10, 100000, 0)],
+    )
+    _assert_complete_pdptw_plan(sol2)
+    assert all(t == 0 for t in sol2.types), sol2
+    # Uniform solves keep types=None.
+    plain = commiv.solve_pdptw(
+        PDP_MATRIX, PDP_PICKUPS, PDP_DELIVERIES, PDP_DEMAND, 10,
+        PDP_READY, PDP_DUE, PDP_SERVICE, seed=5, iters=500,
+    )
+    assert plain.types is None
+    # fleet_min + types is rejected before touching the C ABI.
+    try:
+        commiv.solve_pdptw(
+            PDP_MATRIX, PDP_PICKUPS, PDP_DELIVERIES, PDP_DEMAND, 10,
+            PDP_READY, PDP_DUE, PDP_SERVICE, fleet_min=True,
+            vehicle_types=[(5, 10, 0)],
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("vehicle_types + fleet_min must raise ValueError")
+
+
+def check_pdptw_break():
+    # Break of 20 units starting in [10, 40]. Every route on this instance
+    # finishes after t=10, so every route owes a break; windows are wide open
+    # (no waiting), so the break can't be absorbed and each route's schedule
+    # must lengthen by exactly the break duration.
+    brk = (20, 10, 40)
+    sol = commiv.solve_pdptw(
+        PDP_MATRIX, PDP_PICKUPS, PDP_DELIVERIES, PDP_DEMAND, 10,
+        PDP_READY, PDP_DUE, PDP_SERVICE, seed=5, iters=4000, break_=brk,
+    )
+    _assert_complete_pdptw_plan(sol)
+
+    def nobrk_completion(route):
+        t, prev = 0, 0
+        for c in route:
+            t = max(t + PDP_MATRIX[prev][c], PDP_READY[c]) + PDP_SERVICE[c]
+            prev = c
+        return t + PDP_MATRIX[prev][0]
+
+    def walk_with_break(route, gap):
+        dur, earliest, latest = brk
+        t, prev = 0, 0
+        for i, c in enumerate(route):
+            if i == gap:
+                bs = max(t, earliest)
+                if bs > latest:
+                    return None
+                t = bs + dur
+            t = max(t + PDP_MATRIX[prev][c], PDP_READY[c])
+            if t > PDP_DUE[c]:
+                return None
+            t += PDP_SERVICE[c]
+            prev = c
+        if gap == len(route):
+            bs = max(t, earliest)
+            if bs > latest:
+                return None
+            t = bs + dur
+        t += PDP_MATRIX[prev][0]
+        return t if t <= PDP_DUE[0] else None
+
+    for r in sol.routes:
+        base = nobrk_completion(r)
+        assert base > brk[1], ("route ends before the window, test proves nothing", r)
+        # Independently re-derive: SOME gap placement is feasible, and the
+        # best one costs exactly one break length on this zero-waiting data.
+        completions = [w for g in range(len(r) + 1) if (w := walk_with_break(r, g)) is not None]
+        assert completions, ("no valid break placement", r)
+        assert min(completions) == base + brk[0], (r, min(completions), base)
+
+
 def check_vrptw_fleet_min():
     # fleet_min with a small wall budget still serves every customer.
     sol = commiv.solve_vrptw(
@@ -313,6 +413,10 @@ if __name__ == "__main__":
     print("vrptw max_route_duration ok")
     check_dispatch_session()
     print("dispatch session ok")
+    check_pdptw_vehicle_types()
+    print("pdptw vehicle_types ok")
+    check_pdptw_break()
+    print("pdptw break ok")
     check_vrptw_fleet_min()
     print("vrptw fleet_min ok")
     check_atsp()

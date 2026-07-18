@@ -97,9 +97,50 @@ pub const PdpSisrParams = struct {
     // blink PRNG, so >=2 is thread-count-invariant (2==6==12) but NOT
     // bit-identical to the serial shared-stream trajectory.
     eval_threads: usize = 0,
+    // Heterogeneous fleet (v1): up to 8 vehicle types. Empty = uniform fleet
+    // from inst.capacity + veh_penalty (bit-identical to before this knob
+    // existed). Nonempty: every route is assigned a type when it opens — the
+    // cheapest (by fixed_cost, ties to larger capacity) type with a count
+    // available whose capacity fits the opening load. Capacity checks then use
+    // the route's type capacity, and its fixed_cost replaces veh_penalty in
+    // the objective. count = 0 means unlimited. A route keeps its type until
+    // it empties (no mid-life upgrades in v1). inst.capacity must be the
+    // LARGEST type capacity (the seed construction packs to it); seed routes
+    // that fit no available type start in the request bank instead.
+    // Not supported with the fleet-min / pinned drivers (rejected at capi).
+    veh_types: []const VehType = &.{},
+    // Driver break (v1): one optional break per route, same spec for every
+    // vehicle. null = off (NOT ONE INSTRUCTION of new work on the hot paths —
+    // every break-aware site is guarded at its outermost level). Semantics:
+    // a route whose depart-at-0 schedule finishes after `earliest` must
+    // contain one break of `dur` seconds starting within [earliest, latest];
+    // the break absorbs waiting first and delays every later stop by the
+    // remainder. Break time counts into route duration (the driver is on the
+    // clock), so it interacts with time_penalty naturally. Placement is the
+    // LAST inter-stop gap whose no-break departure is <= latest — provably
+    // feasibility-dominant (an earlier break delays a superset of stops by at
+    // least as much), so one O(route) walk decides feasibility exactly.
+    // Duration bookkeeping under a break uses the depart-at-0 schedule (not
+    // the Tws-optimized departure). Not supported with fleet_min / pinned /
+    // max_vehicles (rejected at capi) or eval_threads >= 2 (InvalidInstance).
+    brk: ?Break = null,
 };
 
 pub const NbrKey = enum { sum, min, out };
+
+pub const Break = struct {
+    dur: u32, // break length, matrix time units
+    earliest: u32, // break must START within [earliest, latest]
+    latest: u32,
+};
+
+pub const VehType = struct {
+    capacity: i64,
+    fixed_cost: u64,
+    count: u32, // max simultaneous routes of this type; 0 = unlimited
+};
+
+pub const MAX_VEH_TYPES = 8;
 
 // Time-window segment (Vidal / PyVRP), same algebra as vrptw.zig's Tws but
 // over PdpInstance. tw == 0 iff the segment is schedulable.
@@ -145,6 +186,57 @@ pub fn routeDuration(inst: pdp.PdpInstance, nodes: []const usize) u64 {
     return @intCast(@max(acc.dur, 0));
 }
 
+const BreakWalk = struct { ok: bool, dur: u64 };
+
+/// Depart-at-0 schedule of depot -> nodes -> depot with the single break
+/// placed greedily (see PdpSisrParams.brk). Returns .ok plus the completion
+/// time (= route duration under a break regime). When the no-break schedule
+/// already violates a window the walk is infeasible (a break only delays);
+/// its no-break completion is still returned as a consistent bookkeeping
+/// value, which snapshot rollback restores exactly.
+pub fn walkWithBreak(inst: pdp.PdpInstance, nodes: []const usize, brk: Break) BreakWalk {
+    if (nodes.len == 0) return .{ .ok = true, .dur = 0 };
+    // Pass 1: no-break schedule. Track TW feasibility, the completion time,
+    // and g_star = the last gap (0..len, len = before depot return) whose
+    // departure time is <= latest.
+    var t: u64 = 0;
+    var prev: usize = 0;
+    var ok = true;
+    var g_star: usize = 0; // gap 0 (before the first stop) departs at t=0
+    for (nodes, 0..) |c, i| {
+        if (t <= brk.latest) g_star = i;
+        const arrive = t + inst.d(prev, c);
+        const start = @max(arrive, @as(u64, inst.ready[c]));
+        if (start > inst.due[c]) ok = false;
+        t = start + inst.service[c];
+        prev = c;
+    }
+    if (t <= brk.latest) g_star = nodes.len;
+    const completion_nobrk = t + inst.d(prev, 0);
+    if (completion_nobrk > inst.due[0]) ok = false;
+    if (!ok) return .{ .ok = false, .dur = completion_nobrk };
+    // Ends before the window opens: no break required.
+    if (completion_nobrk <= brk.earliest) return .{ .ok = true, .dur = completion_nobrk };
+
+    // Pass 2: replay with the break at g_star. Stops before g_star keep the
+    // pass-1 (earliest possible) times; the break start absorbs any gap up to
+    // `earliest`, then everything after shifts by the remainder.
+    t = 0;
+    prev = 0;
+    for (nodes, 0..) |c, i| {
+        if (i == g_star) t = @max(t, @as(u64, brk.earliest)) + brk.dur;
+        const arrive = t + inst.d(prev, c);
+        const start = @max(arrive, @as(u64, inst.ready[c]));
+        if (start > inst.due[c]) return .{ .ok = false, .dur = completion_nobrk };
+        t = start + inst.service[c];
+        prev = c;
+    }
+    if (g_star == nodes.len) t = @max(t, @as(u64, brk.earliest)) + brk.dur;
+    const completion = t + inst.d(prev, 0);
+    if (completion > inst.due[0]) return .{ .ok = false, .dur = completion_nobrk };
+    return .{ .ok = true, .dur = completion };
+}
+
 const NO_ROUTE = std.math.maxInt(usize);
 
 const Route = struct {
@@ -157,6 +249,7 @@ const Route = struct {
     suf_l: std.ArrayList(pdp.Lseg) = .empty,
     pre_d: std.ArrayList(u64) = .empty, // arc sum depot->..->items[i-1]; len items+1
     tail_d: std.ArrayList(u64) = .empty, // arc sum items[i]->..->depot;  len items+1 (tail_d[len]=0)
+    brk_ok: bool = true, // break regime only: walkWithBreak(items).ok as of last install
     dirty: bool = true,
 
     fn deinit(r: *Route, allocator: std.mem.Allocator) void {
@@ -170,7 +263,7 @@ const Route = struct {
     }
 };
 
-const Snap = struct { ri: usize, items: []usize, dist: u64, dur: u64 };
+const Snap = struct { ri: usize, items: []usize, dist: u64, dur: u64, rtype: u8, brk_ok: bool };
 
 const S = struct {
     allocator: std.mem.Allocator,
@@ -182,6 +275,18 @@ const S = struct {
     veh_penalty: u64,
     time_penalty: u64,
     max_route_dur: u64, // shift-length cap; 0 = off (see PdpSisrParams.max_route_dur)
+    // Heterogeneous fleet ledger (empty veh_types = uniform, everything below
+    // inert). rtype[ri] is route ri's type index, meaningful while nonempty
+    // and overwritten at the next opening; type_used counts nonempty routes
+    // per type. Both are restored on rollback (rtype via the route snapshots,
+    // type_used from saved_type_used captured with the iteration's cost).
+    veh_types: []const VehType,
+    rtype: std.ArrayList(u8) = .empty,
+    type_used: [MAX_VEH_TYPES]u32 = @splat(0),
+    saved_type_used: [MAX_VEH_TYPES]u32 = @splat(0),
+    // Driver break regime (null = off, every site below guarded on it).
+    brk: ?Break,
+    brk_scratch: []usize, // preallocated (dim + 2): candidate sequences for break-aware eval
     gran: []const usize,
     gk: usize,
     loc_route: []usize, // node -> route index (NO_ROUTE when removed)
@@ -208,7 +313,7 @@ const S = struct {
     // Granular pruning is safe there (see the gran gate in evalPairInsert).
     iter_start_complete: bool = false,
 
-    fn init(allocator: std.mem.Allocator, inst: pdp.PdpInstance, veh_penalty: u64, time_penalty: u64, max_route_dur: u64, gran: []const usize, gk: usize) !S {
+    fn init(allocator: std.mem.Allocator, inst: pdp.PdpInstance, veh_penalty: u64, time_penalty: u64, max_route_dur: u64, veh_types: []const VehType, brk: ?Break, gran: []const usize, gk: usize) !S {
         const dim = inst.dim();
         const s = S{
             .allocator = allocator,
@@ -216,10 +321,13 @@ const S = struct {
             .veh_penalty = veh_penalty,
             .time_penalty = time_penalty,
             .max_route_dur = max_route_dur,
+            .veh_types = veh_types,
+            .brk = brk,
             .gran = gran,
             .gk = gk,
             .loc_route = try allocator.alloc(usize, dim),
             .loc_pos = try allocator.alloc(usize, dim),
+            .brk_scratch = try allocator.alloc(usize, dim + 2),
             .drop_buf = try allocator.alloc(bool, dim),
             .nbr_mark_p = try allocator.alloc(u64, dim),
             .nbr_mark_q = try allocator.alloc(u64, dim),
@@ -238,6 +346,8 @@ const S = struct {
         for (s.routes.items) |*r| r.deinit(s.allocator);
         s.routes.deinit(s.allocator);
         s.lock.deinit(s.allocator);
+        s.rtype.deinit(s.allocator);
+        s.allocator.free(s.brk_scratch);
         s.allocator.free(s.loc_route);
         s.allocator.free(s.loc_pos);
         s.allocator.free(s.drop_buf);
@@ -265,10 +375,46 @@ const S = struct {
     fn addSlot(s: *S) !usize {
         try s.routes.append(s.allocator, .{});
         try s.lock.append(s.allocator, 0);
+        try s.rtype.append(s.allocator, 0);
         try s.cand_mark.append(s.allocator, 0);
         try s.ruin_mark.append(s.allocator, 0);
         try s.snap_mark.append(s.allocator, 0);
         return s.routes.items.len - 1;
+    }
+
+    /// Effective capacity of route `ri`: uniform inst.capacity, or its
+    /// assigned type's capacity when a heterogeneous fleet is active.
+    fn routeCap(s: *const S, ri: usize) i64 {
+        return if (s.veh_types.len == 0) s.inst.capacity else s.veh_types[s.rtype.items[ri]].capacity;
+    }
+
+    /// Per-route fixed cost: uniform veh_penalty, or the route's type
+    /// fixed_cost when a heterogeneous fleet is active.
+    fn penOf(s: *const S, ri: usize) u64 {
+        return if (s.veh_types.len == 0) s.veh_penalty else s.veh_types[s.rtype.items[ri]].fixed_cost;
+    }
+
+    /// Cheapest type (fixed_cost asc, ties to larger capacity) with a count
+    /// available whose capacity fits `load` (max prefix load of the opening
+    /// content). null when no type can open — the route may not be created.
+    fn chooseType(s: *const S, load: i64) ?u8 {
+        var best: ?u8 = null;
+        for (s.veh_types, 0..) |t, i| {
+            if (t.capacity < load) continue;
+            if (t.count > 0 and s.type_used[i] >= t.count) continue;
+            if (best) |bi| {
+                const b = s.veh_types[bi];
+                if (t.fixed_cost < b.fixed_cost or
+                    (t.fixed_cost == b.fixed_cost and t.capacity > b.capacity)) best = @as(u8, @intCast(i));
+            } else best = @as(u8, @intCast(i));
+        }
+        return best;
+    }
+
+    /// Capture the type-count ledger next to the iteration's saved cost;
+    /// rollback restores it. No-op state on the uniform path.
+    fn saveLedger(s: *S) void {
+        s.saved_type_used = s.type_used;
     }
 
     /// Locked leading positions of route `ri` (dispatch mode); set once before
@@ -288,6 +434,8 @@ const S = struct {
             .items = try s.allocator.dupe(usize, r.items.items),
             .dist = r.dist,
             .dur = r.dur,
+            .rtype = if (s.veh_types.len == 0) 0 else s.rtype.items[ri],
+            .brk_ok = r.brk_ok,
         });
     }
 
@@ -300,7 +448,15 @@ const S = struct {
         r.items.clearRetainingCapacity();
         try r.items.appendSlice(s.allocator, nodes);
         r.dist = arcSum(s.inst, nodes);
-        r.dur = if (s.time_penalty > 0 or s.max_route_dur > 0) routeDuration(s.inst, nodes) else 0;
+        if (s.brk) |bk| {
+            // Break regime: duration is the depart-at-0 completion including
+            // the break, and the walk's verdict is the route's break flag.
+            const w = walkWithBreak(s.inst, nodes, bk);
+            r.dur = w.dur;
+            r.brk_ok = w.ok;
+        } else {
+            r.dur = if (s.time_penalty > 0 or s.max_route_dur > 0) routeDuration(s.inst, nodes) else 0;
+        }
         r.dirty = true;
         for (nodes, 0..) |c, p| {
             s.loc_route[c] = ri;
@@ -310,10 +466,12 @@ const S = struct {
         s.cost = s.cost + r.dist + s.time_penalty * r.dur - old_dist - s.time_penalty * old_dur;
         if (was_empty and !now_empty) {
             s.nonempty += 1;
-            s.cost += s.veh_penalty;
+            s.cost += s.penOf(ri);
+            if (s.veh_types.len != 0) s.type_used[s.rtype.items[ri]] += 1;
         } else if (!was_empty and now_empty) {
             s.nonempty -= 1;
-            s.cost -= s.veh_penalty;
+            s.cost -= s.penOf(ri);
+            if (s.veh_types.len != 0) s.type_used[s.rtype.items[ri]] -= 1;
             if (ri < s.min_empty_hint) s.min_empty_hint = ri;
         }
     }
@@ -342,6 +500,7 @@ const S = struct {
             try r.items.appendSlice(s.allocator, sn.items);
             r.dist = sn.dist;
             r.dur = sn.dur;
+            r.brk_ok = sn.brk_ok;
             r.dirty = true;
             if (!was_empty and sn.items.len == 0 and sn.ri < s.min_empty_hint) s.min_empty_hint = sn.ri;
         }
@@ -350,6 +509,10 @@ const S = struct {
                 s.loc_route[c] = sn.ri;
                 s.loc_pos[c] = p;
             }
+        }
+        if (s.veh_types.len != 0) {
+            for (s.snaps.items) |sn| s.rtype.items[sn.ri] = sn.rtype;
+            s.type_used = s.saved_type_used;
         }
         s.cost = saved_cost;
         s.nonempty = saved_nonempty;
@@ -428,7 +591,11 @@ const S = struct {
         }
         // remainder feasibility (TW only; capacity is automatic for pair-
         // atomic removal); the full-route walk is O(len), same as install.
-        if (!s.seqFeasible(s.keep_buf.items)) {
+        // Break regime: the remainder must stay break-schedulable too
+        // (removal shifts arrivals EARLIER, which can move the break's g_star
+        // and change absorption — re-derive, don't assume).
+        const rem_ok = if (s.brk) |bk| walkWithBreak(s.inst, s.keep_buf.items, bk).ok else s.seqFeasible(s.keep_buf.items);
+        if (!rem_ok) {
             for (it) |c| s.drop_buf[c] = false;
             return false;
         }
@@ -456,8 +623,12 @@ const S = struct {
     /// Time-warp and load violations are monotone under rightward extension,
     /// so an infeasible middle prunes the rest of its `b` loop.
     fn evalPairInsert(s: *S, ri: usize, p: usize, q: usize, params: PdpSisrParams, rng: std.Random) ?Ins {
+        // Break regime routes to its own O(route)-per-candidate evaluator;
+        // the null branch below is the pre-break code verbatim.
+        if (s.brk != null) return s.evalPairInsertBrk(ri, p, q, params, rng);
         const blink = params.blink;
         const inst = s.inst;
+        const rcap: i64 = s.routeCap(ri);
         const r = &s.routes.items[ri];
         const it = r.items.items;
         const L = it.len;
@@ -501,7 +672,7 @@ const S = struct {
             var m_t = Tws.merge(r.pre_t.items[a], @intCast(inst.d(prev_a, p)), Tws.client(inst, p));
             if (m_t.tw != 0) continue; // deeper a only arrives later, but other a gaps may differ
             var m_l = pdp.Lseg.merge(r.pre_l.items[a], pdp.Lseg.node(inst, p));
-            if (m_l.lo < 0 or m_l.hi > inst.capacity) continue;
+            if (m_l.lo < 0 or m_l.hi > rcap) continue;
             var m_d: u64 = r.pre_d.items[a] + inst.d(prev_a, p);
             var last = p;
 
@@ -516,7 +687,7 @@ const S = struct {
                     const f2 = Tws.merge(f1, @intCast(inst.d(q, nxt)), r.suf_t.items[b]);
                     if (f2.tw != 0) break :blk;
                     const f_l = pdp.Lseg.merge(pdp.Lseg.merge(m_l, q_l), r.suf_l.items[b]);
-                    if (!(f_l.lo >= 0 and f_l.hi <= inst.capacity)) break :blk;
+                    if (!(f_l.lo >= 0 and f_l.hi <= rcap)) break :blk;
                     // Shift-length cap: reject if the resulting route duration
                     // exceeds it. Duration is not monotone in b, so this only
                     // skips THIS (a,b) candidate (break :blk), never the loop.
@@ -531,7 +702,74 @@ const S = struct {
                     m_t = Tws.merge(m_t, @intCast(inst.d(last, it[b])), Tws.client(inst, it[b]));
                     if (m_t.tw != 0) break; // no later b for this a can heal
                     m_l = pdp.Lseg.merge(m_l, pdp.Lseg.node(inst, it[b]));
-                    if (m_l.lo < 0 or m_l.hi > inst.capacity) break;
+                    if (m_l.lo < 0 or m_l.hi > rcap) break;
+                    m_d += inst.d(last, it[b]);
+                    last = it[b];
+                }
+            }
+        }
+        return best;
+    }
+
+    /// Break-regime insertion eval: same gap enumeration and Tws/load pruning
+    /// as evalPairInsert (both remain NECESSARY conditions — a break only adds
+    /// time), but each surviving (a, b) candidate is confirmed by an O(route)
+    /// walkWithBreak over the materialized sequence, which also yields the
+    /// duration the money objective prices. No granular gating (break routes
+    /// are shift-bounded and short; correctness first for v1).
+    fn evalPairInsertBrk(s: *S, ri: usize, p: usize, q: usize, params: PdpSisrParams, rng: std.Random) ?Ins {
+        const blink = params.blink;
+        const inst = s.inst;
+        const rcap: i64 = s.routeCap(ri);
+        const bk = s.brk.?;
+        const r = &s.routes.items[ri];
+        const it = r.items.items;
+        const L = it.len;
+        var best: ?Ins = null;
+        const q_t = Tws.client(inst, q);
+        const q_l = pdp.Lseg.node(inst, q);
+
+        for (s.lockOf(ri)..L + 1) |a| {
+            const prev_a: usize = if (a == 0) 0 else it[a - 1];
+            var m_t = Tws.merge(r.pre_t.items[a], @intCast(inst.d(prev_a, p)), Tws.client(inst, p));
+            if (m_t.tw != 0) continue;
+            var m_l = pdp.Lseg.merge(r.pre_l.items[a], pdp.Lseg.node(inst, p));
+            if (m_l.lo < 0 or m_l.hi > rcap) continue;
+            var m_d: u64 = r.pre_d.items[a] + inst.d(prev_a, p);
+            var last = p;
+
+            var b = a;
+            while (b <= L) : (b += 1) {
+                blk: {
+                    if (rng.float(f64) < blink) break :blk;
+                    const nxt: usize = if (b == L) 0 else it[b];
+                    const f1 = Tws.merge(m_t, @intCast(inst.d(last, q)), q_t);
+                    const f2 = Tws.merge(f1, @intCast(inst.d(q, nxt)), r.suf_t.items[b]);
+                    if (f2.tw != 0) break :blk;
+                    const f_l = pdp.Lseg.merge(pdp.Lseg.merge(m_l, q_l), r.suf_l.items[b]);
+                    if (!(f_l.lo >= 0 and f_l.hi <= rcap)) break :blk;
+                    // Materialize it[0..a] ++ p ++ it[a..b] ++ q ++ it[b..]
+                    // and let the break walk decide feasibility + duration.
+                    const cand = s.brk_scratch[0 .. L + 2];
+                    @memcpy(cand[0..a], it[0..a]);
+                    cand[a] = p;
+                    @memcpy(cand[a + 1 .. b + 1], it[a..b]);
+                    cand[b + 1] = q;
+                    @memcpy(cand[b + 2 ..], it[b..]);
+                    const w = walkWithBreak(inst, cand, bk);
+                    if (!w.ok) break :blk;
+                    if (s.max_route_dur > 0 and w.dur > s.max_route_dur) break :blk;
+                    const new_dist = m_d + inst.d(last, q) + inst.d(q, nxt) + r.tail_d.items[b];
+                    var delta = @as(i64, @intCast(new_dist)) - @as(i64, @intCast(r.dist));
+                    if (s.time_penalty > 0)
+                        delta += @as(i64, @intCast(s.time_penalty)) * (@as(i64, @intCast(w.dur)) - @as(i64, @intCast(r.dur)));
+                    if (best == null or delta < best.?.delta) best = .{ .a = a, .b = b, .delta = delta };
+                }
+                if (b < L) {
+                    m_t = Tws.merge(m_t, @intCast(inst.d(last, it[b])), Tws.client(inst, it[b]));
+                    if (m_t.tw != 0) break;
+                    m_l = pdp.Lseg.merge(m_l, pdp.Lseg.node(inst, it[b]));
+                    if (m_l.lo < 0 or m_l.hi > rcap) break;
                     m_d += inst.d(last, it[b]);
                     last = it[b];
                 }
@@ -549,6 +787,7 @@ const S = struct {
     /// granular gating. Route must be freshened.
     fn evalPairInsertViol(s: *S, ri: usize, p: usize, q: usize) ?InsV {
         const inst = s.inst;
+        const rcap: i64 = s.routeCap(ri);
         const r = &s.routes.items[ri];
         const it = r.items.items;
         const L = it.len;
@@ -569,7 +808,7 @@ const S = struct {
                 const f1 = Tws.merge(m_t, @intCast(inst.d(last, q)), q_t);
                 const f2 = Tws.merge(f1, @intCast(inst.d(q, nxt)), r.suf_t.items[b]);
                 const f_l = pdp.Lseg.merge(pdp.Lseg.merge(m_l, q_l), r.suf_l.items[b]);
-                const load_ex: i64 = @max(f_l.hi - inst.capacity, 0);
+                const load_ex: i64 = @max(f_l.hi - rcap, 0);
                 const viol: i64 = f2.tw + 10 * load_ex;
                 const new_dist = m_d + inst.d(last, q) + inst.d(q, nxt) + r.tail_d.items[b];
                 const delta = @as(i64, @intCast(new_dist)) - @as(i64, @intCast(r.dist));
@@ -593,6 +832,7 @@ const S = struct {
     /// counter, ties by lowest pickup id. Returns the pickup id, or null.
     fn ejectCandidate(s: *S, ri: usize, skip_p: usize) !?usize {
         const inst = s.inst;
+        const rcap: i64 = s.routeCap(ri);
         const it = s.routes.items[ri].items.items;
         const lk = s.lockOf(ri);
         var best: ?usize = null;
@@ -606,7 +846,7 @@ const S = struct {
             }
             if (!s.seqFeasible(s.keep_buf.items)) continue;
             const lg = pdp.routeLseg(inst, s.keep_buf.items);
-            if (!(lg.lo >= 0 and lg.hi <= inst.capacity)) continue;
+            if (!(lg.lo >= 0 and lg.hi <= rcap)) continue;
             if (best == null or s.eject_pen[e] < s.eject_pen[best.?] or
                 (s.eject_pen[e] == s.eject_pen[best.?] and e < best.?)) best = e;
         }
@@ -657,6 +897,7 @@ const S = struct {
     /// no RNG. Returns the chosen subset or null if no `size`-subset of the
     /// pool restores feasibility.
     fn ejectSubsetK(s: *S, ri: usize, skip_p: usize, size: usize) !?EjectSubset {
+        const rcap: i64 = s.routeCap(ri);
         var pool: [12]usize = undefined;
         const n = s.ejectPool(ri, skip_p, &pool);
         if (n < size) return null;
@@ -690,7 +931,7 @@ const S = struct {
             feasible: {
                 if (!s.seqFeasible(s.keep_buf.items)) break :feasible;
                 const lg = pdp.routeLseg(s.inst, s.keep_buf.items);
-                if (!(lg.lo >= 0 and lg.hi <= s.inst.capacity)) break :feasible;
+                if (!(lg.lo >= 0 and lg.hi <= rcap)) break :feasible;
                 var pen: u64 = 0;
                 for (cand[0..size]) |e| pen += s.eject_pen[e];
                 const better = best == null or pen < best_pen or
@@ -828,6 +1069,7 @@ const S = struct {
         const saved_cost = s.cost;
         const saved_nonempty = s.nonempty;
         const saved_unassigned = s.n_unassigned;
+        s.saveLedger();
         s.beginIter();
         s.generation += 1;
 
@@ -891,7 +1133,7 @@ const S = struct {
         }
 
         var seed_c = 1 + rng.uintLessThan(usize, n_nodes);
-        if (s.veh_penalty > 0 and s.nonempty > 1 and rng.float(f64) < params.fleet_ruin_rate) {
+        if ((s.veh_penalty > 0 or s.veh_types.len != 0) and s.nonempty > 1 and rng.float(f64) < params.fleet_ruin_rate) {
             // Fleet-min ruin (vrptw.zig lever): empty the smallest route
             // outright; its pairs reinsert into the slack the strings below
             // open around them, and veh_penalty settles it in acceptance.
@@ -967,13 +1209,32 @@ const S = struct {
                 }
             }
 
-            const sdur: u64 = if (s.time_penalty > 0 or s.max_route_dur > 0) routeDuration(s.inst, &[_]usize{ p, q }) else 0;
+            var sdur: u64 = if (s.time_penalty > 0 or s.max_route_dur > 0) routeDuration(s.inst, &[_]usize{ p, q }) else 0;
+            // Break regime: a fresh [p,q] route must be break-schedulable, and
+            // its priced duration is the break walk's (break time included).
+            var brk_open_ok = true;
+            if (s.brk) |bk| {
+                const w = walkWithBreak(s.inst, &[_]usize{ p, q }, bk);
+                brk_open_ok = w.ok;
+                sdur = w.dur;
+            }
             // Opening a fresh [p,q] route requires it to fit the shift cap too;
             // fold that into may_open so an over-cap singleton is never created
             // (the pair falls through to squeeze / stays banked instead).
-            const may_open = (params.max_vehicles == 0 or s.nonempty < params.max_vehicles) and
+            var may_open = brk_open_ok and (params.max_vehicles == 0 or s.nonempty < params.max_vehicles) and
                 (s.max_route_dur == 0 or sdur <= s.max_route_dur);
-            var singleton: i64 = @intCast(s.inst.d(0, p) + s.inst.d(p, q) + s.inst.d(q, 0) + s.veh_penalty);
+            // Heterogeneous fleet: opening also needs a type with a count
+            // available that fits the pair's load; the singleton is charged
+            // that type's fixed cost instead of the uniform veh_penalty.
+            var open_pen: u64 = s.veh_penalty;
+            var open_type: u8 = 0;
+            if (s.veh_types.len != 0) {
+                if (s.chooseType(s.inst.demand_signed[p])) |ti| {
+                    open_type = ti;
+                    open_pen = s.veh_types[ti].fixed_cost;
+                } else may_open = false;
+            }
+            var singleton: i64 = @intCast(s.inst.d(0, p) + s.inst.d(p, q) + s.inst.d(q, 0) + open_pen);
             if (s.time_penalty > 0)
                 singleton += @intCast(s.time_penalty * sdur);
             if (best_ri == NO_ROUTE and !may_open) {
@@ -985,6 +1246,7 @@ const S = struct {
             if ((best_ri == NO_ROUTE or singleton < best_ins.delta) and may_open) {
                 const slot = if (empty_slot != NO_ROUTE) empty_slot else try s.addSlot();
                 try s.snapshot(slot);
+                if (s.veh_types.len != 0) s.rtype.items[slot] = open_type;
                 s.keep_buf.clearRetainingCapacity();
                 try s.keep_buf.append(s.allocator, p);
                 try s.keep_buf.append(s.allocator, q);
@@ -1010,6 +1272,31 @@ const S = struct {
         return true;
     }
 
+    /// Break regime: true when every nonempty route is break-schedulable
+    /// (r.brk_ok maintained by install, restored by rollback). Always true
+    /// when breaks are off. Gates best-capture like withinDurCap.
+    fn brkAllOk(s: *const S) bool {
+        if (s.brk == null) return true;
+        for (s.routes.items) |r| {
+            if (r.items.items.len != 0 and !r.brk_ok) return false;
+        }
+        return true;
+    }
+
+    /// Number of nonempty routes that are not break-schedulable. 0 when
+    /// breaks are off. Folded into acceptance (BRK counts under CAP_PEN) so
+    /// the search is driven out of break violations the seed may contain —
+    /// same lesson as the duration cap: capture-gating alone lets an
+    /// infeasible incumbent squat and roll back every feasible move.
+    fn brkViolCount(s: *const S) u64 {
+        if (s.brk == null) return 0;
+        var n: u64 = 0;
+        for (s.routes.items) |r| {
+            if (r.items.items.len != 0 and !r.brk_ok) n += 1;
+        }
+        return n;
+    }
+
     /// Number of nonempty routes exceeding the shift cap. 0 when the cap is off.
     /// Folded into the acceptance objective (CAP_PEN weight) so the search is
     /// driven OUT of over-cap states the way UNASSIGNED_PEN drives it out of an
@@ -1032,14 +1319,22 @@ const S = struct {
             for (out.items) |r| allocator.free(r);
             out.deinit(allocator);
         }
+        var tout: std.ArrayList(usize) = .empty;
+        errdefer tout.deinit(allocator);
         var dist: u64 = 0;
-        for (s.routes.items) |r| {
+        for (s.routes.items, 0..) |r, ri| {
             if (r.items.items.len == 0) continue;
             try out.append(allocator, try allocator.dupe(usize, r.items.items));
+            if (s.veh_types.len != 0) try tout.append(allocator, s.rtype.items[ri]);
             dist += r.dist;
         }
         const routes = try out.toOwnedSlice(allocator);
-        return .{ .allocator = allocator, .routes = routes, .total_cost = dist, .vehicles = routes.len };
+        errdefer {
+            for (routes) |r| allocator.free(r);
+            allocator.free(routes);
+        }
+        const types: ?[]usize = if (s.veh_types.len != 0) try tout.toOwnedSlice(allocator) else null;
+        return .{ .allocator = allocator, .routes = routes, .total_cost = dist, .vehicles = routes.len, .types = types };
     }
 };
 
@@ -1271,6 +1566,7 @@ fn evalPairInsertPar(s: *const S, ri: usize, p: usize, q: usize, params: PdpSisr
     const lrng = lr.random();
     const blink = params.blink;
     const inst = s.inst;
+    const rcap: i64 = s.routeCap(ri);
     const r = &s.routes.items[ri];
     const it = r.items.items;
     const L = it.len;
@@ -1302,7 +1598,7 @@ fn evalPairInsertPar(s: *const S, ri: usize, p: usize, q: usize, params: PdpSisr
         var m_t = Tws.merge(r.pre_t.items[a], @intCast(inst.d(prev_a, p)), Tws.client(inst, p));
         if (m_t.tw != 0) continue;
         var m_l = pdp.Lseg.merge(r.pre_l.items[a], pdp.Lseg.node(inst, p));
-        if (m_l.lo < 0 or m_l.hi > inst.capacity) continue;
+        if (m_l.lo < 0 or m_l.hi > rcap) continue;
         var m_d: u64 = r.pre_d.items[a] + inst.d(prev_a, p);
         var last = p;
 
@@ -1317,7 +1613,7 @@ fn evalPairInsertPar(s: *const S, ri: usize, p: usize, q: usize, params: PdpSisr
                 const f2 = Tws.merge(f1, @intCast(inst.d(q, nxt)), r.suf_t.items[b]);
                 if (f2.tw != 0) break :blk;
                 const f_l = pdp.Lseg.merge(pdp.Lseg.merge(m_l, q_l), r.suf_l.items[b]);
-                if (!(f_l.lo >= 0 and f_l.hi <= inst.capacity)) break :blk;
+                if (!(f_l.lo >= 0 and f_l.hi <= rcap)) break :blk;
                 if (s.max_route_dur > 0 and f2.dur > @as(i64, @intCast(s.max_route_dur))) break :blk;
                 const new_dist = m_d + inst.d(last, q) + inst.d(q, nxt) + r.tail_d.items[b];
                 var delta = @as(i64, @intCast(new_dist)) - @as(i64, @intCast(r.dist));
@@ -1329,7 +1625,7 @@ fn evalPairInsertPar(s: *const S, ri: usize, p: usize, q: usize, params: PdpSisr
                 m_t = Tws.merge(m_t, @intCast(inst.d(last, it[b])), Tws.client(inst, it[b]));
                 if (m_t.tw != 0) break;
                 m_l = pdp.Lseg.merge(m_l, pdp.Lseg.node(inst, it[b]));
-                if (m_l.lo < 0 or m_l.hi > inst.capacity) break;
+                if (m_l.lo < 0 or m_l.hi > rcap) break;
                 m_d += inst.d(last, it[b]);
                 last = it[b];
             }
@@ -1390,9 +1686,17 @@ fn recreatePar(s: *S, params: PdpSisrParams, rng: std.Random, pool: *EvalPool, i
         }
 
         const sdur: u64 = if (s.time_penalty > 0 or s.max_route_dur > 0) routeDuration(s.inst, &[_]usize{ p, q }) else 0;
-        const may_open = (params.max_vehicles == 0 or s.nonempty < params.max_vehicles) and
+        var may_open = (params.max_vehicles == 0 or s.nonempty < params.max_vehicles) and
             (s.max_route_dur == 0 or sdur <= s.max_route_dur);
-        var singleton: i64 = @intCast(s.inst.d(0, p) + s.inst.d(p, q) + s.inst.d(q, 0) + s.veh_penalty);
+        var open_pen: u64 = s.veh_penalty;
+        var open_type: u8 = 0;
+        if (s.veh_types.len != 0) {
+            if (s.chooseType(s.inst.demand_signed[p])) |ti| {
+                open_type = ti;
+                open_pen = s.veh_types[ti].fixed_cost;
+            } else may_open = false;
+        }
+        var singleton: i64 = @intCast(s.inst.d(0, p) + s.inst.d(p, q) + s.inst.d(q, 0) + open_pen);
         if (s.time_penalty > 0)
             singleton += @intCast(s.time_penalty * sdur);
         if (best_ri == NO_ROUTE and !may_open) {
@@ -1404,6 +1708,7 @@ fn recreatePar(s: *S, params: PdpSisrParams, rng: std.Random, pool: *EvalPool, i
         if ((best_ri == NO_ROUTE or singleton < best_ins.delta) and may_open) {
             const slot = if (empty_slot != NO_ROUTE) empty_slot else try s.addSlot();
             try s.snapshot(slot);
+            if (s.veh_types.len != 0) s.rtype.items[slot] = open_type;
             s.keep_buf.clearRetainingCapacity();
             try s.keep_buf.append(s.allocator, p);
             try s.keep_buf.append(s.allocator, q);
@@ -1470,6 +1775,13 @@ pub fn solvePdptwSisrFrom(allocator: std.mem.Allocator, inst: pdp.PdpInstance, p
 fn solvePdptwSisrFromLocked(allocator: std.mem.Allocator, inst: pdp.PdpInstance, params: PdpSisrParams, warm: []const []const usize, locks: []const usize, partial_ok: bool) !pdp.PdpResult {
     const n_nodes = 2 * inst.n_pairs;
     if (inst.n_pairs == 0) return error.InvalidInstance;
+    if (params.veh_types.len > MAX_VEH_TYPES) return error.InvalidInstance;
+    if (params.brk) |bk| {
+        if (bk.earliest > bk.latest) return error.InvalidInstance;
+        // The parallel-eval path has no break-aware evaluator (gated-off
+        // lever); refuse the combination instead of silently degrading.
+        if (params.eval_threads >= 2) return error.InvalidInstance;
+    }
 
     // seed: the session-1 cheapest pair-insertion construction, due-sorted
     const pos = try allocator.alloc(usize, inst.dim());
@@ -1511,7 +1823,7 @@ fn solvePdptwSisrFromLocked(allocator: std.mem.Allocator, inst: pdp.PdpInstance,
     const gran = try buildNeighbors(allocator, inst, gk, params.nbr_key);
     defer allocator.free(gran);
 
-    var s = try S.init(allocator, inst, params.veh_penalty, params.time_penalty, params.max_route_dur, gran, gk);
+    var s = try S.init(allocator, inst, params.veh_penalty, params.time_penalty, params.max_route_dur, params.veh_types, params.brk, gran, gk);
     defer s.deinit();
 
     // Intra-search eval pool: eval_threads <= 1 keeps the untouched serial
@@ -1523,7 +1835,21 @@ fn solvePdptwSisrFromLocked(allocator: std.mem.Allocator, inst: pdp.PdpInstance,
     if (pool) |*pl| try pl.start();
     for (seed_sol.items, 0..) |r, wi| {
         if (r.items.len == 0) continue;
+        // Heterogeneous fleet: a seed route must find a type (count available,
+        // capacity fits its max prefix load) before it may exist. Routes that
+        // fit no type start in the request bank instead — except locked
+        // dispatch routes, which cannot be banked: no fitting type there is a
+        // caller error (their committed load exceeds the declared fleet).
+        var seed_type: u8 = 0;
+        if (s.veh_types.len != 0) {
+            if (s.chooseType(pdp.routeLseg(inst, r.items).hi)) |ti| {
+                seed_type = ti;
+            } else if (wi < locks.len and locks[wi] > 0) {
+                return error.InvalidWarmStart;
+            } else continue;
+        }
         const ri = try s.addSlot();
+        if (s.veh_types.len != 0) s.rtype.items[ri] = seed_type;
         try s.install(ri, r.items);
         if (wi < locks.len) s.lock.items[ri] = locks[wi];
     }
@@ -1556,7 +1882,7 @@ fn solvePdptwSisrFromLocked(allocator: std.mem.Allocator, inst: pdp.PdpInstance,
         s.removed.clearRetainingCapacity(); // bank is re-derived each ruin
     }
 
-    var best: ?pdp.PdpResult = if (s.n_unassigned == 0 and s.withinDurCap()) try s.toResult(allocator) else null;
+    var best: ?pdp.PdpResult = if (s.n_unassigned == 0 and s.withinDurCap() and s.brkAllOk()) try s.toResult(allocator) else null;
     errdefer if (best) |*b| b.deinit();
     var best_cost = s.cost;
 
@@ -1569,7 +1895,16 @@ fn solvePdptwSisrFromLocked(allocator: std.mem.Allocator, inst: pdp.PdpInstance,
     // violations. Always 0 when max_route_dur == 0 (overCapCount short-circuits),
     // so the uncapped acceptance objective is bit-identical to before.
     const CAP_PEN: u64 = 1_000_000_000;
-    const seed_distance = s.cost - s.veh_penalty * s.nonempty;
+    // Fleet cost of the seed: uniform arithmetic unchanged; per-route fixed
+    // costs summed when a heterogeneous fleet is active.
+    var seed_fleet: u64 = s.veh_penalty * s.nonempty;
+    if (s.veh_types.len != 0) {
+        seed_fleet = 0;
+        for (s.routes.items, 0..) |r, ri| {
+            if (r.items.items.len != 0) seed_fleet += s.penOf(ri);
+        }
+    }
+    const seed_distance = s.cost - seed_fleet;
     const unit = @as(f64, @floatFromInt(seed_distance)) / @as(f64, @floatFromInt(n_nodes));
     const t0 = @max(1e-9, params.t0_factor * unit);
     const tf = @max(1e-9, params.tf_factor * unit);
@@ -1584,7 +1919,8 @@ fn solvePdptwSisrFromLocked(allocator: std.mem.Allocator, inst: pdp.PdpInstance,
         const saved_cost = s.cost;
         const saved_nonempty = s.nonempty;
         const saved_unassigned = s.n_unassigned;
-        const saved_overcap = s.overCapCount();
+        const saved_overcap = s.overCapCount() + s.brkViolCount();
+        s.saveLedger();
         s.beginIter();
         s.iter_start_complete = s.n_unassigned == 0;
         try s.ruin(params, rng);
@@ -1593,11 +1929,11 @@ fn solvePdptwSisrFromLocked(allocator: std.mem.Allocator, inst: pdp.PdpInstance,
         } else {
             try s.recreate(params, rng);
         }
-        const eff = s.cost + UNASSIGNED_PEN * @as(u64, @intCast(s.n_unassigned)) + CAP_PEN * s.overCapCount();
+        const eff = s.cost + UNASSIGNED_PEN * @as(u64, @intCast(s.n_unassigned)) + CAP_PEN * (s.overCapCount() + s.brkViolCount());
         const saved_eff = saved_cost + UNASSIGNED_PEN * @as(u64, @intCast(saved_unassigned)) + CAP_PEN * saved_overcap;
         const dt = @as(i64, @intCast(eff)) - @as(i64, @intCast(saved_eff));
         if (@as(f64, @floatFromInt(dt)) < temp) {
-            if (s.n_unassigned == 0 and s.withinDurCap() and (best == null or s.cost < best_cost)) {
+            if (s.n_unassigned == 0 and s.withinDurCap() and s.brkAllOk() and (best == null or s.cost < best_cost)) {
                 best_cost = s.cost;
                 if (best) |*b| b.deinit();
                 best = try s.toResult(allocator);
@@ -1609,7 +1945,7 @@ fn solvePdptwSisrFromLocked(allocator: std.mem.Allocator, inst: pdp.PdpInstance,
         temp *= cf;
         if (params.swap_kick > 0 and it % params.swap_kick == params.swap_kick - 1) {
             try s.pairExchangeKick(params, rng);
-            if (s.n_unassigned == 0 and s.withinDurCap() and s.cost < best_cost and best != null) {
+            if (s.n_unassigned == 0 and s.withinDurCap() and s.brkAllOk() and s.cost < best_cost and best != null) {
                 best_cost = s.cost;
                 best.?.deinit();
                 best = try s.toResult(allocator);
@@ -2329,7 +2665,7 @@ test "PDPTW SISR eject_k: constructed 2-eject unlocks what single eject cannot" 
 
     const gran = try buildNeighbors(allocator, inst, 6, .sum);
     defer allocator.free(gran);
-    var s = try S.init(allocator, inst, 10_000_000, 0, 0, gran, 6);
+    var s = try S.init(allocator, inst, 10_000_000, 0, 0, &.{}, null, gran, 6);
     defer s.deinit();
     const ri = try s.addSlot();
     try s.install(ri, &[_]usize{ 1, 3, 5, 2, 4, 6 });
@@ -2789,4 +3125,141 @@ test "PDPTW SISR eval_threads: parallel reduction is thread-count invariant (2 =
     for (r2.routes, 0..) |r, i| rc[i] = r;
     const vc = pdp.validate(inst, rc) orelse return error.Infeasible;
     try std.testing.expectEqual(vc, r2.total_cost);
+}
+
+test "PDPTW SISR veh types: per-route load fits its type cap, cheap small vans used" {
+    const allocator = std.testing.allocator;
+    var ri = try pdp.randomInstance(allocator, 20, 9, true);
+    defer ri.deinit(allocator);
+    const inst = ri.inst();
+    const types = [_]VehType{
+        .{ .capacity = @max(1, @divTrunc(inst.capacity, 2)), .fixed_cost = 100, .count = 0 },
+        .{ .capacity = inst.capacity, .fixed_cost = 10_000, .count = 0 },
+    };
+    var a = try solvePdptwSisr(allocator, inst, .{ .seed = 9, .iters = 5000, .veh_types = &types });
+    defer a.deinit();
+    const tys = a.types orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(a.routes.len, tys.len);
+    const rc = try allocator.alloc([]const usize, a.routes.len);
+    defer allocator.free(rc);
+    const caps = try allocator.alloc(i64, a.routes.len);
+    defer allocator.free(caps);
+    for (a.routes, 0..) |r, i| {
+        rc[i] = r;
+        try std.testing.expect(tys[i] < types.len);
+        caps[i] = types[tys[i]].capacity;
+    }
+    // The independent oracle recomputes everything, per-route caps included.
+    const vc = pdp.validateTyped(inst, rc, caps) orelse return error.Infeasible;
+    try std.testing.expectEqual(vc, a.total_cost);
+    // Determinism: same seed, same answer (incl. the type assignment).
+    var b = try solvePdptwSisr(allocator, inst, .{ .seed = 9, .iters = 5000, .veh_types = &types });
+    defer b.deinit();
+    try std.testing.expectEqual(a.total_cost, b.total_cost);
+    try std.testing.expectEqualSlices(usize, tys, b.types.?);
+}
+
+test "PDPTW SISR veh types: scarce cheap type count is respected" {
+    const allocator = std.testing.allocator;
+    var ri = try pdp.randomInstance(allocator, 20, 11, true);
+    defer ri.deinit(allocator);
+    const inst = ri.inst();
+    const types = [_]VehType{
+        .{ .capacity = inst.capacity, .fixed_cost = 100, .count = 1 },
+        .{ .capacity = inst.capacity, .fixed_cost = 50_000, .count = 0 },
+    };
+    var a = try solvePdptwSisr(allocator, inst, .{ .seed = 11, .iters = 5000, .veh_types = &types });
+    defer a.deinit();
+    var cheap: usize = 0;
+    for (a.types.?) |t| cheap += @intFromBool(t == 0);
+    try std.testing.expect(cheap <= 1);
+    const rc = try allocator.alloc([]const usize, a.routes.len);
+    defer allocator.free(rc);
+    for (a.routes, 0..) |r, i| rc[i] = r;
+    try std.testing.expect(pdp.validate(inst, rc) != null);
+}
+
+test "PDPTW SISR veh types: no fitting type is infeasible, not a crash" {
+    const allocator = std.testing.allocator;
+    var ri = try pdp.randomInstance(allocator, 5, 13, true);
+    defer ri.deinit(allocator);
+    const inst = ri.inst();
+    var md: i64 = std.math.maxInt(i64);
+    for (1..inst.dim()) |c| {
+        if (inst.is_pickup[c]) md = @min(md, inst.demand_signed[c]);
+    }
+    const types = [_]VehType{.{ .capacity = @max(md - 1, 0), .fixed_cost = 100, .count = 0 }};
+    try std.testing.expectError(error.NoCompleteSolution, solvePdptwSisr(allocator, inst, .{ .seed = 13, .iters = 500, .veh_types = &types }));
+}
+
+test "PDPTW SISR driver break: plans are break-schedulable per the oracle" {
+    const allocator = std.testing.allocator;
+    var found_spanning = false;
+    var seed: u64 = 31;
+    while (seed <= 35) : (seed += 1) {
+        var ri = try pdp.randomInstance(allocator, 12, seed, true);
+        defer ri.deinit(allocator);
+        const inst = ri.inst();
+        // Anchor the window to the ACTUAL no-break makespan, not the depot
+        // horizon (routes finish far before due[0] on these instances, and a
+        // horizon-derived window never bites -> the test proves nothing).
+        var probe = try solvePdptwSisr(allocator, inst, .{ .seed = seed, .iters = 2000, .veh_penalty = 10_000_000 });
+        var makespan: u64 = 0;
+        for (probe.routes) |r| makespan = @max(makespan, routeDuration(inst, r));
+        probe.deinit();
+        if (makespan < 40) continue;
+        const bk = Break{ .dur = @intCast(makespan / 10), .earliest = @intCast(makespan / 4), .latest = @intCast(@min(makespan, inst.due[0] / 2)) };
+        var a = solvePdptwSisr(allocator, inst, .{ .seed = seed, .iters = 6000, .veh_penalty = 10_000_000, .brk = bk }) catch |err| switch (err) {
+            error.NoCompleteSolution => continue, // tight instance + break: legal outcome
+            else => return err,
+        };
+        defer a.deinit();
+        const rc = try allocator.alloc([]const usize, a.routes.len);
+        defer allocator.free(rc);
+        for (a.routes, 0..) |r, i| rc[i] = r;
+        // The independent oracle (brute-force gap search) must agree.
+        const vc = pdp.validateWithBreak(inst, rc, bk.dur, bk.earliest, bk.latest) orelse return error.BreakOracleRejected;
+        try std.testing.expectEqual(vc, a.total_cost);
+        // At least one route across the sweep must actually owe a break
+        // (finish after earliest), or this test proves nothing.
+        for (a.routes) |r| {
+            var t: u64 = 0;
+            var prev: usize = 0;
+            for (r) |c| {
+                t = @max(t + inst.d(prev, c), @as(u64, inst.ready[c])) + inst.service[c];
+                prev = c;
+            }
+            if (t + inst.d(prev, 0) > bk.earliest) found_spanning = true;
+        }
+    }
+    try std.testing.expect(found_spanning);
+}
+
+test "PDPTW SISR driver break: with zero waiting the break adds exactly its length" {
+    const allocator = std.testing.allocator;
+    // tw = false -> wide-open windows, so no route ever waits and break
+    // absorption is impossible: every route's with-break completion must be
+    // its no-break completion + exactly one break length.
+    var ri = try pdp.randomInstance(allocator, 8, 17, false);
+    defer ri.deinit(allocator);
+    const inst = ri.inst();
+    const bk = Break{ .dur = 500, .earliest = 0, .latest = inst.due[0] };
+    var with = try solvePdptwSisr(allocator, inst, .{ .seed = 17, .iters = 4000, .veh_penalty = 10_000_000, .time_penalty = 100, .brk = bk });
+    defer with.deinit();
+    for (with.routes) |r| {
+        var t: u64 = 0;
+        var prev: usize = 0;
+        for (r) |c| {
+            t = @max(t + inst.d(prev, c), @as(u64, inst.ready[c])) + inst.service[c];
+            prev = c;
+        }
+        const nobrk = t + inst.d(prev, 0);
+        const w = walkWithBreak(inst, r, bk);
+        try std.testing.expect(w.ok);
+        try std.testing.expectEqual(nobrk + bk.dur, w.dur);
+    }
+    const rc = try allocator.alloc([]const usize, with.routes.len);
+    defer allocator.free(rc);
+    for (with.routes, 0..) |r, i| rc[i] = r;
+    try std.testing.expect(pdp.validateWithBreak(inst, rc, bk.dur, bk.earliest, bk.latest) != null);
 }

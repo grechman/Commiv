@@ -84,6 +84,7 @@ at the stop, and must be back at the depot by `due[0]` (the horizon).
 | `fleet_min` | bool | `true` runs the hierarchical fleet-minimization driver (minimize vehicles first, then distance); needs a wall budget and takes precedence over `threads` |
 | `max_vehicles` | int | hard cap on the number of routes (0 = uncapped) |
 | `wall_ms` | int | wall-clock budget in ms for the SISR / fleet-min search (0 = bounded by `iters` only; `fleet_min` defaults to 10000 if unset) |
+| `max_route_duration` | int | shift-length cap: no route's duration (travel + service + waiting) may exceed it; 0 = uncapped |
 | `engine` | string | `"sisr"` (default) or `"ils"` (legacy; uses `rounds`/`restarts`) |
 
 There is no `time_penalty` (money objective) on VRPTW — that knob is PDPTW-only.
@@ -122,6 +123,9 @@ the whole route.
 | `fleet_min` | bool | no (false) | run the hierarchical vehicle-minimization driver |
 | `max_vehicles` | int | no (0) | positive = the **pinned** driver: target EXACTLY this many vehicles (enterprise fixed fleet), not merely an upper bound |
 | `wall_ms` | int | no | wall-clock budget in ms for the wall-driven drivers (0 defaults to 10000) |
+| `max_route_duration` | int | no (0) | shift-length cap: no route's duration (travel + service + waiting) may exceed it; 0 = uncapped |
+| `vehicle_types` | `int[][3]` | no (`[]`) | heterogeneous fleet (1..8 types): each entry `[capacity, fixed_cost, count]`, count 0 = unlimited. Each route is served by one type (its capacity bounds the route load; its fixed cost replaces `veh_penalty`); the response gains `"types"` = route -> type index. `capacity` above is ignored; incompatible with `fleet_min`/`max_vehicles` |
+| `driver_break` | `int[3]` | no (`[]`) | `[duration, earliest, latest]`: every route whose schedule finishes after `earliest` must contain one break of `duration` starting within `[earliest, latest]`. Absorbs waiting first, counts into route duration. Incompatible with `fleet_min`/`max_vehicles` |
 
 Note: `threads` is ignored for PDPTW. The money objective (`time_penalty > 0`)
 trades fuel for driver hours wherever waiting exists; VROOM cannot price waiting
@@ -147,7 +151,7 @@ around them.
 
 | field | type | required | meaning |
 |---|---|---|---|
-| ...all `/solve/pdptw` fields except `fleet_min`/`max_vehicles`... | | | dispatch keeps the current fleet shape |
+| ...all `/solve/pdptw` fields except `fleet_min`/`max_vehicles`/`vehicle_types`... | | | dispatch keeps the current fleet shape (uniform fleet in v1); `max_route_duration` and `driver_break` are accepted |
 | `current` | `int[][]` | no (`[]`) | one array of node ids per existing route, in visit order; `[]` is a legal cold start |
 | `locked` | `int[]` | no (`[]`) | one entry per route in `current`; `locked[i]` = how many of that route's **leading** stops are committed and must not move in the result |
 

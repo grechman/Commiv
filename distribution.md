@@ -194,6 +194,19 @@ NEW ORDER for the rest: finish bench campaign -> **M6 (dispatch API, pulled up â
 express-delivery market)** -> M4 (VROOM migration + waiting-cost demo) -> M5 ->
 M7. M4's demo gains the measured waiting numbers from M3 either way.
 
+UPDATE 2026-07-18 (gap-closing round): M6 server-validated bench-grade (all
+gates PASS; dispatch-quality number on nyc-1000 window: warm 5s re-solve
+$8686.62 vs cold 5s $9218.99 = 5.8% cheaper at equal wall, and 1.07% cheaper
+than cold 30s at 1/6th the wall, all 253 committed stops preserved). M4 DONE
+(cfd1eb6): POST /compat/vroom accepts an unmodified VROOM request (matrix-based
+v1, shipments->PDPTW / jobs->VRPTW) and answers in VROOM's response shape, with
+an optional "commiv" block for the money objective. Feature gaps closed the
+same night, each behind an identity+speed+smoke perf gate: max route duration
+cap (80f8d9d, C ABI 0.4.0), heterogeneous fleet v1 (vehicle types via
+commiv_solve_pdptw_typed / vehicle_types= kwarg), driver breaks v1
+(break_duration/earliest/latest options; PDPTW-only). Multi-depot: designed,
+not built â€” docs/multidepot-design.md. M5 remains blocked on PyPI/CI accounts.
+
 ## What this plan deliberately does NOT include
 
 - No new search machinery. The quality lead is decisive and commercially banked.

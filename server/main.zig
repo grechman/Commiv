@@ -13,7 +13,9 @@ const commiv = @import("commiv");
 //                       max_vehicles?, wall_ms?}
 //   POST /solve/pdptw  {matrix, pickups, deliveries, demand, capacity, ready,
 //                       due, service, seed?, iters?, veh_penalty?, time_penalty?,
-//                       fleet_min?, max_vehicles?, wall_ms?}
+//                       fleet_min?, max_vehicles?, wall_ms?, max_route_duration?,
+//                       vehicle_types? [[cap,fixed,count],..], driver_break?
+//                       [dur,earliest,latest]}
 //   POST /solve/pdptw/dispatch  same fields as /solve/pdptw (no fleet_min/
 //                       max_vehicles: dispatch keeps the current fleet shape)
 //                       plus current, locked — rolling-horizon re-solve
@@ -197,6 +199,7 @@ const VrptwRequest = struct {
     fleet_min: bool = false, // hierarchical vehicle minimization (SISR engine)
     max_vehicles: u64 = 0, // hard route cap; 0 = uncapped
     wall_ms: u64 = 0, // wall-clock budget (ms) for SISR/fleet-min; 0 = iters-bounded
+    max_route_duration: u64 = 0, // shift-length cap on route duration; 0 = uncapped
     // Long-run quality levers (see VrptwSisrParams); all default off, best
     // measured together at iters >= ~1M ("combo"): polish + stress_rate 0.5 +
     // tabu_tenure 10000 + marathon.
@@ -240,6 +243,7 @@ fn solveVrptw(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []c
         if (r.iters != 0) params.iters = @intCast(r.iters);
         if (r.wall_ms != 0) params.time_ms = r.wall_ms;
         if (r.max_vehicles != 0) params.max_vehicles = @intCast(r.max_vehicles);
+        params.max_route_dur = r.max_route_duration;
         params.polish = r.polish;
         params.stress_rate = r.stress_rate;
         params.tabu_tenure = @intCast(r.tabu_tenure);
@@ -283,6 +287,13 @@ const PdptwRequest = struct {
     fleet_min: bool = false, // hierarchical vehicle minimization
     max_vehicles: u64 = 0, // positive = PINNED driver (targets EXACTLY this fleet)
     wall_ms: u64 = 0, // wall-clock budget (ms) for the wall-driven drivers; 0 = 10s
+    max_route_duration: u64 = 0, // shift-length cap on route duration; 0 = uncapped
+    // Heterogeneous fleet (v1): up to 8 [capacity, fixed_cost, count] triples
+    // (count 0 = unlimited). Nonempty = typed solve; `capacity` above is
+    // ignored, fleet_min/max_vehicles rejected, response gains "types".
+    vehicle_types: []const [3]u64 = &.{},
+    // Driver break (v1): [duration, earliest, latest]. Empty = no break.
+    driver_break: []const u32 = &.{},
 };
 
 fn solvePdptw(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []const u8) !void {
@@ -297,10 +308,31 @@ fn solvePdptw(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []c
         return respondError(req, .unprocessable_entity, "pickups/deliveries/demand must all have length n_pairs");
     if (r.ready.len != dim or r.due.len != dim or r.service.len != dim)
         return respondError(req, .unprocessable_entity, "ready/due/service must all have length dim (2*n_pairs+1)");
-    if (r.capacity == 0)
+    if (r.capacity == 0 and r.vehicle_types.len == 0)
         return respondError(req, .unprocessable_entity, "capacity must be > 0");
     if (r.ready[0] != 0 or r.service[0] != 0)
         return respondError(req, .unprocessable_entity, "depot slots ready[0] and service[0] must be 0");
+    if (r.vehicle_types.len > commiv.internal.pdptw_sisr.MAX_VEH_TYPES)
+        return respondError(req, .unprocessable_entity, "vehicle_types supports at most 8 types");
+    if (r.vehicle_types.len != 0 and (r.fleet_min or r.max_vehicles != 0))
+        return respondError(req, .unprocessable_entity, "vehicle_types is incompatible with fleet_min/max_vehicles; bound the fleet with per-type counts");
+    if (r.driver_break.len != 0 and r.driver_break.len != 3)
+        return respondError(req, .unprocessable_entity, "driver_break must be [duration, earliest, latest]");
+    if (r.driver_break.len == 3 and (r.fleet_min or r.max_vehicles != 0))
+        return respondError(req, .unprocessable_entity, "driver_break is incompatible with fleet_min/max_vehicles (v1)");
+    if (r.driver_break.len == 3 and r.driver_break[1] > r.driver_break[2])
+        return respondError(req, .unprocessable_entity, "driver_break earliest must be <= latest");
+    // Typed fleet: effective uniform capacity for the shape checks = largest type.
+    var vt: [commiv.internal.pdptw_sisr.MAX_VEH_TYPES]commiv.internal.pdptw_sisr.VehType = undefined;
+    var eff_cap: u32 = r.capacity;
+    if (r.vehicle_types.len != 0) {
+        eff_cap = 0;
+        for (r.vehicle_types, 0..) |t, i| {
+            if (t[0] == 0) return respondError(req, .unprocessable_entity, "vehicle type capacity must be > 0");
+            vt[i] = .{ .capacity = @intCast(t[0]), .fixed_cost = t[1], .count = @intCast(t[2]) };
+            eff_cap = @max(eff_cap, @as(u32, @intCast(t[0])));
+        }
+    }
 
     // Synthesize the pairing arrays the engine consumes and validate coverage:
     // every node 1..dim-1 must be named exactly once across pickups/deliveries.
@@ -319,7 +351,7 @@ fn solvePdptw(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []c
             return respondError(req, .unprocessable_entity, "pickup/delivery ids must be distinct and in 1..dim-1");
         if (seen[pu] or seen[qu])
             return respondError(req, .unprocessable_entity, "each node may appear only once across pickups/deliveries");
-        if (r.demand[i] > r.capacity)
+        if (r.demand[i] > eff_cap)
             return respondError(req, .unprocessable_entity, "a request's demand exceeds capacity (infeasible)");
         seen[pu] = true;
         seen[qu] = true;
@@ -337,7 +369,7 @@ fn solvePdptw(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []c
     const inst = commiv.PdpInstance{
         .n_pairs = n_pairs,
         .matrix = flat,
-        .capacity = @intCast(r.capacity),
+        .capacity = @intCast(eff_cap),
         .pair_of = pair_of,
         .is_pickup = is_pickup,
         .demand_signed = demand_signed,
@@ -350,10 +382,14 @@ fn solvePdptw(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []c
         .seed = r.seed,
         .veh_penalty = r.veh_penalty,
         .time_penalty = r.time_penalty,
+        .max_route_dur = r.max_route_duration,
     };
     if (r.iters != 0) params.iters = @intCast(r.iters);
     if (r.wall_ms != 0) params.time_ms = r.wall_ms;
     if (r.max_vehicles != 0) params.max_vehicles = @intCast(r.max_vehicles);
+    if (r.vehicle_types.len != 0) params.veh_types = vt[0..r.vehicle_types.len];
+    if (r.driver_break.len == 3 and r.driver_break[0] != 0)
+        params.brk = .{ .dur = r.driver_break[0], .earliest = r.driver_break[1], .latest = r.driver_break[2] };
     // The wall-driven drivers (fleet-min, pinned) need a budget; default 10s.
     const budget: u64 = if (r.wall_ms != 0) r.wall_ms else 10_000;
 
@@ -369,6 +405,14 @@ fn solvePdptw(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []c
     };
     defer result.deinit();
 
+    if (result.types) |tys| {
+        return respondJson(arena, req, .{
+            .total_cost = result.total_cost,
+            .vehicles = result.routes.len,
+            .routes = result.routes,
+            .types = tys,
+        });
+    }
     return respondJson(arena, req, .{
         .total_cost = result.total_cost,
         .vehicles = result.routes.len,
@@ -392,6 +436,8 @@ const PdptwDispatchRequest = struct {
     veh_penalty: u64 = 0,
     time_penalty: u64 = 0, // money objective: charge route duration (PDPTW-only)
     wall_ms: u64 = 0, // wall-clock budget (ms); 0 = default
+    max_route_duration: u64 = 0, // shift-length cap on route duration; 0 = uncapped
+    driver_break: []const u32 = &.{}, // [duration, earliest, latest]; empty = none
 };
 
 /// Rolling-horizon PDPTW re-solve: the /solve/pdptw instance contract plus
@@ -500,9 +546,16 @@ fn solvePdptwDispatch(arena: std.mem.Allocator, req: *std.http.Server.Request, b
         .seed = r.seed,
         .veh_penalty = r.veh_penalty,
         .time_penalty = r.time_penalty,
+        .max_route_dur = r.max_route_duration,
     };
     if (r.iters != 0) params.iters = @intCast(r.iters);
     if (r.wall_ms != 0) params.time_ms = r.wall_ms;
+    if (r.driver_break.len == 3 and r.driver_break[0] != 0) {
+        if (r.driver_break[1] > r.driver_break[2])
+            return respondError(req, .unprocessable_entity, "driver_break earliest must be <= latest");
+        params.brk = .{ .dur = r.driver_break[0], .earliest = r.driver_break[1], .latest = r.driver_break[2] };
+    } else if (r.driver_break.len != 0 and r.driver_break.len != 3)
+        return respondError(req, .unprocessable_entity, "driver_break must be [duration, earliest, latest]");
 
     var result = commiv.internal.pdptw_sisr.solvePdptwSisrDispatch(arena, inst, params, current, locked) catch |err|
         return respondSolverError(req, err);

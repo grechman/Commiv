@@ -86,7 +86,7 @@ class InfeasibleError(CommivError):
 
 
 class _Options(ctypes.Structure):
-    # Must mirror commiv_options in include/commiv.h byte-for-byte (88 bytes).
+    # Must mirror commiv_options in include/commiv.h byte-for-byte (104 bytes).
     _fields_ = [
         ("seed", ctypes.c_uint64),
         ("sisr_iters", ctypes.c_uint64),
@@ -100,6 +100,10 @@ class _Options(ctypes.Structure):
         ("max_vehicles", ctypes.c_uint64),
         ("time_penalty", ctypes.c_uint64),
         ("max_route_duration", ctypes.c_uint64),
+        ("break_duration", ctypes.c_uint32),
+        ("break_earliest", ctypes.c_uint32),
+        ("break_latest", ctypes.c_uint32),
+        ("reserved", ctypes.c_uint32),
     ]
 
 
@@ -176,6 +180,17 @@ _lib.commiv_solve_pdptw_dispatch.argtypes = [
     ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_size_t),
     ctypes.POINTER(_Options), ctypes.POINTER(ctypes.c_void_p),
 ]
+_lib.commiv_solve_pdptw_typed.restype = ctypes.c_int
+_lib.commiv_solve_pdptw_typed.argtypes = [
+    ctypes.POINTER(ctypes.c_uint32), ctypes.c_size_t,
+    ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint32),
+    ctypes.POINTER(ctypes.c_uint32),
+    ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint32),
+    ctypes.POINTER(ctypes.c_uint32),
+    ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint64),
+    ctypes.POINTER(ctypes.c_uint32), ctypes.c_size_t,
+    ctypes.POINTER(_Options), ctypes.POINTER(ctypes.c_void_p),
+]
 _lib.commiv_solve_atsp.restype = ctypes.c_int
 _lib.commiv_solve_atsp.argtypes = [
     ctypes.POINTER(ctypes.c_uint32), ctypes.c_size_t,
@@ -190,8 +205,12 @@ _lib.commiv_routes_len.restype = ctypes.c_size_t
 _lib.commiv_routes_len.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
 _lib.commiv_routes_get.restype = ctypes.POINTER(ctypes.c_uint32)
 _lib.commiv_routes_get.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+_lib.commiv_routes_type.restype = ctypes.c_uint32
+_lib.commiv_routes_type.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
 _lib.commiv_routes_free.restype = None
 _lib.commiv_routes_free.argtypes = [ctypes.c_void_p]
+
+_NO_TYPE = 0xFFFFFFFF
 
 
 def version() -> str:
@@ -252,10 +271,13 @@ def _raise_for(rc: int, context: str) -> None:
 class CvrpSolution:
     """One route per vehicle; each route lists customer indices (1..n) in visit
     order with the depot implied at both ends. total_cost is summed on the
-    directed matrix you passed in."""
+    directed matrix you passed in. types is None for uniform-fleet solves;
+    for solve_pdptw(vehicle_types=...) it holds route r's index into that
+    vehicle_types list."""
 
     total_cost: int
     routes: list[list[int]]
+    types: list[int] | None = None
 
     @property
     def vehicles(self) -> int:
@@ -266,10 +288,14 @@ def _extract_routes(handle: ctypes.c_void_p) -> CvrpSolution:
     try:
         cost = _lib.commiv_routes_cost(handle)
         routes = []
+        types = []
         for i in range(_lib.commiv_routes_count(handle)):
             n = _lib.commiv_routes_len(handle, i)
             ptr = _lib.commiv_routes_get(handle, i)
             routes.append([ptr[j] for j in range(n)])
+            types.append(_lib.commiv_routes_type(handle, i))
+        if routes and all(t != _NO_TYPE for t in types):
+            return CvrpSolution(total_cost=cost, routes=routes, types=types)
         return CvrpSolution(total_cost=cost, routes=routes)
     finally:
         _lib.commiv_routes_free(handle)
@@ -376,6 +402,8 @@ def solve_pdptw(
     max_vehicles: int = 0,
     max_route_duration: int = 0,
     wall_ms: int = 0,
+    vehicle_types: Sequence[tuple[int, int, int]] | None = None,
+    break_: tuple[int, int, int] | None = None,
 ) -> CvrpSolution:
     """Solve a directed PDPTW (pickup-and-delivery with time windows), SISR.
 
@@ -401,7 +429,21 @@ def solve_pdptw(
 
     max_route_duration > 0 caps every route's duration (travel + service +
     unavoidable waiting) at that shift length; 0 = uncapped. This is a hard
-    feasibility bound, distinct from the soft time_penalty cost term."""
+    feasibility bound, distinct from the soft time_penalty cost term.
+
+    vehicle_types = [(capacity, fixed_cost, count), ...] (1..8 entries) runs
+    the HETEROGENEOUS-FLEET solver: each route is served by one type — its
+    capacity bounds the route load, its fixed_cost replaces veh_penalty for
+    that route, and at most `count` routes of the type run simultaneously
+    (count 0 = unlimited). The result's .types lists route r's index into
+    this list. The uniform `capacity` argument is ignored then, and
+    fleet_min / max_vehicles are unsupported (bound the fleet with counts).
+
+    break_ = (duration, earliest, latest) requires every route whose
+    depart-at-0 schedule finishes after `earliest` to contain ONE driver break
+    of `duration` time units starting within [earliest, latest]. The break
+    absorbs waiting first and counts into route duration (so time_penalty
+    prices it). Unsupported with fleet_min / max_vehicles."""
     dim = _matrix_dim(matrix)
     n_pairs = len(pickups)
     if len(deliveries) != n_pairs:
@@ -419,9 +461,27 @@ def solve_pdptw(
                     time_penalty=time_penalty, fleet_min=1 if fleet_min else 0,
                     max_vehicles=max_vehicles, wall_ms=wall_ms,
                     max_route_duration=max_route_duration)
+    if break_ is not None:
+        if fleet_min or max_vehicles:
+            raise ValueError("break_ is incompatible with fleet_min/max_vehicles (v1)")
+        opts.break_duration, opts.break_earliest, opts.break_latest = break_
     out = ctypes.c_void_p()
-    rc = _lib.commiv_solve_pdptw(m, n_pairs, pk, dl, dm, capacity, rd, du, sv,
-                                 ctypes.byref(opts), ctypes.byref(out))
+    if vehicle_types is not None:
+        vts = list(vehicle_types)
+        if not 1 <= len(vts) <= 8:
+            raise ValueError(f"vehicle_types needs 1..8 entries, got {len(vts)}")
+        if fleet_min or max_vehicles:
+            raise ValueError("vehicle_types is incompatible with fleet_min/max_vehicles; "
+                             "bound the fleet with per-type counts instead")
+        tcap = _as_u32_array([t[0] for t in vts], len(vts), "vehicle_types capacity")
+        tfix = (ctypes.c_uint64 * len(vts))(*[int(t[1]) for t in vts])
+        tcnt = _as_u32_array([t[2] for t in vts], len(vts), "vehicle_types count")
+        rc = _lib.commiv_solve_pdptw_typed(m, n_pairs, pk, dl, dm, rd, du, sv,
+                                           tcap, tfix, tcnt, len(vts),
+                                           ctypes.byref(opts), ctypes.byref(out))
+    else:
+        rc = _lib.commiv_solve_pdptw(m, n_pairs, pk, dl, dm, capacity, rd, du, sv,
+                                     ctypes.byref(opts), ctypes.byref(out))
     if rc != _OK:
         _raise_for(rc, "solve_pdptw")
     return _extract_routes(out)
@@ -445,6 +505,7 @@ def solve_pdptw_dispatch(
     time_penalty: int = 0,
     max_route_duration: int = 0,
     wall_ms: int = 0,
+    break_: tuple[int, int, int] | None = None,
 ) -> CvrpSolution:
     """Rolling-horizon PDPTW re-solve: same instance contract as solve_pdptw,
     plus the CURRENT plan and its LOCKED prefixes.
@@ -490,6 +551,8 @@ def solve_pdptw_dispatch(
     opts = _Options(seed=seed, sisr_iters=iters, veh_penalty=veh_penalty,
                     time_penalty=time_penalty, wall_ms=wall_ms,
                     max_route_duration=max_route_duration)
+    if break_ is not None:
+        opts.break_duration, opts.break_earliest, opts.break_latest = break_
     out = ctypes.c_void_p()
     rc = _lib.commiv_solve_pdptw_dispatch(
         m, n_pairs, pk, dl, dm, capacity, rd, du, sv,
@@ -540,6 +603,7 @@ class DispatchSession:
         time_penalty: int = 0,
         max_route_duration: int = 0,
         wall_ms: int = 0,
+        break_: tuple[int, int, int] | None = None,
     ) -> None:
         dim = _matrix_dim(matrix)
         n_pairs = len(pickups)
@@ -561,6 +625,7 @@ class DispatchSession:
         self.time_penalty = time_penalty
         self.max_route_duration = max_route_duration
         self.wall_ms = wall_ms
+        self.break_ = break_
         self.t = 0
         self.plan: list[list[int]] = []  # current routes, node ids
         self._locked: list[int] | None = None
@@ -572,7 +637,7 @@ class DispatchSession:
         called since the last solve). Stores and returns the new plan."""
         opts = dict(seed=self.seed, iters=self.iters, veh_penalty=self.veh_penalty,
                     time_penalty=self.time_penalty, max_route_duration=self.max_route_duration,
-                    wall_ms=self.wall_ms)
+                    wall_ms=self.wall_ms, break_=self.break_)
         opts.update(kw)
         if not self.plan:
             sol = solve_pdptw(

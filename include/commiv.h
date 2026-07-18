@@ -57,6 +57,16 @@ typedef struct commiv_routes commiv_routes;
  *                   route's depot->..->depot DURATION (travel + service +
  *                   unavoidable waiting). No route in the result exceeds it.
  *                   0 = uncapped. IGNORED by CVRP.
+ *   break_duration / break_earliest / break_latest  Driver break (PDPTW ONLY,
+ *                   v1). break_duration > 0: every route whose depart-at-0
+ *                   schedule finishes after break_earliest must contain ONE
+ *                   break of break_duration time units STARTING within
+ *                   [break_earliest, break_latest]. The break absorbs waiting
+ *                   first, delays later stops by the remainder, and counts
+ *                   into route duration (so the money objective prices it).
+ *                   All-zero = no break. Unsupported with fleet_min /
+ *                   max_vehicles (COMMIV_ERR_INVALID_ARGUMENT); IGNORED by
+ *                   CVRP and VRPTW.
  */
 typedef struct commiv_options {
     uint64_t seed;
@@ -71,6 +81,10 @@ typedef struct commiv_options {
     uint64_t max_vehicles;   /* hard route cap; 0 = uncapped */
     uint64_t time_penalty;   /* PDPTW money knob; 0 = off */
     uint64_t max_route_duration; /* shift-length cap (VRPTW/PDPTW); 0 = uncapped */
+    uint32_t break_duration; /* driver break length (PDPTW); 0 = no break */
+    uint32_t break_earliest; /* break must START within [earliest, latest] */
+    uint32_t break_latest;
+    uint32_t reserved;       /* keeps the struct 8-aligned at 104 bytes */
 } commiv_options;
 
 /* Library version, e.g. "0.4.0". Static storage; do not free. */
@@ -130,6 +144,33 @@ int commiv_solve_pdptw(const uint32_t *matrix, size_t n_pairs,
                        const uint32_t *service,
                        const commiv_options *options, commiv_routes **out);
 
+/* Heterogeneous-fleet PDPTW: commiv_solve_pdptw with a vehicle-type table
+ * instead of one uniform capacity.
+ *
+ *   veh_type_capacity    n_types entries, each > 0: load capacity of type t.
+ *   veh_type_fixed_cost  n_types entries: per-route fixed cost of type t —
+ *                        replaces options->veh_penalty in the objective.
+ *   veh_type_count       n_types entries: max simultaneous routes of type t;
+ *                        0 = unlimited.
+ *   n_types              1..8.
+ *
+ * Every route in the answer is served by exactly one type, chosen by the
+ * solver (cheapest fixed cost that fits, refined by the search); read the
+ * assignment back with commiv_routes_type(). Route loads are bounded by the
+ * route's OWN type capacity. demand[i] must fit the largest type
+ * (COMMIV_ERR_INFEASIBLE otherwise). options->fleet_min and
+ * options->max_vehicles are not supported here (COMMIV_ERR_INVALID_ARGUMENT):
+ * bound the fleet with per-type counts instead. */
+int commiv_solve_pdptw_typed(const uint32_t *matrix, size_t n_pairs,
+                             const uint32_t *pickup_node, const uint32_t *delivery_node,
+                             const uint32_t *demand,
+                             const uint32_t *ready, const uint32_t *due,
+                             const uint32_t *service,
+                             const uint32_t *veh_type_capacity,
+                             const uint64_t *veh_type_fixed_cost,
+                             const uint32_t *veh_type_count, size_t n_types,
+                             const commiv_options *options, commiv_routes **out);
+
 /* Rolling-horizon PDPTW re-solve: the same instance contract as
  * commiv_solve_pdptw, plus the CURRENT plan and its LOCKED prefixes.
  *
@@ -180,6 +221,11 @@ uint64_t commiv_routes_cost(const commiv_routes *routes);
 size_t commiv_routes_count(const commiv_routes *routes);
 size_t commiv_routes_len(const commiv_routes *routes, size_t route);
 const uint32_t *commiv_routes_get(const commiv_routes *routes, size_t route);
+/* Vehicle-type index of `route` (into the veh_type_* arrays given to
+ * commiv_solve_pdptw_typed). COMMIV_NO_TYPE for uniform-fleet solves or an
+ * out-of-range route. */
+#define COMMIV_NO_TYPE UINT32_MAX
+uint32_t commiv_routes_type(const commiv_routes *routes, size_t route);
 void commiv_routes_free(commiv_routes *routes);
 
 #ifdef __cplusplus
