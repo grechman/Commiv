@@ -207,6 +207,24 @@ commiv_solve_pdptw_typed / vehicle_types= kwarg), driver breaks v1
 (break_duration/earliest/latest options; PDPTW-only). Multi-depot: designed,
 not built — docs/multidepot-design.md. M5 remains blocked on PyPI/CI accounts.
 
+UPDATE 2026-07-19 (M5 + M7, commit ed4d82e): M5 BUILT — platform wheels
+(tools/build_wheels.sh: linux x86_64 manylinux2014 + macOS arm64/x86_64, Zig
+cross-compiled, libc-free on Linux so no glibc pinning; clean-venv pip install
+smoke green incl. vehicle_types/break_), from-scratch docker image (static
+musl commiv-serve, 9.8 MB, health + typed-solve smoked), GH Actions workflow
+(.github/workflows/wheels.yml: builds + smokes wheels on every push, publishes
+to PyPI + GHCR on v* tags). macOS wheels are cross-compiled and NOT
+runtime-tested (no Apple hardware) — nanos() was made portable (comptime
+linux-syscall / libSystem clock_gettime split; linux twprobe identity
+verified unchanged) but say "untested on macOS" wherever published until
+someone runs test_smoke on a Mac. PUBLISHING blocked on exactly one owner
+action: PyPI account + PYPI_API_TOKEN repo secret, then `git tag v0.4.0 &&
+git push --tags` does the rest. M7 DONE — docs/abi.md (semver + append-only
+options contract), capi comptime layout canaries (104 B + every field
+offset), tools/abi_check.sh + committed symbol baseline (13 exports).
+The 7-milestone plan is now M1-M7 all built; only the PyPI/GHCR publish
+button and the multi-depot build remain.
+
 ## What this plan deliberately does NOT include
 
 - No new search machinery. The quality lead is decisive and commercially banked.
