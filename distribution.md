@@ -225,6 +225,13 @@ offset), tools/abi_check.sh + committed symbol baseline (13 exports).
 The 7-milestone plan is now M1-M7 all built; only the PyPI/GHCR publish
 button and the multi-depot build remain.
 
+UPDATE 2026-07-19 later: PUBLISHED. Owner added the PyPI token, tag v0.4.0
+pushed, CI green end-to-end, and `pip install commiv` from the real index
+verified working (fresh venv, money-objective PDPTW solve). THE PLAN'S
+ACCEPTANCE CRITERION IS MET. The docker image pushed to
+ghcr.io/grechman/commiv-serve:latest — note GHCR packages start PRIVATE:
+make it public in the package settings for anonymous `docker pull`.
+
 ## What this plan deliberately does NOT include
 
 - No new search machinery. The quality lead is decisive and commercially banked.
