@@ -3003,22 +3003,22 @@ pub fn solveVrptwSisrFrom(allocator: std.mem.Allocator, inst: VrptwInstance, opt
 
         const Saved = struct { cost: u64, unassigned: usize, overcap: u64 };
 
-        pub fn save(l: *@This(), it: usize) Saved {
+        pub inline fn save(l: *@This(), it: usize) Saved {
             _ = it;
             return .{ .cost = l.cur.cost, .unassigned = l.cur.n_unassigned, .overcap = l.cur.overCapCount() };
         }
-        pub fn ruin(l: *@This(), rng_: std.Random, it: usize) !void {
+        pub inline fn ruin(l: *@This(), rng_: std.Random, it: usize) !void {
             try l.cur.ruin(l.eff_params, rng_, it);
         }
-        pub fn recreate(l: *@This(), rng_: std.Random) !void {
+        pub inline fn recreate(l: *@This(), rng_: std.Random) !void {
             try l.cur.recreate(l.eff_params, rng_);
         }
-        pub fn delta(l: *@This(), sv: Saved) i64 {
+        pub inline fn delta(l: *@This(), sv: Saved) i64 {
             const eff = l.cur.cost + UNASSIGNED_PEN * @as(u64, @intCast(l.cur.n_unassigned)) + CAP_PEN * l.cur.overCapCount();
             const saved_eff = sv.cost + UNASSIGNED_PEN * @as(u64, @intCast(sv.unassigned)) + CAP_PEN * sv.overcap;
             return @as(i64, @intCast(eff)) - @as(i64, @intCast(saved_eff));
         }
-        pub fn accept(l: *@This(), sv: Saved, it: usize) !void {
+        pub inline fn accept(l: *@This(), sv: Saved, it: usize) !void {
             _ = sv;
             var do_polish = false;
             if (l.params.polish) {
@@ -3062,7 +3062,7 @@ pub fn solveVrptwSisrFrom(allocator: std.mem.Allocator, inst: VrptwInstance, opt
                 l.best.* = try l.cur.toResult(l.allocator);
             }
         }
-        pub fn reject(l: *@This(), sv: Saved) !void {
+        pub inline fn reject(l: *@This(), sv: Saved) !void {
             try l.cur.rollback();
             // Debug invariant (mirrors the CVRP engine): rollback must restore the
             // incremental cost and unassigned count exactly, or the undo journal
@@ -3070,7 +3070,7 @@ pub fn solveVrptwSisrFrom(allocator: std.mem.Allocator, inst: VrptwInstance, opt
             if (builtin.mode == .Debug) std.debug.assert(l.cur.cost == sv.cost);
             if (builtin.mode == .Debug) std.debug.assert(l.cur.n_unassigned == sv.unassigned);
         }
-        pub fn afterIter(l: *@This(), it: usize, rng_: std.Random) !void {
+        pub inline fn afterIter(l: *@This(), it: usize, rng_: std.Random) !void {
             _ = l;
             _ = it;
             _ = rng_;
