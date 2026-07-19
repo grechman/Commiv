@@ -1,4 +1,5 @@
 const std = @import("std");
+const core_neighbors = @import("core/neighbors.zig");
 const pdp = @import("pdptw.zig");
 
 // SISR engine for PDPTW: ruin-and-recreate under threshold accepting, ported
@@ -109,7 +110,7 @@ pub const PdpSisrParams = struct {
     brk: ?Break = null,
 };
 
-pub const NbrKey = enum { sum, min, out };
+pub const NbrKey = core_neighbors.NbrKey;
 
 pub const Break = struct {
     dur: u32, // break length, matrix time units
@@ -1159,34 +1160,7 @@ const S = struct {
 };
 
 fn buildNeighbors(allocator: std.mem.Allocator, inst: pdp.PdpInstance, k: usize, key_mode: NbrKey) ![]usize {
-    const n = 2 * inst.n_pairs;
-    const gran = try allocator.alloc(usize, n * k);
-    @memset(gran, 0);
-    const kk = @min(k, if (n > 1) n - 1 else 0);
-    const idx = try allocator.alloc(usize, n);
-    defer allocator.free(idx);
-    const keyc = try allocator.alloc(u64, n + 1);
-    defer allocator.free(keyc);
-    for (1..n + 1) |c| {
-        var m: usize = 0;
-        for (1..n + 1) |j| {
-            if (j == c) continue;
-            keyc[j] = switch (key_mode) {
-                .sum => inst.d(c, j) + inst.d(j, c),
-                .min => @min(inst.d(c, j), inst.d(j, c)),
-                .out => inst.d(c, j),
-            };
-            idx[m] = j;
-            m += 1;
-        }
-        std.sort.pdq(usize, idx[0..m], keyc, struct {
-            fn lt(key: []const u64, a: usize, b: usize) bool {
-                return key[a] < key[b];
-            }
-        }.lt);
-        for (0..kk) |i| gran[(c - 1) * k + i] = idx[i];
-    }
-    return gran;
+    return core_neighbors.buildNeighborsKeyed(pdp.PdpInstance, allocator, inst, 2 * inst.n_pairs, k, key_mode);
 }
 
 const nanos = @import("core/time.zig").nanos;

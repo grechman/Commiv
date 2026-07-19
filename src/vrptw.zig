@@ -1,4 +1,5 @@
 const std = @import("std");
+const core_neighbors = @import("core/neighbors.zig");
 const builtin = @import("builtin");
 const problem = @import("problem.zig");
 const solver = @import("solver.zig");
@@ -163,41 +164,14 @@ const Route = std.ArrayList(usize);
 /// because the two engines live on different Instance types): .sum =
 /// d(c,j)+d(j,c) (historical default), .min = @min of the two directions
 /// (keeps one-way-close pairs visible on directed matrices), .out = d(c,j).
-pub const NbrKey = enum { sum, min, out };
+pub const NbrKey = core_neighbors.NbrKey;
 
 fn buildNeighbors(allocator: std.mem.Allocator, inst: VrptwInstance, k: usize) ![]usize {
     return buildNeighborsKeyed(allocator, inst, k, .sum);
 }
 
 fn buildNeighborsKeyed(allocator: std.mem.Allocator, inst: VrptwInstance, k: usize, key_mode: NbrKey) ![]usize {
-    const n = inst.n;
-    const gran = try allocator.alloc(usize, n * k);
-    @memset(gran, 0);
-    const kk = @min(k, if (n > 1) n - 1 else 0);
-    const idx = try allocator.alloc(usize, n);
-    defer allocator.free(idx);
-    const keyc = try allocator.alloc(u64, n + 1);
-    defer allocator.free(keyc);
-    for (1..n + 1) |c| {
-        var m: usize = 0;
-        for (1..n + 1) |j| {
-            if (j == c) continue;
-            keyc[j] = switch (key_mode) {
-                .sum => inst.d(c, j) + inst.d(j, c),
-                .min => @min(inst.d(c, j), inst.d(j, c)),
-                .out => inst.d(c, j),
-            };
-            idx[m] = j;
-            m += 1;
-        }
-        std.sort.pdq(usize, idx[0..m], keyc, struct {
-            fn lt(key: []const u64, a: usize, b: usize) bool {
-                return key[a] < key[b];
-            }
-        }.lt);
-        for (0..kk) |i| gran[(c - 1) * k + i] = idx[i];
-    }
-    return gran;
+    return core_neighbors.buildNeighborsKeyed(VrptwInstance, allocator, inst, inst.n, k, key_mode);
 }
 
 /// Copy `src` minus element `pos` into `dst`; return the filled slice.

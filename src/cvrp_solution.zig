@@ -102,7 +102,7 @@ pub fn solveCvrpImpl(allocator: std.mem.Allocator, inst: CvrpInstance, options: 
 /// 1..n, 1-indexed; gran[(c-1)*k + i] = the i-th nearest, 0-padded). Restricts
 /// SWAP* to spatially close customers — the granular neighbourhood that makes the
 /// search fast and scalable. Caller owns the returned slice.
-pub const NbrKey = enum { sum, min, out };
+pub const NbrKey = @import("core/neighbors.zig").NbrKey;
 
 pub fn buildCvrpNeighbors(allocator: std.mem.Allocator, inst: CvrpInstance, k: usize) ![]usize {
     return buildCvrpNeighborsKeyed(allocator, inst, k, .sum);
