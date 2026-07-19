@@ -85,7 +85,7 @@ at the stop, and must be back at the depot by `due[0]` (the horizon).
 | `max_vehicles` | int | hard cap on the number of routes (0 = uncapped) |
 | `wall_ms` | int | wall-clock budget in ms for the SISR / fleet-min search (0 = bounded by `iters` only; `fleet_min` defaults to 10000 if unset) |
 | `max_route_duration` | int | shift-length cap: no route's duration (travel + service + waiting) may exceed it; 0 = uncapped |
-| `engine` | string | `"sisr"` (default) or `"ils"` (legacy; uses `rounds`/`restarts`) |
+| `engine` | string | `"sisr"` — the only engine; field kept for compat |
 
 There is no `time_penalty` (money objective) on VRPTW — that knob is PDPTW-only.
 

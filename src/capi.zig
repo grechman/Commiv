@@ -37,8 +37,6 @@ pub const COMMIV_ERR_INTERNAL: c_int = -4;
 ///   seed            RNG seed; 0 -> 1. Same seed + threads<=1 = identical output.
 ///   sisr_iters      SISR ruin&recreate iterations (CVRP and VRPTW); 0 -> 300k.
 ///   trials          ATSP trial budget; 0 -> solver default.
-///   vrptw_rounds    Setting either of these selects the legacy VRPTW ILS engine
-///   vrptw_restarts  instead of the default SISR; 0/0 -> SISR.
 ///   veh_penalty     Per-route penalty biasing toward fewer vehicles (VRPTW, PDPTW).
 ///   threads         0 or 1 = single-threaded (deterministic); >1 = parallel
 ///                   SISR chains (CVRP and VRPTW; result depends on the count).
@@ -67,8 +65,6 @@ pub const CommivOptions = extern struct {
     seed: u64 = 0,
     sisr_iters: u64 = 0,
     trials: u64 = 0,
-    vrptw_rounds: u64 = 0,
-    vrptw_restarts: u64 = 0,
     veh_penalty: u64 = 0,
     threads: u32 = 0,
     fleet_min: u32 = 0, // was `reserved`; nonzero selects the fleet-min driver
@@ -79,7 +75,7 @@ pub const CommivOptions = extern struct {
     break_duration: u32 = 0, // driver break length (PDPTW); 0 = no break
     break_earliest: u32 = 0, // break must START within [earliest, latest]
     break_latest: u32 = 0,
-    reserved: u32 = 0, // keeps the struct 8-aligned at 104 bytes
+    reserved: u32 = 0, // keeps the struct 8-aligned at 88 bytes
 };
 
 /// Opaque to C; accessed through commiv_routes_* only. Routes are flattened:
@@ -240,15 +236,7 @@ export fn commiv_solve_vrptw(
         .due = du[0..dim],
         .service = srv[0..dim],
     };
-    // SISR (the flagship engine) is the default. Setting the legacy ILS budget
-    // knobs (vrptw_rounds / vrptw_restarts) selects the giant-tour ILS instead.
     var result = blk: {
-        if (o.vrptw_rounds != 0 or o.vrptw_restarts != 0) {
-            var params: vrptw.VrptwParams = .{ .veh_penalty = o.veh_penalty };
-            if (o.vrptw_rounds != 0) params.rounds = @intCast(o.vrptw_rounds);
-            if (o.vrptw_restarts != 0) params.restarts = @intCast(o.vrptw_restarts);
-            break :blk vrptw.solveVrptw(gpa, inst, .{ .seed = o.seed }, params) catch |err| return mapError(err);
-        }
         var params: vrptw.VrptwSisrParams = .{ .veh_penalty = o.veh_penalty };
         if (o.sisr_iters != 0) params.iters = @intCast(o.sisr_iters);
         if (o.wall_ms != 0) params.time_ms = o.wall_ms;
@@ -1243,24 +1231,22 @@ test "capi pdptw typed: rejects fleet drivers and impossible demand" {
 // are pinned so an accidental reorder, retype, or non-appended insertion
 // fails the test suite instead of shipping a silent ABI break.
 
-test "capi ABI: commiv_options layout is pinned (104 bytes, append-only)" {
-    try testing.expectEqual(@as(usize, 104), @sizeOf(CommivOptions));
+test "capi ABI: commiv_options layout is pinned (88 bytes, append-only)" {
+    try testing.expectEqual(@as(usize, 88), @sizeOf(CommivOptions));
     try testing.expectEqual(@as(usize, 0), @offsetOf(CommivOptions, "seed"));
     try testing.expectEqual(@as(usize, 8), @offsetOf(CommivOptions, "sisr_iters"));
     try testing.expectEqual(@as(usize, 16), @offsetOf(CommivOptions, "trials"));
-    try testing.expectEqual(@as(usize, 24), @offsetOf(CommivOptions, "vrptw_rounds"));
-    try testing.expectEqual(@as(usize, 32), @offsetOf(CommivOptions, "vrptw_restarts"));
-    try testing.expectEqual(@as(usize, 40), @offsetOf(CommivOptions, "veh_penalty"));
-    try testing.expectEqual(@as(usize, 48), @offsetOf(CommivOptions, "threads"));
-    try testing.expectEqual(@as(usize, 52), @offsetOf(CommivOptions, "fleet_min"));
-    try testing.expectEqual(@as(usize, 56), @offsetOf(CommivOptions, "wall_ms"));
-    try testing.expectEqual(@as(usize, 64), @offsetOf(CommivOptions, "max_vehicles"));
-    try testing.expectEqual(@as(usize, 72), @offsetOf(CommivOptions, "time_penalty"));
-    try testing.expectEqual(@as(usize, 80), @offsetOf(CommivOptions, "max_route_duration"));
-    try testing.expectEqual(@as(usize, 88), @offsetOf(CommivOptions, "break_duration"));
-    try testing.expectEqual(@as(usize, 92), @offsetOf(CommivOptions, "break_earliest"));
-    try testing.expectEqual(@as(usize, 96), @offsetOf(CommivOptions, "break_latest"));
-    try testing.expectEqual(@as(usize, 100), @offsetOf(CommivOptions, "reserved"));
+    try testing.expectEqual(@as(usize, 24), @offsetOf(CommivOptions, "veh_penalty"));
+    try testing.expectEqual(@as(usize, 32), @offsetOf(CommivOptions, "threads"));
+    try testing.expectEqual(@as(usize, 36), @offsetOf(CommivOptions, "fleet_min"));
+    try testing.expectEqual(@as(usize, 40), @offsetOf(CommivOptions, "wall_ms"));
+    try testing.expectEqual(@as(usize, 48), @offsetOf(CommivOptions, "max_vehicles"));
+    try testing.expectEqual(@as(usize, 56), @offsetOf(CommivOptions, "time_penalty"));
+    try testing.expectEqual(@as(usize, 64), @offsetOf(CommivOptions, "max_route_duration"));
+    try testing.expectEqual(@as(usize, 72), @offsetOf(CommivOptions, "break_duration"));
+    try testing.expectEqual(@as(usize, 76), @offsetOf(CommivOptions, "break_earliest"));
+    try testing.expectEqual(@as(usize, 80), @offsetOf(CommivOptions, "break_latest"));
+    try testing.expectEqual(@as(usize, 84), @offsetOf(CommivOptions, "reserved"));
     // Zero value = documented defaults: the append-only contract's foundation.
     const zeroed = std.mem.zeroes(CommivOptions);
     try testing.expectEqual(@as(u64, 0), zeroed.seed);

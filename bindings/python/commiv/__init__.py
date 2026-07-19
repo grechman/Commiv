@@ -86,13 +86,11 @@ class InfeasibleError(CommivError):
 
 
 class _Options(ctypes.Structure):
-    # Must mirror commiv_options in include/commiv.h byte-for-byte (104 bytes).
+    # Must mirror commiv_options in include/commiv.h byte-for-byte (88 bytes).
     _fields_ = [
         ("seed", ctypes.c_uint64),
         ("sisr_iters", ctypes.c_uint64),
         ("trials", ctypes.c_uint64),
-        ("vrptw_rounds", ctypes.c_uint64),
-        ("vrptw_restarts", ctypes.c_uint64),
         ("veh_penalty", ctypes.c_uint64),
         ("threads", ctypes.c_uint32),
         ("fleet_min", ctypes.c_uint32),
@@ -342,8 +340,6 @@ def solve_vrptw(
     seed: int = 1,
     iters: int = 0,
     threads: int = 1,
-    rounds: int = 0,
-    restarts: int = 0,
     veh_penalty: int = 0,
     fleet_min: bool = False,
     max_vehicles: int = 0,
@@ -356,7 +352,6 @@ def solve_vrptw(
 
     iters=0 means the default budget (300k); threads>1 runs best-of-K parallel
     chains. veh_penalty > 0 biases toward fewer vehicles at some distance cost.
-    Setting rounds/restarts selects the legacy ILS engine instead of SISR.
 
     fleet_min=True runs the hierarchical fleet-minimization driver (minimize
     vehicles first, then distance); it needs a wall budget, so pass wall_ms > 0
@@ -374,7 +369,7 @@ def solve_vrptw(
     du = _as_u32_array(due, dim, "due")
     sv = _as_u32_array(service, dim, "service")
     opts = _Options(seed=seed, sisr_iters=iters, threads=threads,
-                    vrptw_rounds=rounds, vrptw_restarts=restarts, veh_penalty=veh_penalty,
+                    veh_penalty=veh_penalty,
                     fleet_min=1 if fleet_min else 0, max_vehicles=max_vehicles, wall_ms=wall_ms,
                     max_route_duration=max_route_duration)
     out = ctypes.c_void_p()

@@ -36,8 +36,6 @@ typedef struct commiv_routes commiv_routes;
  *   seed            RNG seed; 0 means 1. Same seed + threads<=1 = same output.
  *   sisr_iters      SISR ruin-and-recreate iterations (CVRP and VRPTW); 0 = 300000.
  *   trials          ATSP trial budget; 0 = solver default.
- *   vrptw_rounds    Setting either selects the legacy VRPTW ILS engine instead
- *   vrptw_restarts  of the default SISR; both 0 = SISR (recommended).
  *   veh_penalty     Per-route penalty biasing toward fewer vehicles (VRPTW, PDPTW).
  *   threads         0 or 1 = single-threaded deterministic; >1 = parallel
  *                   SISR chains (CVRP and VRPTW; the result depends on the count).
@@ -72,8 +70,6 @@ typedef struct commiv_options {
     uint64_t seed;
     uint64_t sisr_iters;
     uint64_t trials;
-    uint64_t vrptw_rounds;
-    uint64_t vrptw_restarts;
     uint64_t veh_penalty;
     uint32_t threads;
     uint32_t fleet_min;      /* was reserved; nonzero = fleet-minimization driver */
@@ -84,7 +80,7 @@ typedef struct commiv_options {
     uint32_t break_duration; /* driver break length (PDPTW); 0 = no break */
     uint32_t break_earliest; /* break must START within [earliest, latest] */
     uint32_t break_latest;
-    uint32_t reserved;       /* keeps the struct 8-aligned at 104 bytes */
+    uint32_t reserved;       /* keeps the struct 8-aligned at 88 bytes */
 } commiv_options;
 
 /* Library version, e.g. "0.4.0". Static storage; do not free. */

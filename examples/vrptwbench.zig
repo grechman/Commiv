@@ -8,7 +8,7 @@ const commiv = @import("commiv");
 // time windows and service times are integers; travel time = distance = round(
 // euclid * 100) centi-units (distance printed /100). This tracks the unrounded-
 // Euclidean BKS to ~0.05%; the comparison is indicative at the 2nd decimal.
-// Env: VT_DIR (default vendor/vrptw), VT_FILES, VT_ROUNDS, VT_RESTARTS, VT_SEED.
+// Env: VT_DIR (default vendor/vrptw), VT_FILES, VT_SEED.
 const SCALE: u32 = 100;
 
 pub fn main(init: std.process.Init) !void {
@@ -17,8 +17,6 @@ pub fn main(init: std.process.Init) !void {
     const dir = env.get("VT_DIR") orelse "vendor/vrptw";
     const files = env.get("VT_FILES") orelse "c101,c201,r101,r201,rc101,rc201";
     const seed = try std.fmt.parseInt(u64, env.get("VT_SEED") orelse "12345", 10);
-    const rounds = try std.fmt.parseInt(usize, env.get("VT_ROUNDS") orelse "100", 10);
-    const restarts = try std.fmt.parseInt(usize, env.get("VT_RESTARTS") orelse "10", 10);
 
     std.debug.print("instance,n,bks_veh,bks_dist,veh,dist,dist_gap_pct,ms,feasible,veh_match\n", .{});
     var sum_gap: f64 = 0;
@@ -53,7 +51,6 @@ pub fn main(init: std.process.Init) !void {
         const vt_time_ms = try std.fmt.parseInt(u64, env.get("VT_TIME_MS") orelse "10000", 10);
         const vt_eject = std.mem.eql(u8, env.get("VT_EJECT") orelse "0", "1");
         const vt_p0 = try std.fmt.parseInt(u8, env.get("VT_P0") orelse "40", 10);
-        const use_sisr = vt_fleetmin or std.mem.eql(u8, env.get("VT_ENGINE") orelse "ils", "sisr");
         // Fleet-min is time-governed: iters just needs to be big enough to
         // never be the binding stop condition, unless the caller overrode it.
         const sisr_iters = try std.fmt.parseInt(usize, env.get("VT_ITERS") orelse if (vt_fleetmin) "4611686018427387904" else "300000", 10);
@@ -77,14 +74,13 @@ pub fn main(init: std.process.Init) !void {
             .lambda = try std.fmt.parseInt(usize, env.get("VT_LAMBDA") orelse "40", 10),
             .generations = try std.fmt.parseInt(usize, env.get("VT_GENS") orelse "30", 10),
             .veh_penalty = veh_penalty,
-        }) else if (use_sisr) blk: {
+        }) else blk: {
             const sisr_params = commiv.VrptwSisrParams{ .iters = sisr_iters, .veh_penalty = veh_penalty, .adjacent_gaps = adjacent_gaps, .polish = polish, .stress_rate = stress, .tabu_tenure = tabu, .marathon = marathon, .nbr_key = nbr_key, .gk = vt_gk, .final_ls = std.mem.eql(u8, env.get("VT_FINAL_LS") orelse "0", "1"), .eject = vt_eject, .fleet_p0_pct = vt_p0, .max_route_dur = vt_maxdur };
             break :blk if (vt_fleetmin)
                 try commiv.solveVrptwSisrFleetMin(allocator, inst, solve_opts, sisr_params, vt_time_ms)
             else
                 try commiv.solveVrptwSisr(allocator, inst, solve_opts, sisr_params);
-        } else
-            try commiv.solveVrptw(allocator, inst, solve_opts, .{ .rounds = rounds, .restarts = restarts, .veh_penalty = veh_penalty });
+        };
         defer res.deinit();
         const ms = @as(f64, @floatFromInt(nanos() - t0)) / 1e6;
 

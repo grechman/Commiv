@@ -9,8 +9,7 @@ const commiv = @import("commiv");
 //
 //   POST /solve/cvrp   {matrix, demand, capacity, seed?, iters?, threads?}
 //   POST /solve/vrptw  {matrix, demand, capacity, ready, due, service,
-//                       seed?, rounds?, restarts?, veh_penalty?, fleet_min?,
-//                       max_vehicles?, wall_ms?}
+//                       seed?, veh_penalty?, fleet_min?, max_vehicles?, wall_ms?}
 //   POST /solve/pdptw  {matrix, pickups, deliveries, demand, capacity, ready,
 //                       due, service, seed?, iters?, veh_penalty?, time_penalty?,
 //                       fleet_min?, max_vehicles?, wall_ms?, max_route_duration?,
@@ -190,11 +189,9 @@ const VrptwRequest = struct {
     due: []const u32, // latest service start, due[0] = depot horizon
     service: []const u32, // service durations, service[0] = 0
     seed: u64 = 1,
-    engine: []const u8 = "sisr", // "sisr" (default) or "ils"
+    engine: []const u8 = "sisr", // "sisr" is the only engine; field kept for compat
     iters: u64 = 0, // SISR iterations; 0 = default
     threads: u32 = 1, // SISR: >1 = best-of-K parallel chains
-    rounds: u64 = 0, // ILS engine only
-    restarts: u64 = 0, // ILS engine only
     veh_penalty: u64 = 0,
     fleet_min: bool = false, // hierarchical vehicle minimization (SISR engine)
     max_vehicles: u64 = 0, // hard route cap; 0 = uncapped
@@ -228,17 +225,8 @@ fn solveVrptw(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []c
         .due = r.due,
         .service = r.service,
     };
-    // SISR (the flagship engine) is the default; explicit engine=ils or the ILS
-    // budget knobs (rounds/restarts) select the legacy giant-tour ILS.
-    const use_ils = std.mem.eql(u8, r.engine, "ils") or r.rounds != 0 or r.restarts != 0;
+    // SISR is the only VRPTW engine.
     const result = blk: {
-        if (use_ils) {
-            var params: commiv.VrptwParams = .{ .veh_penalty = r.veh_penalty };
-            if (r.rounds != 0) params.rounds = @intCast(r.rounds);
-            if (r.restarts != 0) params.restarts = @intCast(r.restarts);
-            break :blk commiv.solveVrptw(arena, inst, .{ .seed = r.seed }, params) catch |err|
-                return respondSolverError(req, err);
-        }
         var params: commiv.VrptwSisrParams = .{ .veh_penalty = r.veh_penalty };
         if (r.iters != 0) params.iters = @intCast(r.iters);
         if (r.wall_ms != 0) params.time_ms = r.wall_ms;

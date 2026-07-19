@@ -71,7 +71,6 @@ pub const validateCvrp = vrp.validate; // feasibility + true-cost checker for a 
 // ---- VRPTW ------------------------------------------------------------------
 pub const VrptwInstance = vrptw.VrptwInstance;
 pub const VrptwResult = vrptw.VrptwResult;
-pub const solveVrptw = vrptw.solveVrptw;
 pub const solveVrptwSisr = vrptw.solveVrptwSisr; // flagship engine + time windows
 pub const solveVrptwSisrFrom = vrptw.solveVrptwSisrFrom;
 pub const solveVrptwSisrFleetMin = vrptw.solveVrptwSisrFleetMin;
@@ -79,7 +78,6 @@ pub const solveVrptwSisrParallel = vrptw.solveVrptwSisrParallel;
 pub const solveVrptwHgs = vrptw.solveVrptwHgs;
 pub const VrptwSisrParams = vrptw.VrptwSisrParams;
 pub const VrptwNbrKey = vrptw.NbrKey;
-pub const VrptwParams = vrptw.VrptwParams; // tuning for solveVrptw (rounds/restarts/veh_penalty)
 pub const VrptwHgsParams = vrptw.HgsParams;
 pub const validateVrptw = vrptw.validate; // feasibility + true-cost checker for a VrptwResult's routes
 

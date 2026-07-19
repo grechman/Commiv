@@ -170,86 +170,6 @@ fn splitDpTw(allocator: std.mem.Allocator, inst: VrptwInstance, giant: []const u
     return .{ .cost = p[n], .pred = pred };
 }
 
-/// Tuning for `solveVrptw` (giant-tour ILS). `rounds` is the perturbation steps
-/// per chain; `restarts` is the number of independent chains; `veh_penalty` is the
-/// per-route penalty added in Split to bias toward fewer vehicles (0 = pure
-/// distance). One named field per knob so the two same-typed `usize` values can't
-/// be silently transposed.
-pub const VrptwParams = struct {
-    rounds: usize = 100,
-    restarts: usize = 10,
-    veh_penalty: u64 = 0,
-};
-
-/// LEGACY engine — prefer `solveVrptwSisr`, which matches or beats this at equal
-/// wall and is orders of magnitude faster at scale (Moscow n=1000: 988 s -> 4 s).
-/// Kept because it reproduces the published Solomon table and as a second,
-/// structurally different engine for cross-checking.
-///
-/// Solve VRPTW: giant tour over customers (asymmetric TSP core) -> TW Split ->
-/// route local search (relocate/or-opt/2-opt/swap, all TW+capacity gated) ->
-/// multi-start ILS (double-bridge on the giant order + re-Split). Minimizes total
-/// distance; reports vehicle count. `params.veh_penalty` biases Split toward fewer routes.
-pub fn solveVrptw(allocator: std.mem.Allocator, inst: VrptwInstance, options: solver.SolveOptions, params: VrptwParams) !VrptwResult {
-    const rounds = params.rounds;
-    const restarts = params.restarts;
-    const veh_penalty = params.veh_penalty;
-    const n = inst.n;
-    if (inst.demand.len != n + 1 or inst.matrix.len != (std.math.mul(usize, n + 1, n + 1) catch return error.InvalidInstance)) return error.InvalidInstance;
-    if (inst.ready.len != n + 1 or inst.due.len != n + 1 or inst.service.len != n + 1) return error.InvalidInstance;
-    if (inst.demand[0] != 0 or inst.ready[0] != 0 or inst.service[0] != 0) return error.InvalidInstance; // depot row must be zeroed (demand/ready/service); nonzero = caller data-mapping bug
-
-    // Giant tour: ATSP over the customer sub-matrix (1..n).
-    const sub = try allocator.alloc(u32, n * n);
-    defer allocator.free(sub);
-    for (0..n) |a| {
-        for (0..n) |b| sub[a * n + b] = inst.matrix[(a + 1) * (n + 1) + (b + 1)];
-    }
-    var atsp = try asymmetric.solveAtsp(allocator, sub, n, options);
-    defer atsp.deinit();
-    const giant = try allocator.alloc(usize, n);
-    defer allocator.free(giant);
-    for (atsp.tour, 0..) |c, idx| giant[idx] = c + 1;
-
-    const gk: usize = @min(@as(usize, 20), if (n > 1) n - 1 else 0);
-    const gran = try buildNeighbors(allocator, inst, gk);
-    defer allocator.free(gran);
-
-    var sol = try Solution.fromGiant(allocator, inst, giant, veh_penalty, gran, gk);
-    defer sol.deinit();
-    try sol.localSearch();
-
-    var base = try sol.clone();
-    defer base.deinit();
-    var best = try sol.clone();
-    defer best.deinit();
-    var inc = try sol.clone();
-    defer inc.deinit();
-
-    var chain: usize = 0;
-    while (chain < restarts) : (chain += 1) {
-        try sol.copyFrom(base);
-        try inc.copyFrom(base);
-        var prng = std.Random.DefaultPrng.init(options.seed +% chain *% 0x9E3779B97F4A7C15);
-        const rng = prng.random();
-        var round: usize = 0;
-        while (round < rounds) : (round += 1) {
-            try sol.perturb(rng);
-            try sol.localSearch();
-            if (sol.cost < inc.cost) {
-                try inc.copyFrom(sol);
-            } else {
-                try sol.copyFrom(inc);
-            }
-        }
-        if (inc.cost < best.cost) try best.copyFrom(inc);
-    }
-    var result = try best.toResult(allocator);
-    errdefer result.deinit();
-    if (validate(inst, result.routes) == null) return error.Infeasible;
-    return result;
-}
-
 const Route = std.ArrayList(usize);
 
 /// k-nearest-neighbour lists (granular search): gran[(c-1)*k + i] is the i-th
@@ -1402,26 +1322,6 @@ const Solution = struct {
         try self.routes.items[r].appendSlice(self.allocator, items);
     }
 
-    /// Double-bridge kick on the flattened giant order, then re-Split.
-    fn perturb(self: *Solution, rng: std.Random) !void {
-        const n = self.inst.n;
-        self.flattenInto(self.giant_buf);
-        if (n >= 8) {
-            const g = self.giant_buf;
-            const p1 = 1 + rng.uintLessThan(usize, n - 3);
-            const p2 = p1 + 1 + rng.uintLessThan(usize, n - p1 - 2);
-            const p3 = p2 + 1 + rng.uintLessThan(usize, n - p2 - 1);
-            var tmp: std.ArrayList(usize) = .empty;
-            defer tmp.deinit(self.allocator);
-            try tmp.appendSlice(self.allocator, g[0..p1]);
-            try tmp.appendSlice(self.allocator, g[p2..p3]);
-            try tmp.appendSlice(self.allocator, g[p1..p2]);
-            try tmp.appendSlice(self.allocator, g[p3..]);
-            @memcpy(self.giant_buf, tmp.items);
-        }
-        try self.rebuildFromGiant(self.giant_buf);
-    }
-
     fn toResult(self: *const Solution, allocator: std.mem.Allocator) !VrptwResult {
         var total: u64 = 0;
         var count: usize = 0;
@@ -1466,7 +1366,7 @@ pub fn validate(inst: VrptwInstance, routes: []const []const usize) ?u64 {
 // two parents (selected by biased fitness = quality + diversity), then educated.
 // Diversity in the survivor/selection pressure is what escapes the single-
 // incumbent traps that ILS can't (e.g. the rc101 vehicle-count plateau). This
-// reuses the same Solution/Split/localSearch as solveVrptw, so it serves CVRP too
+// reuses the same Solution/Split/localSearch machinery, so it serves CVRP too
 // (CVRP = infinite windows).
 
 pub const HgsParams = struct {
@@ -1764,33 +1664,6 @@ pub fn solveVrptwHgs(allocator: std.mem.Allocator, inst: VrptwInstance, options:
 
 // ---- tests ----
 
-test "VRPTW returns a clean error for a TW-unreachable customer" {
-    const allocator = std.testing.allocator;
-    // Customer 2 is due at 10 but every arc into it costs 100 (from the depot AND
-    // from customer 1), so it cannot be served in time in any route position and
-    // no TW-feasible split exists. The solver must surface a clean error rather
-    // than walk an uninitialized pred chain (regression for splitDpTw, ZIG-1).
-    const m = [_]u32{
-        0,   5, 100,
-        5,   0, 100,
-        100, 5, 0,
-    };
-    const demand = [_]u32{ 0, 1, 1 };
-    const ready = [_]u32{ 0, 0, 0 };
-    const due = [_]u32{ 1000, 1000, 10 };
-    const service = [_]u32{ 0, 0, 0 };
-    const inst = VrptwInstance{
-        .n = 2,
-        .matrix = &m,
-        .demand = &demand,
-        .capacity = 10,
-        .ready = &ready,
-        .due = &due,
-        .service = &service,
-    };
-    try std.testing.expectError(error.NoFeasibleSplit, solveVrptw(allocator, inst, .{ .seed = 1 }, .{ .rounds = 5, .restarts = 1, .veh_penalty = 0 }));
-}
-
 test "TWS concatenation feasibility matches the scheduler (oracle)" {
     const allocator = std.testing.allocator;
     var prng = std.Random.DefaultPrng.init(0x7503);
@@ -1989,29 +1862,6 @@ test "VRPTW Split avoids a TW-infeasible merge that CVRP would take" {
     defer allocator.free(sp.pred);
     // two routes: (0-1-0)=20 + (0-2-0)=20 = 40 (merge 0-1-2-0 is TW-infeasible)
     try std.testing.expectEqual(@as(u64, 40), sp.cost);
-}
-
-fn bruteForceTw(allocator: std.mem.Allocator, inst: VrptwInstance) !u64 {
-    const n = inst.n;
-    const perm = try allocator.alloc(usize, n);
-    defer allocator.free(perm);
-    for (0..n) |i| perm[i] = i + 1;
-    var best: u64 = std.math.maxInt(u64);
-    try permRecTw(allocator, inst, perm, 0, &best);
-    return best;
-}
-fn permRecTw(allocator: std.mem.Allocator, inst: VrptwInstance, perm: []usize, k: usize, best: *u64) !void {
-    if (k == perm.len) {
-        const sp = try splitDpTw(allocator, inst, perm, 0);
-        defer allocator.free(sp.pred);
-        if (sp.cost < best.*) best.* = sp.cost;
-        return;
-    }
-    for (k..perm.len) |i| {
-        std.mem.swap(usize, &perm[k], &perm[i]);
-        try permRecTw(allocator, inst, perm, k + 1, best);
-        std.mem.swap(usize, &perm[k], &perm[i]);
-    }
 }
 
 // =============================================================================
@@ -3064,9 +2914,9 @@ fn nanos() u64 {
 /// SISR solver for (symmetric or asymmetric) VRPTW, uncapped fleet: the CVRP
 /// flagship engine with time windows wired into recreate via the Tws algebra.
 /// Large and/or directed instances converge orders of magnitude faster than
-/// `solveVrptw`'s ILS at equal or better cost; on small instances (n <~ 100)
-/// the two are comparable. Requires every customer to be feasible as a
-/// singleton route (otherwise error.Infeasible — no solution exists).
+/// the legacy giant-tour ILS engine at equal or better cost. Requires every
+/// customer to be feasible as a singleton route (otherwise error.Infeasible —
+/// no solution exists).
 pub fn solveVrptwSisr(allocator: std.mem.Allocator, inst: VrptwInstance, options: solver.SolveOptions, params: VrptwSisrParams) !VrptwResult {
     return solveVrptwSisrFrom(allocator, inst, options, params, &.{});
 }
@@ -4350,9 +4200,32 @@ test "VRPTW SISR: reinsertion tabu changes the search trajectory" {
     try std.testing.expect(off.total_cost != on.total_cost);
 }
 
-test "VRPTW SISR matches the ILS engine on the brute-force fixture" {
-    // Same fixture as "VRPTW engine reaches the brute-force optimum": SISR must
-    // land on the same optimum.
+// Brute-force VRPTW oracle: exact optimum over all giant-tour permutations,
+// each split optimally by splitDpTw. Test-grade ground truth (n <= ~7 only).
+fn bruteForceTw(allocator: std.mem.Allocator, inst: VrptwInstance) !u64 {
+    const n = inst.n;
+    const perm = try allocator.alloc(usize, n);
+    defer allocator.free(perm);
+    for (0..n) |i| perm[i] = i + 1;
+    var best: u64 = std.math.maxInt(u64);
+    try permRecTw(allocator, inst, perm, 0, &best);
+    return best;
+}
+fn permRecTw(allocator: std.mem.Allocator, inst: VrptwInstance, perm: []usize, k: usize, best: *u64) !void {
+    if (k == perm.len) {
+        const sp = try splitDpTw(allocator, inst, perm, 0);
+        defer allocator.free(sp.pred);
+        if (sp.cost < best.*) best.* = sp.cost;
+        return;
+    }
+    for (k..perm.len) |i| {
+        std.mem.swap(usize, &perm[k], &perm[i]);
+        try permRecTw(allocator, inst, perm, k + 1, best);
+        std.mem.swap(usize, &perm[k], &perm[i]);
+    }
+}
+
+test "VRPTW SISR reaches the brute-force optimum on a small instance" {
     const allocator = std.testing.allocator;
     const n = 6;
     const dim = n + 1;
@@ -4383,12 +4256,13 @@ test "VRPTW SISR matches the ILS engine on the brute-force fixture" {
     }
     const inst = VrptwInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 8, .ready = ready, .due = due, .service = service };
 
-    var ils = try solveVrptw(allocator, inst, .{ .seed = 1 }, .{ .rounds = 60, .restarts = 4 });
-    defer ils.deinit();
-    var sisr = try solveVrptwSisr(allocator, inst, .{ .seed = 1 }, .{ .iters = 20_000 });
-    defer sisr.deinit();
-    try std.testing.expect(validate(inst, sisr.routes) != null);
-    try std.testing.expect(sisr.total_cost <= ils.total_cost);
+    const opt = try bruteForceTw(allocator, inst);
+    if (opt == std.math.maxInt(u64)) return; // no feasible split for this random draw; skip
+    var res = try solveVrptwSisr(allocator, inst, .{ .seed = 5 }, .{ .iters = 20_000 });
+    defer res.deinit();
+    const checked = validate(inst, res.routes) orelse return error.Infeasible;
+    try std.testing.expectEqual(res.total_cost, checked);
+    try std.testing.expectEqual(opt, res.total_cost);
 }
 
 test "VRPTW SISR surfaces infeasibility as a clean error" {
@@ -4423,56 +4297,10 @@ test "VRPTW rejects a nonzero depot row (demand/ready/service)" {
     const service = [_]u32{ 0, 5, 5 };
     const bad_demand = [_]u32{ 2, 1, 1 }; // depot slot holds a customer demand: data-mapping bug
     const inst = VrptwInstance{ .n = 2, .matrix = &m, .demand = &bad_demand, .capacity = 5, .ready = &ready, .due = &due, .service = &service };
-    try std.testing.expectError(error.InvalidInstance, solveVrptw(allocator, inst, .{ .seed = 1 }, .{ .rounds = 2, .restarts = 1 }));
     try std.testing.expectError(error.InvalidInstance, solveVrptwHgs(allocator, inst, .{ .seed = 1 }, .{}));
 }
 
-test "VRPTW engine reaches the brute-force optimum on a small instance" {
-    const allocator = std.testing.allocator;
-    const n = 6;
-    const dim = n + 1;
-    var prng = std.Random.DefaultPrng.init(0xBEEF);
-    const rng = prng.random();
-    const matrix = try allocator.alloc(u32, dim * dim);
-    defer allocator.free(matrix);
-    for (0..dim) |i| {
-        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 40);
-    }
-    const demand = try allocator.alloc(u32, dim);
-    defer allocator.free(demand);
-    const ready = try allocator.alloc(u32, dim);
-    defer allocator.free(ready);
-    const due = try allocator.alloc(u32, dim);
-    defer allocator.free(due);
-    const service = try allocator.alloc(u32, dim);
-    defer allocator.free(service);
-    demand[0] = 0;
-    ready[0] = 0;
-    due[0] = 1000;
-    service[0] = 0;
-    for (1..dim) |i| {
-        demand[i] = rng.intRangeAtMost(u32, 1, 4);
-        ready[i] = rng.intRangeAtMost(u32, 0, 50);
-        due[i] = ready[i] + rng.intRangeAtMost(u32, 30, 120);
-        service[i] = rng.intRangeAtMost(u32, 1, 8);
-    }
-    const inst = VrptwInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 8, .ready = ready, .due = due, .service = service };
-
-    const opt = try bruteForceTw(allocator, inst);
-    if (opt == std.math.maxInt(u64)) return; // no feasible split for this random draw; skip
-    var res = try solveVrptw(allocator, inst, .{
-        .seed = 5,
-        .budget = .{ .trials = 30, .max_passes = 40 },
-        .candidates = .{ .candidate_count = 5, .candidate_mode = .alpha_nearness, .sparse_min_dimension = 0 },
-        .search = .{ .enable_lk = true, .lk_max_depth = 5 },
-    }, .{ .rounds = 80, .restarts = 4, .veh_penalty = 0 });
-    defer res.deinit();
-    const checked = validate(inst, res.routes) orelse return error.Infeasible;
-    try std.testing.expectEqual(res.total_cost, checked);
-    try std.testing.expectEqual(opt, res.total_cost);
-}
-
-test "VRPTW HGS: feasible and no worse than the ILS engine" {
+test "VRPTW HGS: feasible and matches the validator" {
     const allocator = std.testing.allocator;
     const n = 12;
     const dim = n + 1;
@@ -4508,59 +4336,10 @@ test "VRPTW HGS: feasible and no worse than the ILS engine" {
         .candidates = .{ .candidate_count = 6, .candidate_mode = .alpha_nearness, .sparse_min_dimension = 0 },
         .search = .{ .enable_lk = true, .lk_max_depth = 5 },
     };
-    var ils = try solveVrptw(allocator, inst, opts, .{ .rounds = 40, .restarts = 4, .veh_penalty = 0 });
-    defer ils.deinit();
     var hgs = try solveVrptwHgs(allocator, inst, opts, .{ .mu = 10, .lambda = 15, .generations = 15, .veh_penalty = 0 });
     defer hgs.deinit();
     const hchk = validate(inst, hgs.routes) orelse return error.Infeasible;
     try std.testing.expectEqual(hgs.total_cost, hchk);
-    // HGS (population) should match or beat the single-incumbent ILS.
-    try std.testing.expect(hgs.total_cost <= ils.total_cost);
-}
-
-test "VRPTW end-to-end: feasible and beats one-per-route" {
-    const allocator = std.testing.allocator;
-    const n = 12;
-    const dim = n + 1;
-    var prng = std.Random.DefaultPrng.init(0x77);
-    const rng = prng.random();
-    const matrix = try allocator.alloc(u32, dim * dim);
-    defer allocator.free(matrix);
-    for (0..dim) |i| {
-        for (0..dim) |j| matrix[i * dim + j] = if (i == j) 0 else rng.intRangeAtMost(u32, 1, 60);
-    }
-    const demand = try allocator.alloc(u32, dim);
-    defer allocator.free(demand);
-    const ready = try allocator.alloc(u32, dim);
-    defer allocator.free(ready);
-    const due = try allocator.alloc(u32, dim);
-    defer allocator.free(due);
-    const service = try allocator.alloc(u32, dim);
-    defer allocator.free(service);
-    demand[0] = 0;
-    ready[0] = 0;
-    due[0] = 100000;
-    service[0] = 0;
-    for (1..dim) |i| {
-        demand[i] = rng.intRangeAtMost(u32, 1, 5);
-        ready[i] = 0;
-        due[i] = 100000; // wide windows -> always feasible, exercises the engine
-        service[i] = rng.intRangeAtMost(u32, 1, 5);
-    }
-    const inst = VrptwInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 15, .ready = ready, .due = due, .service = service };
-
-    var res = try solveVrptw(allocator, inst, .{
-        .seed = 9,
-        .budget = .{ .trials = 30, .max_passes = 40 },
-        .candidates = .{ .candidate_count = 6, .candidate_mode = .alpha_nearness, .sparse_min_dimension = 0 },
-        .search = .{ .enable_lk = true, .lk_max_depth = 5 },
-    }, .{ .rounds = 60, .restarts = 4, .veh_penalty = 0 });
-    defer res.deinit();
-    const checked = validate(inst, res.routes) orelse return error.Infeasible;
-    try std.testing.expectEqual(res.total_cost, checked);
-    var baseline: u64 = 0;
-    for (1..dim) |c| baseline += inst.d(0, c) + inst.d(c, 0);
-    try std.testing.expect(res.total_cost < baseline);
 }
 
 test "VRPTW SISR marathon: below the 1M-iter gate is a no-op (bit-identical)" {
