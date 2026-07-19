@@ -126,32 +126,9 @@ pub const VehType = struct {
 
 pub const MAX_VEH_TYPES = 8;
 
-// Time-window segment (Vidal / PyVRP), same algebra as vrptw.zig's Tws but
-// over PdpInstance. tw == 0 iff the segment is schedulable.
-const Tws = struct {
-    dur: i64,
-    tw: i64,
-    early: i64,
-    late: i64,
-
-    fn client(inst: pdp.PdpInstance, c: usize) Tws {
-        return .{ .dur = @intCast(inst.service[c]), .tw = 0, .early = @intCast(inst.ready[c]), .late = @intCast(inst.due[c]) };
-    }
-    fn depotNode(inst: pdp.PdpInstance) Tws {
-        return .{ .dur = 0, .tw = 0, .early = 0, .late = @intCast(inst.due[0]) };
-    }
-    fn merge(left: Tws, edge: i64, right: Tws) Tws {
-        const delta = left.dur - left.tw + edge;
-        const d_wait = @max(right.early - delta - left.late, 0);
-        const d_tw = @max(left.early + delta - right.late, 0);
-        return .{
-            .dur = left.dur + right.dur + edge + d_wait,
-            .tw = left.tw + right.tw + d_tw,
-            .early = @max(right.early - delta, left.early) - d_wait,
-            .late = @min(right.late - delta, left.late) + d_tw,
-        };
-    }
-};
+// Time-window segment: shared O(1)-concatenation algebra (see core/tws.zig),
+// instantiated over PdpInstance. tw == 0 iff the segment is schedulable.
+const Tws = @import("core/tws.zig").Tws(pdp.PdpInstance);
 
 /// Full-route duration (depot -> nodes -> depot) under the Tws algebra:
 /// travel + service + unavoidable waiting at the duration-minimizing

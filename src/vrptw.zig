@@ -59,37 +59,9 @@ pub fn scheduleSlice(inst: VrptwInstance, nodes: []const usize) ?u64 {
     return dist;
 }
 
-// Time-Window Segment (Vidal / PyVRP): a constant-size summary of a contiguous
-// node sequence that lets two segments be CONCATENATED in O(1), giving the merged
-// segment's total time warp (0 == time-window-feasible) without rescheduling. This
-// is what turns every local-search move from O(route length) into O(1): a candidate
-// route is a concatenation of a few precomputed prefix/suffix segments + the moved
-// nodes. Distance and load are tracked separately (both O(1) via deltas).
-const Tws = struct {
-    dur: i64, // duration spanned (travel + service + forced waiting)
-    tw: i64, // accumulated time warp (infeasibility); 0 == feasible
-    early: i64, // earliest feasible start at the segment's first node
-    late: i64, // latest feasible start at the segment's first node
-
-    fn client(inst: VrptwInstance, c: usize) Tws {
-        return .{ .dur = @intCast(inst.service[c]), .tw = 0, .early = @intCast(inst.ready[c]), .late = @intCast(inst.due[c]) };
-    }
-    fn depotNode(inst: VrptwInstance) Tws {
-        return .{ .dur = 0, .tw = 0, .early = 0, .late = @intCast(inst.due[0]) };
-    }
-    /// Merge `left` then `right`, connected by an edge of travel time `edge`.
-    fn merge(left: Tws, edge: i64, right: Tws) Tws {
-        const delta = left.dur - left.tw + edge;
-        const d_wait = @max(right.early - delta - left.late, 0);
-        const d_tw = @max(left.early + delta - right.late, 0);
-        return .{
-            .dur = left.dur + right.dur + edge + d_wait,
-            .tw = left.tw + right.tw + d_tw,
-            .early = @max(right.early - delta, left.early) - d_wait,
-            .late = @min(right.late - delta, left.late) + d_tw,
-        };
-    }
-};
+// Time-Window Segment: shared O(1)-concatenation algebra (see core/tws.zig),
+// instantiated over VrptwInstance.
+const Tws = @import("core/tws.zig").Tws(VrptwInstance);
 
 /// Whole-route TWS (depot -> nodes -> depot). tw == 0 iff time-window feasible.
 fn routeTws(inst: VrptwInstance, nodes: []const usize) Tws {
