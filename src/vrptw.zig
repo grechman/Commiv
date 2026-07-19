@@ -29,7 +29,7 @@ pub const VrptwInstance = struct {
     fn dim(self: VrptwInstance) usize {
         return self.n + 1;
     }
-    fn d(self: VrptwInstance, a: usize, b: usize) u64 {
+    pub fn d(self: VrptwInstance, a: usize, b: usize) u64 {
         return self.matrix[a * self.dim() + b];
     }
 };
