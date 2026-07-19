@@ -1,5 +1,6 @@
 const std = @import("std");
 const core_anneal = @import("core/anneal.zig");
+const core_sisr = @import("core/sisr.zig");
 const core_neighbors = @import("core/neighbors.zig");
 const pdp = @import("pdptw.zig");
 
@@ -1305,47 +1306,69 @@ fn solvePdptwSisrFromLocked(allocator: std.mem.Allocator, inst: pdp.PdpInstance,
     const seed_distance = s.cost - seed_fleet;
     const unit = @as(f64, @floatFromInt(seed_distance)) / @as(f64, @floatFromInt(n_nodes));
     const sched = core_anneal.geometric(unit, params.t0_factor, params.tf_factor, params.iters);
-    const t0 = sched.t0;
-    const iters = sched.iters;
-    const cf = sched.cf;
-    var temp = t0;
 
-    const t_start = nanos();
-    var it: usize = 0;
-    while (it < iters) : (it += 1) {
-        if (params.time_ms > 0 and it % 256 == 0 and (nanos() - t_start) / std.time.ns_per_ms >= params.time_ms) break;
-        const saved_cost = s.cost;
-        const saved_nonempty = s.nonempty;
-        const saved_unassigned = s.n_unassigned;
-        const saved_overcap = s.overCapCount() + s.brkViolCount();
-        s.saveLedger();
-        s.beginIter();
-        s.iter_start_complete = s.n_unassigned == 0;
-        try s.ruin(params, rng);
-        try s.recreate(params, rng);
-        const eff = s.cost + UNASSIGNED_PEN * @as(u64, @intCast(s.n_unassigned)) + CAP_PEN * (s.overCapCount() + s.brkViolCount());
-        const saved_eff = saved_cost + UNASSIGNED_PEN * @as(u64, @intCast(saved_unassigned)) + CAP_PEN * saved_overcap;
-        const dt = @as(i64, @intCast(eff)) - @as(i64, @intCast(saved_eff));
-        if (@as(f64, @floatFromInt(dt)) < temp) {
-            if (s.n_unassigned == 0 and s.withinDurCap() and s.brkAllOk() and (best == null or s.cost < best_cost)) {
-                best_cost = s.cost;
-                if (best) |*b| b.deinit();
-                best = try s.toResult(allocator);
-            }
-        } else {
-            try s.rollback(saved_cost, saved_nonempty);
-            s.n_unassigned = saved_unassigned;
+    // Hot loop = the shared SISR skeleton (core/sisr.zig). Every hook body
+    // below is the exact code the inline loop used to run, in the same order.
+    const Loop = struct {
+        s: *S,
+        params: PdpSisrParams,
+        allocator: std.mem.Allocator,
+        best: *?pdp.PdpResult,
+        best_cost: *u64,
+
+        const Saved = struct { cost: u64, nonempty: usize, unassigned: usize, overcap: u64 };
+
+        fn save(l: *@This(), it: usize) Saved {
+            _ = it;
+            const sv = Saved{
+                .cost = l.s.cost,
+                .nonempty = l.s.nonempty,
+                .unassigned = l.s.n_unassigned,
+                .overcap = l.s.overCapCount() + l.s.brkViolCount(),
+            };
+            l.s.saveLedger();
+            l.s.beginIter();
+            l.s.iter_start_complete = l.s.n_unassigned == 0;
+            return sv;
         }
-        temp *= cf;
-        if (params.swap_kick > 0 and it % params.swap_kick == params.swap_kick - 1) {
-            try s.pairExchangeKick(params, rng);
-            if (s.n_unassigned == 0 and s.withinDurCap() and s.brkAllOk() and s.cost < best_cost and best != null) {
-                best_cost = s.cost;
-                best.?.deinit();
-                best = try s.toResult(allocator);
+        fn ruin(l: *@This(), rng_: std.Random, it: usize) !void {
+            _ = it;
+            try l.s.ruin(l.params, rng_);
+        }
+        fn recreate(l: *@This(), rng_: std.Random) !void {
+            try l.s.recreate(l.params, rng_);
+        }
+        fn delta(l: *@This(), sv: Saved) i64 {
+            const eff = l.s.cost + UNASSIGNED_PEN * @as(u64, @intCast(l.s.n_unassigned)) + CAP_PEN * (l.s.overCapCount() + l.s.brkViolCount());
+            const saved_eff = sv.cost + UNASSIGNED_PEN * @as(u64, @intCast(sv.unassigned)) + CAP_PEN * sv.overcap;
+            return @as(i64, @intCast(eff)) - @as(i64, @intCast(saved_eff));
+        }
+        fn accept(l: *@This(), sv: Saved, it: usize) !void {
+            _ = sv;
+            _ = it;
+            if (l.s.n_unassigned == 0 and l.s.withinDurCap() and l.s.brkAllOk() and (l.best.* == null or l.s.cost < l.best_cost.*)) {
+                l.best_cost.* = l.s.cost;
+                if (l.best.*) |*b| b.deinit();
+                l.best.* = try l.s.toResult(l.allocator);
             }
         }
-    }
+        fn reject(l: *@This(), sv: Saved) !void {
+            try l.s.rollback(sv.cost, sv.nonempty);
+            l.s.n_unassigned = sv.unassigned;
+        }
+        fn afterIter(l: *@This(), it: usize, rng_: std.Random) !void {
+            if (l.params.swap_kick > 0 and it % l.params.swap_kick == l.params.swap_kick - 1) {
+                try l.s.pairExchangeKick(l.params, rng_);
+                if (l.s.n_unassigned == 0 and l.s.withinDurCap() and l.s.brkAllOk() and l.s.cost < l.best_cost.* and l.best.* != null) {
+                    l.best_cost.* = l.s.cost;
+                    l.best.*.?.deinit();
+                    l.best.* = try l.s.toResult(l.allocator);
+                }
+            }
+        }
+    };
+    var loop = Loop{ .s = &s, .params = params, .allocator = allocator, .best = &best, .best_cost = &best_cost };
+    try core_sisr.run(Loop, &loop, .{ .iters = sched.iters, .time_ms = params.time_ms, .t0 = sched.t0, .cf = sched.cf }, rng);
     return best orelse error.NoCompleteSolution;
 }
 
