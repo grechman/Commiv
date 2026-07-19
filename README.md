@@ -431,7 +431,7 @@ validators wherever one exists. **All tables, per-instance data, and methodology
 | Road VRPTW (9) | PyVRP, VROOM | commiv leads 8/9 (nyc-100 -0.01%); VROOM +1-9% behind |
 | VRPTW Solomon/GH (18) | PyVRP | Solomon at BKS; GH R/RC fleet counts are the weak spot |
 | PDPTW Li & Lim (352) | VROOM | commiv completes **352/352**; VROOM leaves shipments unassigned on 238/352 at the same wall |
-| PDPTW money objective (352) | VROOM | $/vehicle + $/km + $/driver-hour at equal wall: VROOM overspends **+11.6%**, from +2.0% at n=100 to +14.1% at n=1000 |
+| PDPTW money objective (352) | VROOM | cost = vehicles + distance + driver hours, equal wall: VROOM overspends **+11.6%**, from +2.0% at n=100 to +14.1% at n=1000 |
 
 The one systematic weakness: Gehring-Homberger R/RC classes, where commiv runs 1-6
 vehicles over best-known (route-min phase exists only in the PDPTW engine so far).
@@ -934,7 +934,7 @@ commiv), независимые валидаторы везде, где они �
 | Дорожный VRPTW (9) | PyVRP, VROOM | commiv впереди в 8/9; VROOM отстаёт на 1-9% |
 | VRPTW Solomon/GH (18) | PyVRP | Solomon на уровне BKS; парк на GH R/RC - слабое место |
 | PDPTW Li & Lim (352) | VROOM | commiv развозит всё в **352/352**; VROOM оставляет заявки неназначенными в 238/352 |
-| PDPTW деньги (352) | VROOM | $/машина + $/км + $/час водителя при равном времени: VROOM переплачивает **+11.6%**, от +2.0% при n=100 до +14.1% при n=1000 |
+| PDPTW деньги (352) | VROOM | цена = машины + километры + часы водителя, при равном времени VROOM переплачивает **+11.6%**: от +2.0% при n=100 до +14.1% при n=1000 |
 
 Единственная системная слабость - классы R/RC у Gehring-Homberger, где commiv берёт
 на 1-6 машин больше, чем в лучших известных решениях (фаза минимизации парка пока
