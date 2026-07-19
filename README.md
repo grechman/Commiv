@@ -410,8 +410,8 @@ part of this API and free to change between versions.
 - Classical TSP, CVRP, and VRPTW: near-optimal solutions far faster than exact methods.
 - An embeddable core: a single dependency-free module to drop into a larger planner.
 - Beyond logistics: hole-drilling on a printed circuit board, drone survey flyovers, NPC
-  patrol routes in video games, a warehouse picker walking the racks, round planning for
-  field crews. Any problem where visit order matters and the transitions are asymmetric.
+  patrol routes in video games, a warehouse picker walking the racks. Not markets I
+  chase; the same math just happens to fit.
 
 ---
 
@@ -443,34 +443,29 @@ Everything else in that table is a lead or a tie.
 
 Where it wins:
 
-- The speed-quality frontier. Near-optimal in seconds, not the minutes-to-hours the
-  reference heuristics spend. For a planner that has to replan constantly, this is the
-  number that matters.
-- Directed real-road matrices. FILO and HGS-CVRP, the symmetric speed and quality
-  champions, physically cannot read a directed matrix. On real Moscow data commiv beats
-  OR-Tools, LKH-3, and VROOM on cost and time.
-- Zero dependencies, small footprint. One Zig module, and a 5000-node directed CVRP in
-  211 MB.
+- Speed at near-optimal quality: seconds, not the minutes-to-hours the reference
+  heuristics spend. For a planner that replans constantly this is the number that
+  matters.
+- Directed real-road matrices. FILO and HGS-CVRP physically cannot read one. On real
+  Moscow data commiv beats OR-Tools, LKH-3, and VROOM on cost and time.
+- Zero dependencies and a small footprint: one Zig module, a 5000-node directed CVRP
+  in 211 MB.
 
 Where the competition wins. Better you read this here than find out after integrating:
 
-- Absolute accuracy at huge budgets. LKH-3, HGS-CVRP, and SISR (the paper) reach lower
-  gaps (about 0.16% to 0.39% on Uchoa X) when given far more time than the equal-wall
-  budgets in [BENCHMARKS.md](BENCHMARKS.md), and PyVRP can cross commiv's numbers when
-  given roughly 10x the compute; the crossing wall grows with instance size and
-  asymmetry. commiv trades that last fraction of a percent for a large speed advantage.
-  It is not state-of-the-art at the unlimited-budget frontier and does not pretend to be.
-- Dedicated fleet minimization. On the vehicles-first Gehring-Homberger objective commiv
-  matches the best-known fleet on only 4 of 12 instances; the record holders run an
-  ejection-pool route-minimization phase commiv does not have yet.
-- Massive symmetric instances. FILO solves symmetric CVRPs with tens of thousands of
-  nodes faster than anything here. commiv targets the routing-scale (hundreds to a few
-  thousand) directed regime.
-- Production hardness. OR-Tools and VROOM are battle-tested stacks with rich constraint
-  sets (skills, multi-depot, driver shifts) and years of deployment. commiv covers
-  capacities, time windows, pickup-and-delivery, heterogeneous fleets, driver breaks,
-  fleet pinning, and a money objective, but it is a fast, focused core, not a complete
-  logistics platform.
+- Give LKH-3, HGS-CVRP, or the original SISR far more time than the equal-wall budgets
+  in [BENCHMARKS.md](BENCHMARKS.md) and they reach lower gaps (0.16% to 0.39% on
+  Uchoa X); PyVRP crosses commiv's numbers at roughly 10x the compute, later on bigger
+  and more asymmetric instances. At the unlimited-budget frontier commiv is not
+  state-of-the-art.
+- On the vehicles-first Gehring-Homberger objective commiv matches the best-known fleet
+  on 4 of 12 instances. The record holders run an ejection-pool route-minimization
+  phase commiv doesn't have.
+- FILO solves symmetric CVRPs with tens of thousands of nodes faster than anything here.
+- OR-Tools and VROOM have been in production for years and cover skills, multi-depot,
+  driver shifts, the long tail of real constraints. commiv covers capacities, time
+  windows, pickup-and-delivery, heterogeneous fleets, breaks, fleet pinning, and a
+  money objective. That's the whole list.
 
 ---
 
@@ -914,9 +909,8 @@ matrix, capacity, pair_of, is_pickup, demand_signed, ready, due, service }` с �
 - Встраиваемое ядро: один модуль без зависимостей, который кладётся внутрь более крупного
   планировщика.
 - Не только логистика: сверловка отверстий на печатной плате, облёт точек съёмки дроном,
-  маршруты и патрули NPC в видеоиграх, обход ячеек склада комплектовщиком, планирование
-  обходов у выездных бригад. Любая задача, где важен порядок посещения, а переходы
-  асимметричны.
+  маршруты патрулей NPC в играх, обход ячеек склада комплектовщиком. За этими рынками я
+  не гоняюсь - просто математика та же самая.
 
 ---
 
@@ -948,32 +942,28 @@ commiv), независимые валидаторы везде, где они �
 
 Где он выигрывает:
 
-- Граница скорости и качества. Близко к оптимуму за секунды, а не за минуты и часы,
-  которые тратят эталонные эвристики. Для планировщика, который постоянно пересчитывает
-  маршруты, важно именно это.
-- Направленные дорожные матрицы. FILO и HGS-CVRP, чемпионы симметричной скорости и
-  качества, физически не умеют читать направленную матрицу. На реальных данных по Москве
-  commiv обходит OR-Tools, LKH-3 и VROOM и по стоимости, и по времени.
-- Ноль зависимостей, малый объём памяти. Один модуль на Zig, и направленная CVRP на
-  5000 узлов укладывается в 211 МБ.
+- Скорость при почти оптимальном качестве: секунды, а не минуты и часы эталонных
+  эвристик. Для планировщика, который постоянно пересчитывает маршруты, важно именно
+  это.
+- Направленные дорожные матрицы. FILO и HGS-CVRP такую физически не прочитают. На
+  реальных данных по Москве commiv обходит OR-Tools, LKH-3 и VROOM и по стоимости, и
+  по времени.
+- Ноль зависимостей и малый объём памяти: один модуль на Zig, направленная CVRP на
+  5000 узлов в 211 МБ.
 
 Где выигрывают остальные - лучше прочитать это здесь, чем узнать после интеграции:
 
-- Абсолютная точность при огромных бюджетах. LKH-3, HGS-CVRP и SISR (статья) достигают
-  меньших разрывов (примерно 0.16-0.39% на Uchoa X), когда им дают намного больше
-  времени. commiv меняет эту последнюю долю процента на большое преимущество в скорости
-  и не претендует на SOTA при безлимитном бюджете.
-- Специализированная минимизация парка. На иерархической цели Gehring-Homberger (сначала
-  машины, потом расстояние) commiv достигает лучшего известного парка только на 4 из 12
-  инстансов; рекордсмены используют фазу минимизации маршрутов, которой здесь пока нет.
-- Огромные симметричные инстансы. FILO решает симметричные CVRP с десятками тысяч узлов
-  быстрее всего, что здесь есть. commiv нацелен на направленный режим от сотен до
-  нескольких тысяч узлов.
-- Производственная зрелость. OR-Tools и VROOM - обкатанные стеки с богатым набором
-  ограничений (навыки, мульти-депо, смены водителей) и годами эксплуатации. commiv
-  покрывает вместимости, временные окна, pickup-and-delivery, гетерогенный парк,
-  перерывы водителей, фиксацию парка и денежную целевую функцию, но это быстрое
-  сфокусированное ядро, а не полноценная логистическая платформа.
+- Дайте LKH-3, HGS-CVRP или оригинальному SISR намного больше времени, чем равные
+  бюджеты в [BENCHMARKS.md](BENCHMARKS.md), и они дойдут до меньших разрывов
+  (0.16-0.39% на Uchoa X). При безлимитном бюджете commiv не SOTA.
+- На иерархической цели Gehring-Homberger (сначала машины, потом расстояние) commiv
+  достигает лучшего известного парка на 4 из 12 инстансов. Рекордсмены гоняют фазу
+  минимизации маршрутов, которой здесь нет.
+- FILO решает симметричные CVRP с десятками тысяч узлов быстрее всего, что здесь есть.
+- OR-Tools и VROOM годами в проде и покрывают навыки, мульти-депо, смены водителей -
+  весь длинный хвост реальных ограничений. commiv покрывает вместимости, временные
+  окна, pickup-and-delivery, гетерогенный парк, перерывы, фиксацию парка и денежную
+  целевую функцию. На этом всё.
 
 ---
 
