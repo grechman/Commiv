@@ -269,23 +269,9 @@ pub fn main(init: std.process.Init) !void {
     // serial, bit-identical to before this knob existed. Only meaningful for
     // the fleetmin driver; plain stays single-thread.
     const n_threads = try std.fmt.parseInt(usize, env.get("MR_THREADS") orelse "1", 10);
-    // MR_EVAL_THREADS: intra-search depth. >=2 splits the recreate hot loop
-    // across a thread pool that deepens ONE trajectory (params.eval_threads).
-    // Default 1 = serial, bit-identical. Use MR_THREADS (width) XOR
-    // MR_EVAL_THREADS (depth), NEVER both — stacking them oversubscribes cores
-    // (threads squared). The lever's target config is MR_THREADS=1
-    // MR_EVAL_THREADS=6 on the default fleetmin driver: one trajectory deepened.
-    const eval_threads = try std.fmt.parseInt(usize, env.get("MR_EVAL_THREADS") orelse "1", 10);
     // MR_ITERS: iteration cap. Default huge = time-bound. Set with MR_TIME_MS=0
     // for a fixed-iteration deterministic run (GATE 1/2 identity + speed).
     const mr_iters = try std.fmt.parseInt(usize, env.get("MR_ITERS") orelse "1000000000", 10);
-    // Width (MR_THREADS) and depth (MR_EVAL_THREADS) are XOR: each fleetmin
-    // worker spawns its own eval pool, so both >1 = n_threads*eval_threads live
-    // threads. Refuse rather than silently oversubscribe an unattended bench.
-    if (n_threads > 1 and eval_threads > 1) {
-        std.debug.print("MR_THREADS ({d}) and MR_EVAL_THREADS ({d}) both >1: width*depth oversubscribes cores; set one to 1\n", .{ n_threads, eval_threads });
-        return error.ThreadKnobConflict;
-    }
     // MR_BREAK="dur,earliest,latest": one driver break per route (seconds).
     // Unset = no break. Forces the plain driver semantics only through the
     // engine params; fleetmin+break is engine-legal but capi-rejected, so the
@@ -309,7 +295,6 @@ pub fn main(init: std.process.Init) !void {
         .veh_penalty = veh_pen,
         .time_penalty = time_pen,
         .max_route_dur = max_dur,
-        .eval_threads = eval_threads,
         .brk = mr_brk,
     };
     const t0 = nanos();

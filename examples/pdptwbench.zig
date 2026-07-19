@@ -36,11 +36,6 @@ pub fn main(init: std.process.Init) !void {
     const t0f = try std.fmt.parseFloat(f64, env.get("PB_T0") orelse "1");
     const blink = try std.fmt.parseFloat(f64, env.get("PB_BLINK") orelse "0.01");
     const n_threads = try std.fmt.parseInt(usize, env.get("PB_THREADS") orelse "1", 10); // >1: parallel fleet-min waves
-    const eval_threads = try std.fmt.parseInt(usize, env.get("PB_EVAL_THREADS") orelse "1", 10); // >=2: intra-search depth (recreate hot loop); use XOR PB_THREADS, never both
-    if (n_threads > 1 and eval_threads > 1) { // width*depth = n_threads*eval_threads live threads; refuse the footgun
-        std.debug.print("PB_THREADS ({d}) and PB_EVAL_THREADS ({d}) both >1: oversubscribes cores; set one to 1\n", .{ n_threads, eval_threads });
-        return error.ThreadKnobConflict;
-    }
     const gran_gaps = try std.fmt.parseInt(u2, env.get("PB_GRAN") orelse "0", 10); // granular gaps mask: 1 pickup, 2 dropoff, 3 both
     const eject = std.mem.eql(u8, env.get("PB_EJECT") orelse "0", "1"); // GES squeeze fallback in capped runs
     const eject_k = try std.fmt.parseInt(u8, env.get("PB_EJECTK") orelse "1", 10); // max residents ejected per squeeze (1..3)
@@ -99,7 +94,6 @@ pub fn main(init: std.process.Init) !void {
             .fleet_p0_pct = p0_pct,
             .time_penalty = time_pen,
             .max_route_dur = max_dur,
-            .eval_threads = eval_threads,
         };
         var res = if (pin_mode) blk: {
             const pin: usize = if (cap > 0) cap else bks_veh;
