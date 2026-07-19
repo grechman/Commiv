@@ -1318,7 +1318,7 @@ fn solvePdptwSisrFromLocked(allocator: std.mem.Allocator, inst: pdp.PdpInstance,
 
         const Saved = struct { cost: u64, nonempty: usize, unassigned: usize, overcap: u64 };
 
-        fn save(l: *@This(), it: usize) Saved {
+        pub fn save(l: *@This(), it: usize) Saved {
             _ = it;
             const sv = Saved{
                 .cost = l.s.cost,
@@ -1331,19 +1331,19 @@ fn solvePdptwSisrFromLocked(allocator: std.mem.Allocator, inst: pdp.PdpInstance,
             l.s.iter_start_complete = l.s.n_unassigned == 0;
             return sv;
         }
-        fn ruin(l: *@This(), rng_: std.Random, it: usize) !void {
+        pub fn ruin(l: *@This(), rng_: std.Random, it: usize) !void {
             _ = it;
             try l.s.ruin(l.params, rng_);
         }
-        fn recreate(l: *@This(), rng_: std.Random) !void {
+        pub fn recreate(l: *@This(), rng_: std.Random) !void {
             try l.s.recreate(l.params, rng_);
         }
-        fn delta(l: *@This(), sv: Saved) i64 {
+        pub fn delta(l: *@This(), sv: Saved) i64 {
             const eff = l.s.cost + UNASSIGNED_PEN * @as(u64, @intCast(l.s.n_unassigned)) + CAP_PEN * (l.s.overCapCount() + l.s.brkViolCount());
             const saved_eff = sv.cost + UNASSIGNED_PEN * @as(u64, @intCast(sv.unassigned)) + CAP_PEN * sv.overcap;
             return @as(i64, @intCast(eff)) - @as(i64, @intCast(saved_eff));
         }
-        fn accept(l: *@This(), sv: Saved, it: usize) !void {
+        pub fn accept(l: *@This(), sv: Saved, it: usize) !void {
             _ = sv;
             _ = it;
             if (l.s.n_unassigned == 0 and l.s.withinDurCap() and l.s.brkAllOk() and (l.best.* == null or l.s.cost < l.best_cost.*)) {
@@ -1352,11 +1352,11 @@ fn solvePdptwSisrFromLocked(allocator: std.mem.Allocator, inst: pdp.PdpInstance,
                 l.best.* = try l.s.toResult(l.allocator);
             }
         }
-        fn reject(l: *@This(), sv: Saved) !void {
+        pub fn reject(l: *@This(), sv: Saved) !void {
             try l.s.rollback(sv.cost, sv.nonempty);
             l.s.n_unassigned = sv.unassigned;
         }
-        fn afterIter(l: *@This(), it: usize, rng_: std.Random) !void {
+        pub fn afterIter(l: *@This(), it: usize, rng_: std.Random) !void {
             if (l.params.swap_kick > 0 and it % l.params.swap_kick == l.params.swap_kick - 1) {
                 try l.s.pairExchangeKick(l.params, rng_);
                 if (l.s.n_unassigned == 0 and l.s.withinDurCap() and l.s.brkAllOk() and l.s.cost < l.best_cost.* and l.best.* != null) {
