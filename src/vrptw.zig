@@ -1,4 +1,5 @@
 const std = @import("std");
+const core_anneal = @import("core/anneal.zig");
 const core_neighbors = @import("core/neighbors.zig");
 const builtin = @import("builtin");
 const problem = @import("problem.zig");
@@ -2967,10 +2968,10 @@ pub fn solveVrptwSisrFrom(allocator: std.mem.Allocator, inst: VrptwInstance, opt
     // random walk over distance. Vehicle-count changes still dominate dt.
     const seed_distance = cur.cost - params.veh_penalty * cur.nonempty;
     const unit = @as(f64, @floatFromInt(seed_distance)) / @as(f64, @floatFromInt(n));
-    const t0 = @max(1e-9, params.t0_factor * unit);
-    const tf = @max(1e-9, eff_params.tf_factor * unit);
-    const iters = @max(@as(usize, 1), params.iters);
-    const cf = std.math.pow(f64, tf / t0, 1.0 / @as(f64, @floatFromInt(iters)));
+    const sched = core_anneal.geometric(unit, params.t0_factor, eff_params.tf_factor, params.iters);
+    const t0 = sched.t0;
+    const iters = sched.iters;
+    const cf = sched.cf;
     var temp = t0;
 
     // Scratch list for params.polish: the distinct route indices a committed

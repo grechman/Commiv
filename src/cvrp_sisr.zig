@@ -1,4 +1,5 @@
 const std = @import("std");
+const core_anneal = @import("core/anneal.zig");
 const builtin = @import("builtin");
 const asymmetric = @import("asymmetric.zig");
 const solver = @import("solver.zig");
@@ -183,10 +184,11 @@ pub fn solveCvrpSisr(allocator: std.mem.Allocator, inst: CvrpInstance, options: 
     const rng = prng.random();
 
     const unit = @as(f64, @floatFromInt(cur.distance)) / @as(f64, @floatFromInt(n));
-    const t0 = @max(1e-9, params.t0_factor * unit);
-    const tf = @max(1e-9, eff_tf_factor * unit);
-    const iters = @max(@as(usize, 1), params.iters);
-    var cf = std.math.pow(f64, tf / t0, 1.0 / @as(f64, @floatFromInt(iters)));
+    const sched = core_anneal.geometric(unit, params.t0_factor, eff_tf_factor, params.iters);
+    const t0 = sched.t0;
+    const tf = sched.tf;
+    const iters = sched.iters;
+    var cf = sched.cf;
     var temp = t0;
 
     // UCB1 bandit over {plain, split} ruin: learns the best mix online instead of the

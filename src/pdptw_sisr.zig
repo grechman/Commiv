@@ -1,4 +1,5 @@
 const std = @import("std");
+const core_anneal = @import("core/anneal.zig");
 const core_neighbors = @import("core/neighbors.zig");
 const pdp = @import("pdptw.zig");
 
@@ -1303,10 +1304,10 @@ fn solvePdptwSisrFromLocked(allocator: std.mem.Allocator, inst: pdp.PdpInstance,
     }
     const seed_distance = s.cost - seed_fleet;
     const unit = @as(f64, @floatFromInt(seed_distance)) / @as(f64, @floatFromInt(n_nodes));
-    const t0 = @max(1e-9, params.t0_factor * unit);
-    const tf = @max(1e-9, params.tf_factor * unit);
-    const iters = @max(@as(usize, 1), params.iters);
-    const cf = std.math.pow(f64, tf / t0, 1.0 / @as(f64, @floatFromInt(iters)));
+    const sched = core_anneal.geometric(unit, params.t0_factor, params.tf_factor, params.iters);
+    const t0 = sched.t0;
+    const iters = sched.iters;
+    const cf = sched.cf;
     var temp = t0;
 
     const t_start = nanos();
