@@ -86,8 +86,6 @@ pub const validateVrptw = vrptw.validate; // feasibility + true-cost checker for
 // ---- PDPTW (pickup & delivery with time windows) ----------------------------
 pub const PdpInstance = pdptw.PdpInstance;
 pub const PdpResult = pdptw.PdpResult;
-pub const PdpParams = pdptw.PdpParams;
-pub const solvePdptw = pdptw.solvePdptw;
 pub const validatePdptw = pdptw.validate;
 pub const validatePdptwTyped = pdptw.validateTyped; // per-route vehicle-type capacities
 pub const validatePdptwWithBreak = pdptw.validateWithBreak; // driver-break contract oracle

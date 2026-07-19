@@ -8,9 +8,9 @@ const std = @import("std");
 // is a directed distance matrix, so real asymmetric road times work
 // directly. Objective: minimize total directed travel distance over
 // feasible routes. Provides an independent feasibility/cost oracle
-// (`validate`), the Lseg prefix-load algebra, and a correctness-first solver
-// (`solvePdptw` = cheapest pair-insertion + pair-relocate local search,
-// multistart). Baseline engine: correct and validated, not SISR-grade fast.
+// (`validate`), the Lseg prefix-load algebra, and the construction +
+// pair-relocate local search building blocks used by the PDPTW-SISR engine
+// (pdptw_sisr.zig).
 
 pub const PdpInstance = struct {
     n_pairs: usize,
@@ -378,7 +378,7 @@ pub const RandInst = struct {
 /// ready = 0, due = horizon for all (TW off) when `tw == false`;
 /// otherwise windows derived from a feasible reference schedule so at least one
 /// feasible solution provably exists.
-// pub only so pdptw_probe.zig can reach it; test-grade helper, not API.
+// pub for cross-module tests (pdptw_sisr.zig); test-grade helper, not API.
 pub fn randomInstance(allocator: std.mem.Allocator, n_pairs: usize, seed: u64, tw: bool) !RandInst {
     var prng = std.Random.DefaultPrng.init(seed);
     const rng = prng.random();
@@ -1009,98 +1009,6 @@ pub const PdpResult = struct {
     }
 };
 
-pub const PdpParams = struct {
-    seed: u64 = 1,
-    restarts: usize = 8, // 0 is treated as 1
-    max_ls_passes: usize = 1000,
-};
-
-fn copySolToRoutes(allocator: std.mem.Allocator, sol: *const Sol) ![][]usize {
-    var out: std.ArrayList([]usize) = .empty;
-    errdefer {
-        for (out.items) |r| allocator.free(r);
-        out.deinit(allocator);
-    }
-    for (sol.items) |r| {
-        if (r.items.len == 0) continue;
-        const copy = try allocator.dupe(usize, r.items);
-        errdefer allocator.free(copy);
-        try out.append(allocator, copy);
-    }
-    return out.toOwnedSlice(allocator);
-}
-
-pub fn solvePdptw(allocator: std.mem.Allocator, inst: PdpInstance, params: PdpParams) !PdpResult {
-    const dim = inst.dim();
-    const pos = try allocator.alloc(usize, dim);
-    defer allocator.free(pos);
-    @memset(pos, 0);
-
-    const pickups = try collectPickups(allocator, inst);
-    defer allocator.free(pickups);
-
-    const order0 = try allocator.dupe(usize, pickups);
-    defer allocator.free(order0);
-
-    const Ctx = struct {
-        inst: PdpInstance,
-        fn lessThan(ctx: @This(), a: usize, b: usize) bool {
-            if (ctx.inst.due[a] != ctx.inst.due[b]) return ctx.inst.due[a] < ctx.inst.due[b];
-            return a < b;
-        }
-    };
-    std.mem.sort(usize, order0, Ctx{ .inst = inst }, Ctx.lessThan);
-
-    var prng = std.Random.DefaultPrng.init(params.seed);
-    const rng = prng.random();
-
-    const order = try allocator.alloc(usize, order0.len);
-    defer allocator.free(order);
-
-    var best_routes: ?[][]usize = null;
-    errdefer if (best_routes) |br| {
-        for (br) |r| allocator.free(r);
-        allocator.free(br);
-    };
-    var best_cost: u64 = 0;
-
-    // restarts == 0 would leave best_routes null and crash the unwrap below.
-    const restarts = @max(params.restarts, 1);
-    var k: usize = 0;
-    while (k < restarts) : (k += 1) {
-        @memcpy(order, order0);
-        if (k > 0) rng.shuffle(usize, order);
-
-        var sol = try construct(allocator, inst, order, pos);
-        defer freeSol(allocator, &sol);
-        try pairRelocate(allocator, inst, &sol, pos, params.max_ls_passes);
-
-        const slices = try solSlices(allocator, &sol);
-        defer allocator.free(slices);
-        const cost = validate(inst, slices) orelse return error.SolverProducedInfeasible;
-
-        if (best_routes == null or cost < best_cost) {
-            if (best_routes) |br| {
-                for (br) |r| allocator.free(r);
-                allocator.free(br);
-                // null before the fallible copy: on OOM the errdefer above
-                // would otherwise free this dangling pointer a second time.
-                best_routes = null;
-            }
-            best_routes = try copySolToRoutes(allocator, &sol);
-            best_cost = cost;
-        }
-    }
-
-    const routes = best_routes.?;
-    return .{
-        .allocator = allocator,
-        .routes = routes,
-        .total_cost = best_cost,
-        .vehicles = routes.len,
-    };
-}
-
 /// Naive segment cost for the brute-force optimum: pairing check (O(len^2)),
 /// prefix-load walk, forward-time walk, depot return. Returns null if infeasible.
 fn segCost(inst: PdpInstance, seg: []const usize) ?u64 {
@@ -1147,7 +1055,7 @@ fn segCost(inst: PdpInstance, seg: []const usize) ?u64 {
 }
 
 /// Exhaustive optimum for tiny instances (n_pairs <= 4). Test-only.
-// pub only so pdptw_probe.zig can reach it; test-grade helper, not API.
+// pub for cross-module tests (pdptw_sisr.zig); test-grade helper, not API.
 pub fn bruteForceOptimum(allocator: std.mem.Allocator, inst: PdpInstance) !u64 {
     const n = 2 * inst.n_pairs;
     const perm = try allocator.alloc(usize, n);
@@ -1204,73 +1112,6 @@ pub fn bruteForceOptimum(allocator: std.mem.Allocator, inst: PdpInstance) !u64 {
     return best orelse error.InfeasibleInstance;
 }
 
-test "PDPTW solvePdptw: reported cost equals the validated cost" {
-    const allocator = std.testing.allocator;
-    var ri = try randomInstance(allocator, 6, 77, true);
-    defer ri.deinit(allocator);
-    const inst = ri.inst();
-
-    var res = try solvePdptw(allocator, inst, .{});
-    defer res.deinit();
-
-    const routes_const = try allocator.alloc([]const usize, res.routes.len);
-    defer allocator.free(routes_const);
-    for (res.routes, 0..) |r, i| routes_const[i] = r;
-
-    const vc = validate(inst, routes_const);
-    try std.testing.expect(vc != null);
-    try std.testing.expectEqual(vc.?, res.total_cost);
-    try std.testing.expectEqual(res.routes.len, res.vehicles);
-}
-
-test "PDPTW solvePdptw: never beats the brute-force optimum" {
-    const allocator = std.testing.allocator;
-
-    var seed: u64 = 1;
-    while (seed <= 10) : (seed += 1) {
-        var ri = try randomInstance(allocator, 3, seed, true);
-        defer ri.deinit(allocator);
-        const inst = ri.inst();
-
-        const opt = try bruteForceOptimum(allocator, inst);
-
-        var res = try solvePdptw(allocator, inst, .{ .restarts = 16 });
-        defer res.deinit();
-
-        try std.testing.expect(res.total_cost >= opt);
-    }
-
-    seed = 1;
-    while (seed <= 3) : (seed += 1) {
-        var ri = try randomInstance(allocator, 4, seed, true);
-        defer ri.deinit(allocator);
-        const inst = ri.inst();
-
-        const opt = try bruteForceOptimum(allocator, inst);
-
-        var res = try solvePdptw(allocator, inst, .{ .restarts = 16 });
-        defer res.deinit();
-
-        try std.testing.expect(res.total_cost >= opt);
-    }
-}
-
-test "PDPTW solvePdptw: feasible on the 10-pair fixture" {
-    const allocator = std.testing.allocator;
-    var ri = try randomInstance(allocator, 10, 2026, true);
-    defer ri.deinit(allocator);
-    const inst = ri.inst();
-
-    var res = try solvePdptw(allocator, inst, .{});
-    defer res.deinit();
-
-    const routes_const = try allocator.alloc([]const usize, res.routes.len);
-    defer allocator.free(routes_const);
-    for (res.routes, 0..) |r, i| routes_const[i] = r;
-
-    try std.testing.expect(validate(inst, routes_const) != null);
-}
-
 test "PDPTW construct: output passes validate on 50 random instances" {
     const allocator = std.testing.allocator;
     var seed: u64 = 1;
@@ -1303,19 +1144,6 @@ test "PDPTW construct: output passes validate on 50 random instances" {
 
         try std.testing.expect(validate(inst, slices) != null);
     }
-}
-
-test "PDPTW solvePdptw: finds the single-route optimum on the hand fixture" {
-    // Kills a never-combine construction: one route per pair costs 101; the
-    // optimum merges both pairs into {1,2,4,3} for 57 (= brute force).
-    const allocator = std.testing.allocator;
-    const f = fixture2();
-    const inst = f.inst(5);
-    try std.testing.expectEqual(@as(u64, 57), try bruteForceOptimum(allocator, inst));
-    var res = try solvePdptw(allocator, inst, .{});
-    defer res.deinit();
-    try std.testing.expectEqual(@as(u64, 57), res.total_cost);
-    try std.testing.expectEqual(@as(usize, 1), res.vehicles);
 }
 
 test "PDPTW pairRelocate: strictly improves construction on known seeds" {
@@ -1357,27 +1185,6 @@ test "PDPTW pairRelocate: strictly improves construction on known seeds" {
 
         try std.testing.expect(after < before);
     }
-}
-
-test "PDPTW solvePdptw: quality floor vs brute optimum on 30 known seeds" {
-    // Regression floor, NOT an optimality guarantee: with default restarts the
-    // solver currently matches the brute-force optimum on 30/30 of these
-    // deterministic n_pairs=3 instances (restarts=1 scores only 27/30, so this
-    // floor also pins the restart machinery). >=29 leaves one instance of slack.
-    const allocator = std.testing.allocator;
-    var matches: usize = 0;
-    var seed: u64 = 1;
-    while (seed <= 30) : (seed += 1) {
-        var ri = try randomInstance(allocator, 3, seed, true);
-        defer ri.deinit(allocator);
-        const inst = ri.inst();
-        const opt = try bruteForceOptimum(allocator, inst);
-        var res = try solvePdptw(allocator, inst, .{});
-        defer res.deinit();
-        try std.testing.expect(res.total_cost >= opt);
-        if (res.total_cost == opt) matches += 1;
-    }
-    try std.testing.expect(matches >= 29);
 }
 
 test "PDPTW clock: waiting and service shift the schedule in all three checkers" {
@@ -1432,15 +1239,6 @@ test "PDPTW clock: waiting and service shift the schedule in all three checkers"
         try std.testing.expectEqual(@as(?u64, null), validate(inst, routes[0..]));
         try std.testing.expectEqual(@as(?u64, null), routeCost(inst, r[0..], pos));
     }
-}
-
-test "PDPTW solvePdptw: restarts=0 is clamped, not a crash" {
-    const allocator = std.testing.allocator;
-    const f = fixture2();
-    const inst = f.inst(5);
-    var res = try solvePdptw(allocator, inst, .{ .restarts = 0 });
-    defer res.deinit();
-    try std.testing.expect(validate(inst, @ptrCast(res.routes)) != null);
 }
 
 /// randomInstance, then nonzero service times and dropoff ready-windows that
@@ -1506,9 +1304,4 @@ test "PDPTW routeCost: agrees with validate under nonzero service and waiting" {
         }
         try std.testing.expect(saw_infeasible);
     }
-}
-
-test {
-    // pull the probe into the compile graph so it can't silently rot
-    _ = @import("pdptw_probe.zig");
 }
