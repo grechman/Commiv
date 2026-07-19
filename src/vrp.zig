@@ -61,26 +61,11 @@ pub const CvrpFleetParams = struct {
     max_vehicles: usize = 0,
 };
 
-/// Tuning for the uncapped giant-tour ILS variant `solveCvrpMulti`: `rounds`
-/// perturbation steps per chain over `restarts` independent best-of-K chains.
-pub const CvrpMultiParams = struct {
-    rounds: usize = 30,
-    restarts: usize = 1,
-};
-
-/// solveCvrpMulti, but with a hard fleet cap: at most `params.max_vehicles` routes
+/// solveCvrp's ILS ancestor, but with a hard fleet cap: at most `params.max_vehicles` routes
 /// (0 = unlimited). For fixed-fleet ACVRP / real distribution where the vehicle
 /// count is a constraint, not free.
 pub fn solveCvrpFleet(allocator: std.mem.Allocator, inst: CvrpInstance, options: solver.SolveOptions, params: CvrpFleetParams) !CvrpResult {
     return solveCvrpImpl(allocator, inst, options, params.rounds, params.restarts, params.max_vehicles);
-}
-
-/// As solveCvrp but with `params.restarts` independent ILS chains sharing one giant
-/// tour, each with a distinct perturbation seed, keeping the global best. The
-/// ILS is high-variance per chain (a single unlucky seed can sit 3% above the
-/// optimum), so best-of-K reliably tightens the gap for a roughly K-times budget.
-pub fn solveCvrpMulti(allocator: std.mem.Allocator, inst: CvrpInstance, options: solver.SolveOptions, params: CvrpMultiParams) !CvrpResult {
-    return solveCvrpImpl(allocator, inst, options, params.rounds, params.restarts, 0);
 }
 
 
@@ -101,12 +86,12 @@ test "CVRP end-to-end: valid, feasible, beats one-per-route baseline" {
     for (1..dim) |i| demand[i] = rng.intRangeAtMost(u32, 1, 4);
     const inst = CvrpInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 10 };
 
-    var res = try solveCvrpMulti(allocator, inst, .{
+    var res = try solveCvrp(allocator, inst, .{
         .seed = 3,
         .budget = .{ .trials = 30, .max_passes = 40 },
         .candidates = .{ .candidate_count = 6, .candidate_mode = .alpha_nearness, .sparse_min_dimension = 0 },
         .search = .{ .enable_lk = true, .lk_max_depth = 5 },
-    }, .{ .rounds = 30, .restarts = 1 });
+    });
     defer res.deinit();
 
     // independently validated cost equals the reported cost
@@ -131,7 +116,7 @@ test "CVRP returns a clean error for an over-capacity customer" {
     };
     const demand = [_]u32{ 0, 1, 6 };
     const inst = CvrpInstance{ .n = 2, .matrix = &m, .demand = &demand, .capacity = 5 };
-    try std.testing.expectError(error.NoFeasibleSplit, solveCvrpMulti(allocator, inst, .{ .seed = 1 }, .{ .rounds = 5, .restarts = 1 }));
+    try std.testing.expectError(error.NoFeasibleSplit, solveCvrp(allocator, inst, .{ .seed = 1 }));
 }
 
 test "CVRP rejects nonzero depot demand instead of silently ignoring it" {
@@ -219,16 +204,16 @@ test "CVRP engine finds the brute-force optimum on a small instance" {
     const inst = CvrpInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 12 };
 
     const opt = try bruteForceOptimum(allocator, inst);
-    var res = try solveCvrpMulti(allocator, inst, .{
+    var res = try solveCvrp(allocator, inst, .{
         .seed = 11,
         .budget = .{ .trials = 30, .max_passes = 40 },
         .candidates = .{ .candidate_count = 6, .candidate_mode = .alpha_nearness, .sparse_min_dimension = 0 },
         .search = .{ .enable_lk = true, .lk_max_depth = 5 },
-    }, .{ .rounds = 200, .restarts = 1 });
+    });
     defer res.deinit();
     const checked = validate(inst, res.routes) orelse return error.Infeasible;
     try std.testing.expectEqual(res.total_cost, checked);
-    // ILS + optimal Split should reach the exact optimum on n=7.
+    // SISR should reach the exact optimum on n=7.
     try std.testing.expectEqual(opt, res.total_cost);
 }
 
@@ -401,12 +386,12 @@ test "CVRP asymmetric local search terminates and stays feasible" {
     for (1..dim) |i| demand[i] = rng.intRangeAtMost(u32, 1, 3);
     // high capacity -> few long routes -> many adjacent-swap candidates
     const inst = CvrpInstance{ .n = n, .matrix = matrix, .demand = demand, .capacity = 40 };
-    var res = try solveCvrpMulti(allocator, inst, .{
+    var res = try solveCvrp(allocator, inst, .{
         .seed = 1,
         .budget = .{ .trials = 20, .max_passes = 40 },
         .candidates = .{ .candidate_count = 6, .candidate_mode = .alpha_nearness, .sparse_min_dimension = 0 },
         .search = .{ .enable_lk = true, .lk_max_depth = 5 },
-    }, .{ .rounds = 40, .restarts = 1 });
+    });
     defer res.deinit();
     const checked = validate(inst, res.routes) orelse return error.Infeasible;
     try std.testing.expectEqual(res.total_cost, checked);

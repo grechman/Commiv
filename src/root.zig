@@ -57,7 +57,6 @@ pub const CvrpInstance = vrp.CvrpInstance;
 pub const CvrpResult = vrp.CvrpResult;
 pub const solveCvrp = vrp.solveCvrp; // no-config default (SISR)
 pub const solveCvrpFleet = vrp.solveCvrpFleet; // fixed vehicle cap
-pub const solveCvrpMulti = vrp.solveCvrpMulti; // uncapped giant-tour ILS variant
 pub const solveCvrpHgs = vrp.solveCvrpHgs;
 pub const solveCvrpHgsParallel = vrp.solveCvrpHgsParallel;
 pub const solveCvrpSisr = vrp.solveCvrpSisr;
@@ -65,7 +64,6 @@ pub const solveCvrpSisrParallel = vrp.solveCvrpSisrParallel;
 pub const CvrpHgsParams = vrp.HgsParams;
 pub const CvrpSisrParams = vrp.SisrParams;
 pub const CvrpFleetParams = vrp.CvrpFleetParams; // tuning for solveCvrpFleet (rounds/restarts/max_vehicles)
-pub const CvrpMultiParams = vrp.CvrpMultiParams; // tuning for solveCvrpMulti (rounds/restarts)
 pub const validateCvrp = vrp.validate; // feasibility + true-cost checker for a CvrpResult's routes
 
 // ---- VRPTW ------------------------------------------------------------------

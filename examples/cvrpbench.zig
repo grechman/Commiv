@@ -5,8 +5,7 @@ const commiv = @import("commiv");
 // to proven optimality — the optimal value is embedded in each file's COMMENT).
 // Reports cost, optimum, gap%, route count and wall time per instance so we can
 // see the engine's real distance-to-optimal, not just an improvement over a
-// weak baseline. Env: CB_DIR (default vendor/cvrp), CB_FILES (comma list),
-// CB_ROUNDS (ILS rounds, default scales with n), CB_SEED.
+// weak baseline. Env: CB_DIR (default vendor/cvrp), CB_FILES (comma list), CB_SEED.
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const env = init.environ_map;
@@ -30,11 +29,6 @@ pub fn main(init: std.process.Init) !void {
         const inst = inst_owned.inst();
         const n = inst.n;
 
-        const rounds: usize = blk: {
-            if (env.get("CB_ROUNDS")) |r| break :blk try std.fmt.parseInt(usize, r, 10);
-            break :blk if (n <= 40) @as(usize, 120) else if (n <= 60) 100 else 80;
-        };
-        const restarts: usize = try std.fmt.parseInt(usize, env.get("CB_RESTARTS") orelse "12", 10);
         const use_vrptw = std.mem.eql(u8, env.get("CB_VRPTW") orelse "0", "1");
 
         const solve_opts = commiv.SolveOptions{
@@ -203,15 +197,13 @@ pub fn main(init: std.process.Init) !void {
         const sisr_threads = try std.fmt.parseInt(usize, env.get("CB_THREADS") orelse "1", 10);
         var res = if (use_sisr)
             try commiv.solveCvrpSisrParallel(allocator, inst, solve_opts, sisr_params, sisr_threads)
-        else if (native_hgs)
+        else
             try commiv.solveCvrpHgs(allocator, inst, solve_opts, .{
                 .generations = try std.fmt.parseInt(usize, env.get("CB_GENS") orelse "100", 10),
                 .infeasible_search = !std.mem.eql(u8, env.get("CB_INFEAS") orelse "1", "0"),
                 .mu = try std.fmt.parseInt(usize, env.get("CB_MU") orelse "0", 10),
                 .lambda = try std.fmt.parseInt(usize, env.get("CB_LAMBDA") orelse "0", 10),
-            }, 0)
-        else
-            try commiv.internal.vrp.solveCvrpMulti(allocator, inst, solve_opts, .{ .rounds = rounds, .restarts = restarts });
+            }, 0);
         defer res.deinit();
         const ms = @as(f64, @floatFromInt(nanos() - t0)) / 1e6;
 
