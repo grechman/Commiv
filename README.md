@@ -4,33 +4,34 @@
 
 **[English](#commiv) · [Русский](#commiv-rus)**
 
-Near-optimal vehicle routes over real road networks, in seconds. Embeddable,
-dependency-free, and built for directed (asymmetric) cost where the trip from A to B
-is not the same as B to A.
+Near-optimal vehicle routes on real road networks, in seconds. Embeddable,
+dependency-free, and built for directed (asymmetric) cost, where the trip from A to B
+is not the same trip as B to A.
 
 commiv solves the travelling-salesman and vehicle-routing families (TSP, ATSP, CVRP,
 ACVRP, VRPTW, PDPTW) to within a fraction of a percent of optimal, and it reads directed
-travel-time matrices natively: one-way streets, turn penalties, congestion. The fast
-symmetric solvers everyone reaches for, FILO and HGS-CVRP, cannot ingest a directed
-matrix at all. commiv is built around that case.
+travel-time matrices natively: one-way streets, turn penalties, congestion. I built it
+because the standard tools fall apart exactly there. FILO and HGS-CVRP, the fast solvers
+everyone reaches for, are symmetric-only and cannot ingest a directed matrix at all.
+LKH-3 can, but it is single-threaded, non-commercial, and struggles with explicit
+directed matrices past n=1000 or so. If your matrix comes from an actual road network,
+the field is a lot thinner than it looks.
 
 The bet behind the whole engine: you almost never need the last 0.3% of optimality that
 costs an hour of compute. You need a near-optimal route now, and on real roads it has to
-respect direction. That is the operating point commiv targets.
+respect direction.
 
-> For courier, last-mile, and fleet-routing platforms that re-optimize thousands of
-> directed-road routes under a tight latency budget, commiv is an embeddable routing core
-> that returns near-optimal, capacity-feasible routes in seconds. Unlike LKH-3
-> (single-threaded, non-commercial license, and unable to handle explicit directed
-> matrices past about n=1000) or FILO and HGS-CVRP (fast, but symmetric-only), it treats
-> asymmetric road cost as the main case, not an afterthought.
+Numbers first. Real Moscow OSRM data, n=1000 directed CVRP, same matrix for everyone:
 
-Why that pays off: at fleet scale, solver compute is a line item that compounds across
-thousands of routes re-optimized around the clock. On real Moscow OSRM data, an n=1000
-directed CVRP comes out at **207,406 in 2 s** for commiv versus 225,917 in 60 s
-(OR-Tools), 221,487 in 456 s (LKH-3), and 208,687 in 315 s (VROOM). Cheaper and faster at
-once. And you can check that on your own instances in an afternoon; none of these numbers
-ask for your trust.
+| solver | cost | wall |
+|---|---|---|
+| commiv | **207,406** | **2 s** |
+| VROOM 1.14 | 208,687 | 315 s |
+| LKH-3 | 221,487 | 456 s |
+| OR-Tools | 225,917 | 60 s |
+
+Every number in this README reproduces with one command; see
+[Reproducing the benchmarks](#reproducing-the-benchmarks).
 
 ```sh
 zig build                                  # build the library
@@ -40,15 +41,13 @@ zig build serve -Doptimize=ReleaseFast     # REST API server (JSON over HTTP)
 zig build lib   -Doptimize=ReleaseFast     # C ABI: libcommiv.{a,so} + commiv.h
 ```
 
-- **Near-optimal, fast.** 0.02% off proven optima on standard CVRP, about 0.45% on the
-  hard Uchoa X set, in seconds to a minute on a laptop.
-- **Callable from any language.** A REST server, a C ABI, and a Python binding ship in
-  this repo. Zig is the engine underneath; you never have to write it.
-- **Asymmetric-native.** Directed travel-time matrices are first-class, not bolted on. On
-  real Moscow OSRM data commiv beats OR-Tools, LKH-3, and VROOM on both cost and wall-clock.
-- **Zero dependencies, deterministic.** One Zig module, no system libraries, no build-time
+- 0.02% off proven optima on standard CVRP, about 0.45% on the hard Uchoa X set, in
+  seconds to a minute on a laptop.
+- Callable from any language: a REST server, a C ABI, and a Python binding ship in this
+  repo. Zig is the engine underneath; you never have to write any.
+- Zero dependencies, deterministic. One Zig module, no system libraries, no build-time
   downloads. The same seed produces the same routes.
-- **Lean.** A 5000-node directed CVRP solves in 109 s using 211 MB, and 100 MB of that is
+- Lean. A 5000-node directed CVRP solves in 109 s using 211 MB, and 100 MB of that is
   the matrix itself.
 
 ---
@@ -57,7 +56,7 @@ zig build lib   -Doptimize=ReleaseFast     # C ABI: libcommiv.{a,so} + commiv.h
 
 The real entry point is not a TSPLIB file. It is your own stops, a cost matrix, and
 per-stop demands. Zig is the engine underneath, but you pick the door that matches your
-stack — none of them require writing Zig:
+stack; none of them require writing Zig:
 
 | Your stack | Door | Where |
 |---|---|---|
@@ -66,7 +65,7 @@ stack — none of them require writing Zig:
 | C, C++, Go, Rust, ... | C ABI: `libcommiv.{a,so}` + [`include/commiv.h`](include/commiv.h) | `zig build lib` |
 | Zig | The module itself | this section |
 
-### REST, from anywhere
+### REST
 
 ```sh
 zig build serve -Doptimize=ReleaseFast && ./zig-out/bin/commiv-serve
@@ -88,10 +87,10 @@ rolling-horizon plan around committed (locked) stops. Full schema and Python/JS/
 client snippets in [`docs/rest.md`](docs/rest.md).
 
 Container: `zig build serve -Dtarget=x86_64-linux-musl -Doptimize=ReleaseFast &&
-docker build -t commiv-serve . && docker run --rm -p 8080:8080 commiv-serve` —
+docker build -t commiv-serve . && docker run --rm -p 8080:8080 commiv-serve` -
 one static binary in a from-scratch image, ~10 MB.
 
-### Python, natively
+### Python
 
 ```python
 import commiv  # pip install commiv  (prebuilt wheels: linux x86_64, macOS; no toolchain)
@@ -105,7 +104,7 @@ garbage. `solve_pdptw_dispatch` and `DispatchSession` cover rolling-horizon
 re-solve around a committed plan. Details in
 [`bindings/python/README.md`](bindings/python/README.md).
 
-### Zig, embedded
+### Zig
 
 The rest of this section is the full Zig walkthrough.
 
@@ -127,7 +126,7 @@ exe.root_module.addImport("commiv", commiv.module("commiv"));
 
 #### 2. Solve a vehicle-routing problem from your own data
 
-Full working examples live in [`examples/`](examples/): `basic.zig` parses a TSPLIB instance with `parseTsplib`, while `roadbench.zig` and `cvrpbench.zig` read their CVRP and road instances from disk with their own parsers. `parseTsplib` reads TSPLIB symmetric TSP only — a coordinate section (`EUC_2D`, `CEIL_2D`, or `ATT`) or an `EXPLICIT` `FULL_MATRIX` — so CVRP, ACVRP, and ATSP instances do not load through it. Below is the minimal in-memory version on your own data.
+Full working examples live in [`examples/`](examples/): `basic.zig` parses a TSPLIB instance with `parseTsplib`, while `roadbench.zig` and `cvrpbench.zig` read their CVRP and road instances from disk with their own parsers. `parseTsplib` reads TSPLIB symmetric TSP only - a coordinate section (`EUC_2D`, `CEIL_2D`, or `ATT`) or an `EXPLICIT` `FULL_MATRIX` - so CVRP, ACVRP, and ATSP instances do not load through it. Below is the minimal in-memory version on your own data.
 
 You bring a row-major `(n+1) x (n+1)` cost matrix (node 0 is the depot, customers are
 `1..n`), a `demand` array, and a vehicle `capacity`. The matrix is directional:
@@ -230,7 +229,7 @@ Every solver is allocator-first, takes an options struct, and returns a result y
 [`src/root.zig`](src/root.zig)); each solver has unit tests in its own source file.
 
 **Parsing**
-- `parseTsplib(allocator, text, ParseOptions) !Problem` parses TSPLIB symmetric TSP only — a
+- `parseTsplib(allocator, text, ParseOptions) !Problem` parses TSPLIB symmetric TSP only - a
   coordinate section (`EUC_2D`, `CEIL_2D`, or `ATT`) or an `EXPLICIT` `FULL_MATRIX`. Pass a
   `ParseDiagnostic` in the options to capture line-level parse errors.
 
@@ -239,62 +238,62 @@ Every solver is allocator-first, takes an options struct, and returns a result y
   `Coord` and `DistanceKind` types.
 
 **Shared options and result**
-- `SolveOptions` — `seed`, `budget` (`trials`, `max_passes`), candidate and search knobs.
-- `SolveResult` — `{ tour, length, stats }`, the one type returned by `solve`, `solveAtsp*`,
+- `SolveOptions` - `seed`, `budget` (`trials`, `max_passes`), candidate and search knobs.
+- `SolveResult` - `{ tour, length, stats }`, the one type returned by `solve`, `solveAtsp*`,
   and `bruteForce`. `SolveStats` is the per-run telemetry; `CandidateMode` picks the
   candidate-graph metric.
 
 **TSP (symmetric)**
-- `solve(allocator, *Problem, SolveOptions) !SolveResult` — Lin-Kernighan + ILS.
-- `solveWithStats(...)` — same as `solve`, also fills `SolveStats` telemetry.
-- `solveParallel(allocator, *Problem, SolveOptions, ParallelOptions) !SolveResult` —
+- `solve(allocator, *Problem, SolveOptions) !SolveResult` - Lin-Kernighan + ILS.
+- `solveWithStats(...)` - same as `solve`, also fills `SolveStats` telemetry.
+- `solveParallel(allocator, *Problem, SolveOptions, ParallelOptions) !SolveResult` -
   independent islands with optional EAX recombination, or a deterministic split-budget speed
   mode. `ParallelOptions.threads == 0` resolves to the host CPU count, which changes the
   island seeding and therefore the result; pass an explicit non-zero `threads` for output
   reproducible across machines.
 
-**ATSP (directed)** — row-major `n x n` matrix where `matrix[i*n + j]` is the cost of `i → j`
-- `solveAtsp(allocator, matrix, n, SolveOptions) !SolveResult` — 2n Jonker-Volgenant transform.
-- `solveAtspNative(allocator, matrix, n, SolveOptions) !SolveResult` — direct directed search.
-- `solveAtspParallel(allocator, matrix, n, SolveOptions, threads) !SolveResult` — `threads == 0`
+**ATSP (directed)** - row-major `n x n` matrix where `matrix[i*n + j]` is the cost of `i -> j`
+- `solveAtsp(allocator, matrix, n, SolveOptions) !SolveResult` - 2n Jonker-Volgenant transform.
+- `solveAtspNative(allocator, matrix, n, SolveOptions) !SolveResult` - direct directed search.
+- `solveAtspParallel(allocator, matrix, n, SolveOptions, threads) !SolveResult` - `threads == 0`
   resolves to the host CPU count, changing the result; pass a non-zero `threads` for
   cross-machine reproducibility.
 
 **Exact (tiny n)**
 - `bruteForce(allocator, *Problem, ExactOptions) !SolveResult`.
 
-**CVRP / ACVRP** — build a `CvrpInstance { n, matrix, demand, capacity }` with a
+**CVRP / ACVRP** - build a `CvrpInstance { n, matrix, demand, capacity }` with a
 `(n+1) x (n+1)` directional matrix (depot = node 0); every solver returns
 `CvrpResult { routes, total_cost }`
-- `solveCvrp(allocator, inst, SolveOptions) !CvrpResult` — no-config default (runs SISR).
-- `solveCvrpSisr(allocator, inst, SolveOptions, CvrpSisrParams)` — large / directed.
-- `solveCvrpHgs(allocator, inst, SolveOptions, CvrpHgsParams, max_vehicles)` — n ≲ 500.
-- `solveCvrpFleet(allocator, inst, SolveOptions, CvrpFleetParams)` — fixed fleet cap.
-- `solveCvrpSisrParallel(allocator, inst, SolveOptions, CvrpSisrParams, threads)` — `threads == 0`
+- `solveCvrp(allocator, inst, SolveOptions) !CvrpResult` - no-config default (runs SISR).
+- `solveCvrpSisr(allocator, inst, SolveOptions, CvrpSisrParams)` - large / directed.
+- `solveCvrpHgs(allocator, inst, SolveOptions, CvrpHgsParams, max_vehicles)` - n up to about 500.
+- `solveCvrpFleet(allocator, inst, SolveOptions, CvrpFleetParams)` - fixed fleet cap.
+- `solveCvrpSisrParallel(allocator, inst, SolveOptions, CvrpSisrParams, threads)` - `threads == 0`
   resolves to the host CPU count, changing the result; pass a non-zero `threads` for
   cross-machine reproducibility.
-- `solveCvrpHgsParallel(allocator, inst, SolveOptions, CvrpHgsParams, max_vehicles, threads)` —
+- `solveCvrpHgsParallel(allocator, inst, SolveOptions, CvrpHgsParams, max_vehicles, threads)` -
   same `threads == 0` caveat as above.
-- `solveCvrpMulti(allocator, inst, SolveOptions, CvrpMultiParams)` — uncapped giant-tour ILS
+- `solveCvrpMulti(allocator, inst, SolveOptions, CvrpMultiParams)` - uncapped giant-tour ILS
   variant (legacy; SISR usually dominates it).
-- `validateCvrp(inst, routes) ?u64` — independent feasibility check of a solution; returns
+- `validateCvrp(inst, routes) ?u64` - independent feasibility check of a solution; returns
   the recomputed true cost, or null if any route is infeasible or a customer is missed.
 
-**VRPTW** — build a `VrptwInstance { n, matrix, demand, capacity, ready, due, service }`;
+**VRPTW** - build a `VrptwInstance { n, matrix, demand, capacity, ready, due, service }`;
 returns `VrptwResult`
-- `solveVrptwSisr(allocator, inst, SolveOptions, VrptwSisrParams)` — the default engine:
+- `solveVrptwSisr(allocator, inst, SolveOptions, VrptwSisrParams)` - the default engine:
   SISR with time windows. Use this one.
-- `solveVrptwSisrParallel(allocator, inst, SolveOptions, VrptwSisrParams, threads)` —
+- `solveVrptwSisrParallel(allocator, inst, SolveOptions, VrptwSisrParams, threads)` -
   best-of-K chains; same `threads == 0` caveat as the CVRP variant.
-- `solveVrptw(allocator, inst, SolveOptions, VrptwParams) !VrptwResult` — legacy giant-tour
+- `solveVrptw(allocator, inst, SolveOptions, VrptwParams) !VrptwResult` - legacy giant-tour
   ILS (kept for reproducibility; SISR matches or beats it at equal wall).
 - `solveVrptwHgs(allocator, inst, SolveOptions, VrptwHgsParams) !VrptwResult`.
-- `validateVrptw(inst, routes) ?u64` — independent capacity + time-window feasibility check;
+- `validateVrptw(inst, routes) ?u64` - independent capacity + time-window feasibility check;
   returns the recomputed cost, or null if infeasible.
 
-**PDPTW (pickup & delivery)** — build a `PdpInstance { n_pairs, matrix, capacity, pair_of,
+**PDPTW (pickup & delivery)** - build a `PdpInstance { n_pairs, matrix, capacity, pair_of,
 is_pickup, demand_signed, ready, due, service }`; returns `PdpResult`
-- `solvePdptwSisr(allocator, inst, PdpSisrParams)` — the engine: pair-atomic SISR, with an
+- `solvePdptwSisr(allocator, inst, PdpSisrParams)` - the engine: pair-atomic SISR, with an
   optional fleet cap + request bank (`max_vehicles`) for hierarchical vehicle minimization.
   On the Li & Lim 100-series at 10 s per instance, single thread, all four solvers fed the
   SAME integer matrix (`zig build pdptwbench -Doptimize=ReleaseFast` then
@@ -328,7 +327,7 @@ is_pickup, demand_signed, ready, due, service }`; returns `PdpResult`
 
   Opt-in levers on top (all measured, all off by default):
   - `PB_EJECT=1` (`eject`): GES-style squeeze fallback (Nagata & Kobayashi) in capped
-    runs — a banked pair with no feasible insertion is inserted at the least-violating
+    runs - a banked pair with no feasible insertion is inserted at the least-violating
     position and one resident pair is ejected to restore feasibility, steered by
     ejection counters. With this on, the 100-series reaches the record fleet on
     **56/56 at 10 s** (lc103 and lc109 cracked; the only remaining n=100 gaps are three
@@ -336,57 +335,57 @@ is_pickup, demand_signed, ready, due, service }`; returns `PdpResult`
     record at n=200. No effect on deep (5+ vehicle) misses at n=1000.
   - `PB_GRAN=2` (`gran_gaps`): dropoff-gap evaluation gated to kNN neighbourhoods on
     long routes during uncapped search (auto-off above 8 routes, under 24 nodes, or
-    while a fleet cap is active) — 200-series fleet 2W/0L, distance 8W/0L vs baseline
+    while a fleet cap is active) - 200-series fleet 2W/0L, distance 8W/0L vs baseline
     (lr2_2_3 16.75% -> exact BKS; record-fleet mean gap 1.92% -> 0.91%). Recommended
     n>=200 only (seed-marginal lr211 fleet loss at n=100). Combining with eject at
-    n=200 churns (fleet 4W/4L) — pick one per regime.
-  - `PB_THREADS=3`: parallel fleet-min waves (`solvePdptwSisrFleetMinParallel`) —
+    n=200 churns (fleet 4W/4L) - pick one per regime.
+  - `PB_THREADS=3`: parallel fleet-min waves (`solvePdptwSisrFleetMinParallel`) -
     saves 1-2 vehicles on four of the six hardest n=1000 cells at identical wall.
   - `PB_SWAP=N` (`swap_kick`): SWAP*-shaped inter-route pair exchange every N
-    iterations — marginal (one 400-series hairline improved, lc104 unmoved).
-  - `PB_P0` (`fleet_p0_pct`): uncapped-phase share of the fleet-min budget — front-
+    iterations - marginal (one 400-series hairline improved, lc104 unmoved).
+  - `PB_P0` (`fleet_p0_pct`): uncapped-phase share of the fleet-min budget - front-
     loading (15%) measured a wash on hard n=1000 cells; default 40.
   The snapshot-rollback undo journal was profiled and measured dead (rollback+snapshot
   = 0.3-2.3% of wall; the insertion scan is 46-88%).
 
   **Money objective** (`time_penalty`, `PB_TIMEPEN`): charge each route's *duration*
-  (driving + service + unavoidable waiting, at the departure-time-optimized schedule —
+  (driving + service + unavoidable waiting, at the departure-time-optimized schedule -
   the time-window algebra computes it natively) on top of distance and the per-vehicle
   cost. This turns the objective into real operating cost:
   `A·vehicles + B·distance + C·hours`, with the engine trading fuel for driver salary
   wherever waiting exists. Measured at 30 s on Li & Lim 200-series (`PB_TIMEPEN=1`,
   time unit priced like a distance unit): lr2_2_1 gives up an exact-best-known distance
-  (+10%) to cut paid waiting 24% (4041 -> 3058) — total money **down 153 units**;
+  (+10%) to cut paid waiting 24% (4041 -> 3058) - total money **down 153 units**;
   lr1_2_10 cuts waiting 56% for +1.5% distance. Off (`time_penalty = 0`, the default)
   the engine is bit-identical to the historic vehicles-then-distance objective.
   Notably, VROOM cannot price waiting time at all (their open issue #1130).
-- `solvePdptwSisrFleetMin(allocator, inst, params, total_time_ms)` — vehicle-count descent
+- `solvePdptwSisrFleetMin(allocator, inst, params, total_time_ms)` - vehicle-count descent
   (uncapped run, then capped request-bank attempts, warm + cold, terminal polish).
-- `solvePdptwSisrPinned(allocator, inst, params, total_time_ms, pin)` — enterprise
+- `solvePdptwSisrPinned(allocator, inst, params, total_time_ms, pin)` - enterprise
   pinned-fleet driver: best solution using at most `pin` vehicles, whole budget on that
   goal (uncapped warm-up, retrying descent, all remaining time polishing at the pin).
   On the hardest long-route cells this halves the distance gap vs a cold capped run
   (lr2_2_7 22.8% -> 5.0%) and solves cells where a cold capped run finds nothing.
-- `solvePdptwSisrDispatch(allocator, inst, params, current, locked)` — rolling-horizon
+- `solvePdptwSisrDispatch(allocator, inst, params, current, locked)` - rolling-horizon
   re-solve: `current[i]` is vehicle `i`'s present route, `locked[i]` how many of its
   leading stops are committed and must not move (a locked delivery's pickup must be
   locked too, in the same route). Unlocked stops and new/banked pairs are re-optimized
   around the locks. Exposed through all three doors as `solve_pdptw_dispatch` /
   `commiv_solve_pdptw_dispatch` / `POST /solve/pdptw/dispatch`; see
   [`docs/rest.md`](docs/rest.md) and [`bindings/python/`](bindings/python/).
-- Heterogeneous fleet (v1): `PdpSisrParams.veh_types` — up to 8 vehicle types
+- Heterogeneous fleet (v1): `PdpSisrParams.veh_types` - up to 8 vehicle types
   `{capacity, fixed_cost, count}` (count 0 = unlimited); every route is served by one
   type, its capacity bounds the route load, its fixed cost replaces `veh_penalty`.
   Doors: `commiv_solve_pdptw_typed` + `commiv_routes_type` (C),
   `solve_pdptw(vehicle_types=[(cap, fixed, count), ...])` -> `.types` (Python).
-- Driver break (v1): `PdpSisrParams.brk = {dur, earliest, latest}` — one break per
+- Driver break (v1): `PdpSisrParams.brk = {dur, earliest, latest}` - one break per
   route, required of every route whose depart-at-0 schedule finishes after `earliest`;
   starts within `[earliest, latest]`, absorbs waiting first, counts into route duration
   (so the money objective prices it). Doors: `break_duration/earliest/latest` in
   `commiv_options` (C, PDPTW entries), `break_=(dur, earliest, latest)` (Python).
-- `solvePdptw(allocator, inst, PdpParams)` — correctness baseline (pair insertion +
+- `solvePdptw(allocator, inst, PdpParams)` - correctness baseline (pair insertion +
   pair relocate, brute-force-verified); use the SISR engine for real work.
-- `validatePdptw(inst, routes) ?u64` — independent pairing + precedence + capacity-prefix +
+- `validatePdptw(inst, routes) ?u64` - independent pairing + precedence + capacity-prefix +
   time-window feasibility check; returns the recomputed cost, or null if infeasible.
   `validatePdptwTyped` adds per-route type capacities; `validatePdptwWithBreak`
   brute-forces the break contract.
@@ -405,14 +404,14 @@ part of this API and free to change between versions.
 
 ## Use cases
 
-- **Last-mile and courier routing on real road networks.** Feed a directed OSRM-style
-  travel-time matrix and get capacity-feasible routes that respect one-way streets and turn
+- Last-mile and courier routing on real road networks: feed a directed OSRM-style
+  travel-time matrix, get capacity-feasible routes that respect one-way streets and turn
   costs. This is the case commiv is built for.
-- **Classical TSP, CVRP, and VRPTW.** Near-optimal solutions far faster than exact methods.
-- **An embeddable core.** A single dependency-free module to drop into a larger planner.
-- **Beyond logistics.** Hole-drilling on a printed circuit board, drone survey flyovers, NPC
-  routes and patrols in video games, a warehouse picker walking the racks, round planning for
-  field crews — any problem where visit order matters and the transitions are asymmetric.
+- Classical TSP, CVRP, and VRPTW: near-optimal solutions far faster than exact methods.
+- An embeddable core: a single dependency-free module to drop into a larger planner.
+- Beyond logistics: hole-drilling on a printed circuit board, drone survey flyovers, NPC
+  patrol routes in video games, a warehouse picker walking the racks, round planning for
+  field crews. Any problem where visit order matters and the transitions are asymmetric.
 
 ---
 
@@ -430,8 +429,8 @@ validators wherever one exists. **All tables, per-instance data, and methodology
 | CVRP Augerat (12) | HGS-CVRP, PyVRP | all three at/near optimum; commiv 0.000% |
 | CVRP Uchoa X (6) | HGS-CVRP, PyVRP | **commiv 0.320%** vs HGS 0.965%, PyVRP 2.640% |
 | ACVRP (30) | LKH-3 field best | +0.010% vs LKH's own best-known values |
-| Road CVRP (10 cities/sizes) | PyVRP, VROOM | commiv leads every cell but one (nyc-100 −0.15%); PyVRP +1.2-1.9% behind at n≥1000, VROOM +2-5% |
-| Road VRPTW (9) | PyVRP, VROOM | commiv leads 8/9 (nyc-100 −0.01%); VROOM +1-9% behind |
+| Road CVRP (10 cities/sizes) | PyVRP, VROOM | commiv leads every cell but one (nyc-100 -0.15%); PyVRP +1.2-1.9% behind at n>=1000, VROOM +2-5% |
+| Road VRPTW (9) | PyVRP, VROOM | commiv leads 8/9 (nyc-100 -0.01%); VROOM +1-9% behind |
 | VRPTW Solomon/GH (18) | PyVRP | Solomon at BKS; GH R/RC fleet counts remain the honest miss |
 | PDPTW Li & Lim (352) | VROOM | commiv completes **352/352**; VROOM leaves shipments unassigned on 238/352 at the same wall |
 
@@ -440,50 +439,51 @@ vehicles over best-known (route-min phase exists only in the PDPTW engine so far
 Everything else in that table is a lead or a tie.
 
 
-## How commiv compares, honestly
+## Where it wins, where it loses
 
-**Where it wins**
+Where it wins:
 
-- **The speed and quality frontier.** Near-optimal in seconds, not the minutes-to-hours the
+- The speed-quality frontier. Near-optimal in seconds, not the minutes-to-hours the
   reference heuristics spend. For a planner that has to replan constantly, this is the
   number that matters.
-- **Directed real-road matrices.** Asymmetric cost is first-class. FILO and HGS-CVRP, the
-  symmetric speed and quality champions, physically cannot read a directed matrix. On real
-  Moscow data commiv beats OR-Tools, LKH-3, and VROOM on cost and time.
-- **Zero dependencies, small footprint.** One Zig module, and a 5000-node directed CVRP in
+- Directed real-road matrices. FILO and HGS-CVRP, the symmetric speed and quality
+  champions, physically cannot read a directed matrix. On real Moscow data commiv beats
+  OR-Tools, LKH-3, and VROOM on cost and time.
+- Zero dependencies, small footprint. One Zig module, and a 5000-node directed CVRP in
   211 MB.
 
-**Where the competition wins, and you should know it**
+Where the competition wins. Better you read this here than find out after integrating:
 
-- **Absolute accuracy at huge budgets.** LKH-3, HGS-CVRP, and SISR (the paper) reach lower
+- Absolute accuracy at huge budgets. LKH-3, HGS-CVRP, and SISR (the paper) reach lower
   gaps (about 0.16% to 0.39% on Uchoa X) when given far more time than the equal-wall
   budgets in [BENCHMARKS.md](BENCHMARKS.md), and PyVRP can cross commiv's numbers when
-  given roughly 10x the compute — the crossing wall grows with instance size and
+  given roughly 10x the compute; the crossing wall grows with instance size and
   asymmetry. commiv trades that last fraction of a percent for a large speed advantage.
-  It is not state-of-the-art on accuracy at the unlimited-budget frontier.
-- **Dedicated fleet minimization.** On the vehicles-first Gehring–Homberger objective
-  commiv matches the best-known fleet on only 4 of 12 instances; the record holders run an
+  It is not state-of-the-art at the unlimited-budget frontier and does not pretend to be.
+- Dedicated fleet minimization. On the vehicles-first Gehring-Homberger objective commiv
+  matches the best-known fleet on only 4 of 12 instances; the record holders run an
   ejection-pool route-minimization phase commiv does not have yet.
-- **Massive symmetric instances.** FILO solves symmetric CVRPs with tens of thousands of
+- Massive symmetric instances. FILO solves symmetric CVRPs with tens of thousands of
   nodes faster than anything here. commiv targets the routing-scale (hundreds to a few
   thousand) directed regime.
-- **Production hardness.** OR-Tools and VROOM are battle-tested stacks with rich constraints
-  (skills, breaks, multi-depot, driver shifts) and years of deployment. commiv covers
-  capacities, time windows, pickup-and-delivery, fleet pinning, and a money objective —
-  but it is a fast, focused core, not a complete logistics platform.
+- Production hardness. OR-Tools and VROOM are battle-tested stacks with rich constraint
+  sets (skills, multi-depot, driver shifts) and years of deployment. commiv covers
+  capacities, time windows, pickup-and-delivery, heterogeneous fleets, driver breaks,
+  fleet pinning, and a money objective, but it is a fast, focused core, not a complete
+  logistics platform.
 
 ---
 
 ## Design decisions
 
-### What we settled on, and why
+### What stuck
 
-- **SISR (Slack Induction by String Removals) for large and asymmetric CVRP — and VRPTW.**
+- **SISR (Slack Induction by String Removals) for large and asymmetric CVRP - and VRPTW.**
   Ruin a few spatially-adjacent strings, greedily re-insert with random blinks, accept
   under a threshold or SA. The bet: millions of `O(removed)` moves beat thousands of
   `O(n)` ones. This is what cracks the large-n and directed regimes. For time windows the
   same loop runs with per-route prefix/suffix time-slack (Tws) structures, so "is this
-  insertion feasible and what does it cost" is O(1) per candidate gap — that one change
+  insertion feasible and what does it cost" is O(1) per candidate gap - that one change
   took Moscow n=1000 VRPTW from 988 s (ILS) to 4 s at better cost.
 - **HGS (population plus Prins Split DP) for mid-size CVRP, n up to about 500.** A genetic
   population of giant tours with optimal capacity splitting and local-search education gives
@@ -506,14 +506,14 @@ Everything else in that table is a lead or a tie.
   accuracy at equal wall-clock on multiple cores; a deterministic split-budget mode trades a
   little quality for about 2.5x speed.
 
-### What we tried and rejected, and why
+### What got tried and thrown out
 
-- **Static Move Descriptors (SMD).** Our don't-look-queue is 4x to 5x faster at identical
+- **Static Move Descriptors (SMD).** The don't-look-queue is 4x to 5x faster at identical
   quality; the DLQ already captures the locality SMD buys. Dead end.
 - **Two-level doubly-linked tour list.** After fixing a fallback that was firing on provably
   doomed rebuilds, tour rebuilds dropped about 10x. Re-measured 2026-07: the entire remaining
-  target (`applyEdges`, the O(n) retrace + rebuild per accepted move) is 2.5–2.8% of
-  wall-clock at n=575–1577 and 5.6% at n=11849 — the rewrite's ceiling, before paying the
+  target (`applyEdges`, the O(n) retrace + rebuild per accepted move) is 2.5-2.8% of
+  wall-clock at n=575-1577 and 5.6% at n=11849 - the rewrite's ceiling, before paying the
   per-query segment indirection that every `next`/`prev` read in the LK inner loop would eat.
   Closed.
 - **Cooperative and best-of parallelism.** High variance and lock contention made it slower
@@ -530,10 +530,10 @@ Everything else in that table is a lead or a tie.
 - **Route-pool recombination across parallel SISR chains.** Adaptive-memory offspring
   (cheapest disjoint routes from every island, clash-stripped with a TW re-check, leftovers
   as singletons, short SISR polish) never beat plain best-of-K on Moscow VRPTW at n=100 or
-  n=1000 — even with a perfect repair the offspring starts ~46% above the best island, and
+  n=1000 - even with a perfect repair the offspring starts ~46% above the best island, and
   spending the polish wall on extra best-of-K iterations wins instead. The TSP recombination
   gain does not transfer: SISR's threshold schedule makes the seed nearly irrelevant (measured
-  before — swapping the seed tour changes nothing), so there is no incumbent-trajectory
+  before - swapping the seed tour changes nothing), so there is no incumbent-trajectory
   memory for an offspring to inject. LK islands have exactly that memory, which is why EAX
   recombination pays there and not here.
 
@@ -543,7 +543,7 @@ Everything else in that table is a lead or a tie.
 
 Measured and closed on a GTX 1660 Ti (2026-07-13): the batched move-delta kernel runs
 0.11x vs the 12-thread CPU at n=1001, and 1536 parallel on-device chains reach only
-0.55x of the CPU's aggregate throughput — the engine's winning moves (sparse don't-look
+0.55x of the CPU's aggregate throughput - the engine's winning moves (sparse don't-look
 scans, deep anneals, ejection chains) are exactly the work GPUs are bad at. Full
 evidence and reopen conditions: [`tools/gpu-probe/GPU-REPORT.md`](tools/gpu-probe/GPU-REPORT.md);
 original design spec kept in [`gpu.md`](gpu.md).
@@ -552,7 +552,7 @@ original design spec kept in [`gpu.md`](gpu.md).
 ## Reproducing the benchmarks
 
 Standard instances ship under `vendor/` (TSPLIB, CVRPLIB Augerat and Uchoa X, ATSP, ACVRP,
-Solomon, Gehring-Homberger, Li & Lim PDPTW, and the road matrices under `vendor/road/` —
+Solomon, Gehring-Homberger, Li & Lim PDPTW, and the road matrices under `vendor/road/` -
 `gunzip vendor/road/moscow-5000.road.gz` first). Competitor adapters and setup notes are in
 [`tools/competitors/`](tools/competitors/). Each bench builds its own binary:
 
@@ -587,24 +587,29 @@ See [`LICENSE`](LICENSE).
 
 **[English](#commiv) · [Русский](#commiv-rus)**
 
-Поиск почти оптимального маршрута за секунды. Рассчитан на асимметричные маршруты, приближенные к реальным условиям.
-Без зависимостей, полностью написан на языке Zig.
+Почти оптимальные маршруты по реальной дорожной сети за секунды. Встраиваемый, без
+зависимостей, целиком на Zig. Рассчитан на направленную (асимметричную) стоимость,
+когда путь из A в B не равен пути из B в A.
 
 commiv решает семейства задач коммивояжёра и маршрутизации транспорта (TSP, ATSP, CVRP,
 ACVRP, VRPTW, PDPTW) с точностью до доли процента от оптимума и читает ориентированные
-матрицы времени в пути напрямую: улицы с односторонним движением, повороты, заторы.
+матрицы времени в пути напрямую: односторонние улицы, повороты, заторы. Я собрал его
+потому, что стандартные инструменты ломаются именно здесь. FILO и HGS-CVRP направленную
+матрицу не читают вообще, а LKH-3 читает, но он однопоточный, с некоммерческой лицензией
+и разваливается на явных направленных матрицах после n~1000. Если ваша матрица приходит
+из реальной дорожной сети, выбор куда меньше, чем кажется.
 
-На реальных данных Moscow OSRM направленная CVRP при n=1000 решается за **207 406 за 2 с** —
-против 225 917 за 60 с у OR-Tools, 221 487 за 456 с у LKH-3 и 208 687 за 315 с у VROOM.
-Дешевле и быстрее одновременно, и это можно перепроверить на своих инстансах за вечер.
+Сначала цифры. Реальные данные Moscow OSRM, направленная CVRP, n=1000, одна и та же
+матрица у всех:
 
-> Для платформ курьерской доставки, последней мили и маршрутизации автопарков, которые
-> пересчитывают тысячи направленных дорожных маршрутов под жёстким лимитом по времени,
-> commiv — встраиваемое ядро маршрутизации, возвращающее почти оптимальные и допустимые по
-> вместимости маршруты за секунды. В отличие от LKH-3 (однопоточный, некоммерческая лицензия
-> и неспособный обрабатывать явные направленные матрицы после ~n=1000) или FILO и HGS-CVRP
-> (быстрые, но только симметричные), он считает асимметричную дорожную стоимость основным
-> случаем, а не довеском.
+| солвер | стоимость | время |
+|---|---|---|
+| commiv | **207 406** | **2 с** |
+| VROOM 1.14 | 208 687 | 315 с |
+| LKH-3 | 221 487 | 456 с |
+| OR-Tools | 225 917 | 60 с |
+
+Каждое число воспроизводится одной командой; см. [BENCHMARKS.md](BENCHMARKS.md).
 
 ```sh
 zig build                                  # собрать библиотеку
@@ -614,22 +619,20 @@ zig build serve -Doptimize=ReleaseFast     # REST API сервер (JSON пов�
 zig build lib   -Doptimize=ReleaseFast     # C ABI: libcommiv.{a,so} + commiv.h
 ```
 
-- **Приближено к оптимуму.** 0.02% от доказанных оптимумов на стандартной CVRP, около
-  0.45% на тяжёлом наборе Uchoa X, за секунды на ноутбуке.
-- **Вызывается из любого языка.** REST-сервер, C ABI и биндинг для Python лежат прямо в
-  репозитории. Zig — это движок под капотом; писать на нём не нужно.
-- **Нативная асимметрия.** Ориентированные матрицы времени в пути нативно поддерживаются. На реальных данных Moscow OSRM commiv обходит OR-Tools, LKH-3 и VROOM и
-  по стоимости, и по времени.
-- **Ноль зависимостей** Один модуль на Zig, без системных библиотек, без
-  загрузок при сборке.
-- **Экономично по памяти.** Ориентированная CVRP на 5000 узлов решается за 109с при 211 МБ, и 100 МБ
-  из них — сама матрица.
+- 0.02% от доказанных оптимумов на стандартной CVRP, около 0.45% на тяжёлом наборе
+  Uchoa X, за секунды на ноутбуке.
+- Вызывается из любого языка: REST-сервер, C ABI и биндинг для Python лежат прямо в
+  репозитории. Zig - движок под капотом; писать на нём не нужно.
+- Ноль зависимостей, детерминизм: один модуль на Zig, без системных библиотек, без
+  загрузок при сборке. Один и тот же сид даёт одни и те же маршруты.
+- Экономно по памяти: направленная CVRP на 5000 узлов решается за 109 с при 211 МБ,
+  и 100 МБ из них - сама матрица.
 
 ---
 
 ## Работа с commiv
 
-Zig — движок под капотом, но входную дверь вы выбираете под свой стек, и ни одна из них
+Zig - движок под капотом, но входную дверь вы выбираете под свой стек, и ни одна из них
 не требует писать на Zig:
 
 | Ваш стек | Дверь | Где |
@@ -639,7 +642,7 @@ Zig — движок под капотом, но входную дверь вы 
 | C, C++, Go, Rust, ... | C ABI: `libcommiv.{a,so}` + [`include/commiv.h`](include/commiv.h) | `zig build lib` |
 | Zig | Сам модуль | этот раздел |
 
-### REST — из чего угодно
+### REST
 
 ```sh
 zig build serve -Doptimize=ReleaseFast && ./zig-out/bin/commiv-serve
@@ -656,11 +659,11 @@ curl -X POST http://127.0.0.1:8080/solve/cvrp -d '{
 
 Это вся интеграция: направленная матрица стоимостей (строка `a`, столбец `b` = стоимость
 `a -> b`, депо = узел 0), спрос, вместимость. `/solve/vrptw` добавляет временные окна,
-`/solve/atsp` — чистое направленное упорядочивание, `/solve/pdptw/dispatch` пересчитывает
+`/solve/atsp` - чистое направленное упорядочивание, `/solve/pdptw/dispatch` пересчитывает
 план на скользящем горизонте вокруг уже зафиксированных остановок. Полная схема и примеры
-клиентов на Python/JS/Go — в [`docs/rest.md`](docs/rest.md).
+клиентов на Python/JS/Go - в [`docs/rest.md`](docs/rest.md).
 
-### Python — нативно
+### Python
 
 ```python
 import commiv  # pip install commiv (готовые wheels: linux x86_64, macOS; без тулчейна)
@@ -671,12 +674,12 @@ print(sol.total_cost, sol.routes)  # 58 [[2, 1], [3]]
 
 Матрицы numpy идут по быстрому пути; недопустимая задача поднимает исключение, а не
 возвращает мусор. `solve_pdptw_dispatch` и `DispatchSession` покрывают пересчёт на
-скользящем горизонте вокруг уже зафиксированного плана. Подробности — в
+скользящем горизонте вокруг уже зафиксированного плана. Подробности - в
 [`bindings/python/README.md`](bindings/python/README.md).
 
-### Zig — встраивание
+### Zig
 
-Дальше — полное руководство по встраиванию на Zig.
+Дальше - полное руководство по встраиванию на Zig.
 
 #### 1. Добавить зависимость
 
@@ -696,11 +699,11 @@ exe.root_module.addImport("commiv", commiv.module("commiv"));
 
 #### 2. Решить задачу маршрутизации на своих данных
 
-Полные рабочие примеры лежат в каталоге [`examples/`](examples/): `basic.zig` разбирает инстанс TSPLIB через `parseTsplib`, а `roadbench.zig` и `cvrpbench.zig` читают свои инстансы CVRP и дорожных матриц с диска собственными парсерами. `parseTsplib` читает только симметричную TSP в формате TSPLIB — секцию координат (`EUC_2D`, `CEIL_2D` или `ATT`) либо `EXPLICIT` `FULL_MATRIX`, — поэтому инстансы CVRP, ACVRP и ATSP через него не загружаются. Ниже — минимальный встроенный вариант на своих данных.
+Полные рабочие примеры лежат в каталоге [`examples/`](examples/): `basic.zig` разбирает инстанс TSPLIB через `parseTsplib`, а `roadbench.zig` и `cvrpbench.zig` читают свои инстансы CVRP и дорожных матриц с диска собственными парсерами. `parseTsplib` читает только симметричную TSP в формате TSPLIB - секцию координат (`EUC_2D`, `CEIL_2D` или `ATT`) либо `EXPLICIT` `FULL_MATRIX`, - поэтому инстансы CVRP, ACVRP и ATSP через него не загружаются. Ниже - минимальный встроенный вариант на своих данных.
 
-Вы передаёте матрицу стоимостей `(n+1) x (n+1)` в строковом порядке (узел 0 — это депо,
-клиенты — `1..n`), массив `demand` и вместимость `capacity`. Матрица направленная:
-`matrix[a*(n+1) + b]` — это стоимость пути из `a` в `b`, так что реальная асимметричная
+Вы передаёте матрицу стоимостей `(n+1) x (n+1)` в строковом порядке (узел 0 - это депо,
+клиенты - `1..n`), массив `demand` и вместимость `capacity`. Матрица направленная:
+`matrix[a*(n+1) + b]` - это стоимость пути из `a` в `b`, так что реальная асимметричная
 дорожная стоимость подставляется как есть.
 
 ```zig
@@ -727,7 +730,7 @@ pub fn main() !void {
         .capacity = 10,
     };
 
-    // SISR — рабочая лошадка по умолчанию: лучше всего для больших и/или направленных задач.
+    // SISR - рабочая лошадка по умолчанию: лучше всего для больших и/или направленных задач.
     var result = try commiv.solveCvrpSisr(allocator, inst, .{ .seed = 1 }, .{});
     defer result.deinit();
 
@@ -744,8 +747,8 @@ pub fn main() !void {
 
 `CvrpResult` владеет своей памятью, так что вызовите `deinit()`, когда закончите.
 
-- `result.total_cost` — суммарная стоимость маршрутов по вашей матрице, тип `u64`.
-- `result.routes` — по одному срезу на машину. Каждый срез перечисляет индексы клиентов в
+- `result.total_cost` - суммарная стоимость маршрутов по вашей матрице, тип `u64`.
+- `result.routes` - по одному срезу на машину. Каждый срез перечисляет индексы клиентов в
   порядке посещения, депо подразумевается на обоих концах.
 
 #### 4. Выбрать солвер под размер задачи
@@ -777,7 +780,7 @@ defer atsp.deinit();
 
 #### Важные настройки
 
-- `SolveOptions.seed` — сид генератора случайных чисел. Для однопоточных солверов один и тот же сид даёт побайтово идентичный результат, так что прогоны воспроизводимы. Варианты
+- `SolveOptions.seed` - сид генератора случайных чисел. Для однопоточных солверов один и тот же сид даёт побайтово идентичный результат, так что прогоны воспроизводимы. Варианты
   `*Parallel` зависят ещё и от числа потоков: их значение по умолчанию `threads = 0`
   разрешается в число ядер хоста, которое задаёт число островов/цепочек и, значит, посевы
   (seed) каждого острова, поэтому один и тот же сид даёт разные маршруты на машинах с разным
@@ -785,7 +788,7 @@ defer atsp.deinit();
   `threads` (`ParallelOptions.threads` для `solveParallel`) и фиксируйте и сид, и это число
   потоков.
 - `SolveOptions.budget.trials` и `.max_passes` определяют, насколько усердно работает поиск.
-  Больше — ближе к оптимуму и дольше по времени. Бюджет считается в итерациях, а не по часам,
+  Больше - ближе к оптимуму и дольше по времени. Бюджет считается в итерациях, а не по часам,
   так что подбирайте его под свою цель по задержке эмпирически.
 - Каждый возвращённый маршрут соблюдает `capacity`. Задача без допустимой упаковки вернёт
   ошибку.
@@ -795,12 +798,12 @@ defer atsp.deinit();
 ## Документация API
 
 Каждый солвер сначала принимает аллокатор, затем структуру опций и возвращает результат, который
-вы освобождаете через `deinit()`. Перечисленный ниже набор — это весь публичный API (он
+вы освобождаете через `deinit()`. Перечисленный ниже набор - это весь публичный API (он
 повторяет [`src/root.zig`](src/root.zig)); у каждого солвера есть модульные тесты в его файле.
 
 **Разбор**
 - `parseTsplib(allocator, text, ParseOptions) !Problem` разбирает текст симметричной TSP в
-  формате TSPLIB — секцию координат (`EUC_2D`, `CEIL_2D` или `ATT`) либо `EXPLICIT` `FULL_MATRIX`.
+  формате TSPLIB - секцию координат (`EUC_2D`, `CEIL_2D` или `ATT`) либо `EXPLICIT` `FULL_MATRIX`.
   Передайте `ParseDiagnostic` в опциях, чтобы поймать ошибки разбора по строкам.
 
 **Определение задачи** (путь координат / TSPLIB)
@@ -808,110 +811,111 @@ defer atsp.deinit();
   типы `Coord` и `DistanceKind`.
 
 **Общие опции и результат**
-- `SolveOptions` — `seed`, `budget` (`trials`, `max_passes`), настройки кандидатов и поиска.
-- `SolveResult` — `{ tour, length, stats }`, единственный тип, возвращаемый `solve`,
-  `solveAtsp*` и `bruteForce`. `SolveStats` — телеметрия прогона; `CandidateMode` выбирает
+- `SolveOptions` - `seed`, `budget` (`trials`, `max_passes`), настройки кандидатов и поиска.
+- `SolveResult` - `{ tour, length, stats }`, единственный тип, возвращаемый `solve`,
+  `solveAtsp*` и `bruteForce`. `SolveStats` - телеметрия прогона; `CandidateMode` выбирает
   метрику графа кандидатов.
 
 **TSP (симметричная)**
-- `solve(allocator, *Problem, SolveOptions) !SolveResult` — Lin-Kernighan + ILS.
-- `solveWithStats(...)` — то же, что `solve`, дополнительно заполняет телеметрию `SolveStats`.
-- `solveParallel(allocator, *Problem, SolveOptions, ParallelOptions) !SolveResult` —
+- `solve(allocator, *Problem, SolveOptions) !SolveResult` - Lin-Kernighan + ILS.
+- `solveWithStats(...)` - то же, что `solve`, дополнительно заполняет телеметрию `SolveStats`.
+- `solveParallel(allocator, *Problem, SolveOptions, ParallelOptions) !SolveResult` -
   независимые острова с опциональной рекомбинацией EAX или детерминированный режим деления
   бюджета ради скорости. `ParallelOptions.threads == 0` разрешается в число ядер хоста, что
   меняет посев островов и, значит, результат; для воспроизводимого между машинами результата
   передавайте явное ненулевое `threads`.
 
-**ATSP (направленная)** — матрица `n x n` в строковом порядке, `matrix[i*n + j]` = стоимость `i → j`
-- `solveAtsp(allocator, matrix, n, SolveOptions) !SolveResult` — 2n-преобразование Йонкера-Волгенанта.
-- `solveAtspNative(allocator, matrix, n, SolveOptions) !SolveResult` — прямой направленный поиск.
-- `solveAtspParallel(allocator, matrix, n, SolveOptions, threads) !SolveResult` — `threads == 0`
+**ATSP (направленная)** - матрица `n x n` в строковом порядке, `matrix[i*n + j]` = стоимость `i -> j`
+- `solveAtsp(allocator, matrix, n, SolveOptions) !SolveResult` - 2n-преобразование Йонкера-Волгенанта.
+- `solveAtspNative(allocator, matrix, n, SolveOptions) !SolveResult` - прямой направленный поиск.
+- `solveAtspParallel(allocator, matrix, n, SolveOptions, threads) !SolveResult` - `threads == 0`
   разрешается в число ядер хоста, меняя результат; передавайте ненулевое `threads` для
   воспроизводимости между машинами.
 
 **Точное решение (крошечное n)**
 - `bruteForce(allocator, *Problem, ExactOptions) !SolveResult`.
 
-**CVRP / ACVRP** — соберите `CvrpInstance { n, matrix, demand, capacity }` с направленной
+**CVRP / ACVRP** - соберите `CvrpInstance { n, matrix, demand, capacity }` с направленной
 матрицей `(n+1) x (n+1)` (депо = узел 0); все солверы возвращают `CvrpResult { routes, total_cost }`
-- `solveCvrp(allocator, inst, SolveOptions) !CvrpResult` — точка входа по умолчанию (запускает SISR).
-- `solveCvrpSisr(allocator, inst, SolveOptions, CvrpSisrParams)` — большие / направленные.
-- `solveCvrpHgs(allocator, inst, SolveOptions, CvrpHgsParams, max_vehicles)` — n ≲ 500.
-- `solveCvrpFleet(allocator, inst, SolveOptions, CvrpFleetParams)` — фиксированный парк.
-- `solveCvrpSisrParallel(allocator, inst, SolveOptions, CvrpSisrParams, threads)` — `threads == 0`
+- `solveCvrp(allocator, inst, SolveOptions) !CvrpResult` - точка входа по умолчанию (запускает SISR).
+- `solveCvrpSisr(allocator, inst, SolveOptions, CvrpSisrParams)` - большие / направленные.
+- `solveCvrpHgs(allocator, inst, SolveOptions, CvrpHgsParams, max_vehicles)` - n примерно до 500.
+- `solveCvrpFleet(allocator, inst, SolveOptions, CvrpFleetParams)` - фиксированный парк.
+- `solveCvrpSisrParallel(allocator, inst, SolveOptions, CvrpSisrParams, threads)` - `threads == 0`
   разрешается в число ядер хоста, меняя результат; передавайте ненулевое `threads` для
   воспроизводимости между машинами.
-- `solveCvrpHgsParallel(allocator, inst, SolveOptions, CvrpHgsParams, max_vehicles, threads)` —
+- `solveCvrpHgsParallel(allocator, inst, SolveOptions, CvrpHgsParams, max_vehicles, threads)` -
   та же оговорка про `threads == 0`, что и выше.
-- `solveCvrpMulti(allocator, inst, SolveOptions, CvrpMultiParams)` — вариант ILS по гигантскому
+- `solveCvrpMulti(allocator, inst, SolveOptions, CvrpMultiParams)` - вариант ILS по гигантскому
   туру без ограничения парка (устаревший; SISR обычно его превосходит).
-- `validateCvrp(inst, routes) ?u64` — независимая проверка допустимости решения; возвращает
+- `validateCvrp(inst, routes) ?u64` - независимая проверка допустимости решения; возвращает
   пересчитанную стоимость либо null, если маршрут недопустим или клиент пропущен.
 
-**VRPTW** — соберите `VrptwInstance { n, matrix, demand, capacity, ready, due, service }`;
+**VRPTW** - соберите `VrptwInstance { n, matrix, demand, capacity, ready, due, service }`;
 возвращает `VrptwResult`
-- `solveVrptwSisr(allocator, inst, SolveOptions, VrptwSisrParams)` — движок по умолчанию:
+- `solveVrptwSisr(allocator, inst, SolveOptions, VrptwSisrParams)` - движок по умолчанию:
   SISR с временными окнами. Используйте его.
-- `solveVrptwSisrParallel(allocator, inst, SolveOptions, VrptwSisrParams, threads)` —
+- `solveVrptwSisrParallel(allocator, inst, SolveOptions, VrptwSisrParams, threads)` -
   лучшее из K цепочек; та же оговорка про `threads == 0`, что и у CVRP-варианта.
-- `solveVrptw(allocator, inst, SolveOptions, VrptwParams) !VrptwResult` — старый ILS по
+- `solveVrptw(allocator, inst, SolveOptions, VrptwParams) !VrptwResult` - старый ILS по
   гигантскому туру (оставлен для воспроизводимости; SISR равен или лучше при равном времени).
 - `solveVrptwHgs(allocator, inst, SolveOptions, VrptwHgsParams) !VrptwResult`.
-- `validateVrptw(inst, routes) ?u64` — независимая проверка вместимости и временных окон;
+- `validateVrptw(inst, routes) ?u64` - независимая проверка вместимости и временных окон;
   возвращает пересчитанную стоимость либо null, если решение недопустимо.
 
-**PDPTW (заборы и доставки с временными окнами)** — соберите `PdpInstance { n_pairs,
+**PDPTW (заборы и доставки с временными окнами)** - соберите `PdpInstance { n_pairs,
 matrix, capacity, pair_of, is_pickup, demand_signed, ready, due, service }` с матрицей
 `dim x dim`, где `dim = 2*n_pairs+1` (депо = узел 0); возвращает `PdpResult`
-- `solvePdptwSisr(allocator, inst, PdpSisrParams)` — движок: попарно-атомарный SISR.
-  Каждая заявка — узел забора и узел доставки на одном маршруте, забор раньше доставки,
+- `solvePdptwSisr(allocator, inst, PdpSisrParams)` - движок: попарно-атомарный SISR.
+  Каждая заявка - узел забора и узел доставки на одном маршруте, забор раньше доставки,
   вместимость соблюдается по всему маршруту. **Денежная целевая функция**
   (`PdpSisrParams.time_penalty > 0`) добавляет к расстоянию стоимость *длительности*
   маршрута (в пути + обслуживание + вынужденное ожидание), так что движок меняет топливо
-  на часы водителя там, где есть ожидание; `time_penalty = 0` — чистое расстояние
+  на часы водителя там, где есть ожидание; `time_penalty = 0` - чистое расстояние
   (побайтово идентично исторической целевой функции). `veh_penalty` смещает к меньшему
   числу машин; `max_vehicles` ограничивает парк.
-- `solvePdptwSisrFleetMin(allocator, inst, params, total_time_ms)` — иерархическая
+- `solvePdptwSisrFleetMin(allocator, inst, params, total_time_ms)` - иерархическая
   минимизация числа машин (сначала парк, затем расстояние); нужен бюджет по времени.
-- `solvePdptwSisrPinned(allocator, inst, params, total_time_ms, pin)` — корпоративный
+- `solvePdptwSisrPinned(allocator, inst, params, total_time_ms, pin)` - корпоративный
   драйвер с фиксированным парком: лучшее решение ровно на `pin` машинах, весь бюджет на эту
   цель.
-- `solvePdptwSisrDispatch(allocator, inst, params, current, locked)` — пересчёт на
-  скользящем горизонте: `current[i]` — текущий маршрут машины `i`, `locked[i]` — сколько
+- `solvePdptwSisrDispatch(allocator, inst, params, current, locked)` - пересчёт на
+  скользящем горизонте: `current[i]` - текущий маршрут машины `i`, `locked[i]` - сколько
   ведущих остановок уже зафиксировано и не должно сдвинуться (забор зафиксированной доставки
   тоже должен быть зафиксирован, на том же маршруте). Незафиксированные остановки и новые
   заявки переоптимизируются вокруг фиксаций. Доступен через все три двери:
   `solve_pdptw_dispatch` / `commiv_solve_pdptw_dispatch` / `POST /solve/pdptw/dispatch`
   ([`docs/rest.md`](docs/rest.md), [`bindings/python/`](bindings/python/)).
-- `solvePdptw(allocator, inst, PdpParams)` — эталон корректности (для реальной работы
+- `solvePdptw(allocator, inst, PdpParams)` - эталон корректности (для реальной работы
   используйте SISR-движок).
-- `validatePdptw(inst, routes) ?u64` — независимая проверка парности, предшествования,
+- `validatePdptw(inst, routes) ?u64` - независимая проверка парности, предшествования,
   префикса вместимости и временных окон; возвращает пересчитанную стоимость либо null.
 
 **Анализ асимметрии**
 - `conservativeness(allocator, matrix, dim) !Conservativeness` выполняет разложение
   Гельмгольца-Ходжа направленной матрицы. Оно показывает, какая часть асимметрии структурна
-  (односторонние улицы и повороты, которые меняют оптимальный маршрут), а какая — градиент
+  (односторонние улицы и повороты, которые меняют оптимальный маршрут), а какая - градиент
   (заторы, которые можно спокойно игнорировать). Наведите его на любую матрицу стоимостей,
   чтобы решить, нужна ли вам вообще направленная маршрутизация.
 
-Всё остальное (`commiv.internal.*`, сырые модули реализации) — нестабильные детали, не входят в
+Всё остальное (`commiv.internal.*`, сырые модули реализации) - нестабильные детали, не входят в
 этот API и могут меняться между версиями.
 
 ---
 
 ## Сценарии применения
 
-- **Последняя миля и курьерская маршрутизация по реальным дорогам.** Подайте направленную
-  матрицу времени в пути в стиле OSRM и получите допустимые по вместимости маршруты, которые
-  учитывают односторонние улицы и стоимость поворотов. Это случай, под который сделан commiv.
-- **Классические TSP, CVRP и VRPTW.** Близкие к оптимальным решения намного быстрее точных
+- Последняя миля и курьерская маршрутизация по реальным дорогам: подайте направленную
+  матрицу времени в пути в стиле OSRM и получите допустимые по вместимости маршруты,
+  которые учитывают односторонние улицы и стоимость поворотов. Это случай, под который
+  сделан commiv.
+- Классические TSP, CVRP и VRPTW: близкие к оптимальным решения намного быстрее точных
   методов.
-- **Встраиваемое ядро.** Один модуль без зависимостей, который кладётся внутрь более крупного
+- Встраиваемое ядро: один модуль без зависимостей, который кладётся внутрь более крупного
   планировщика.
-- **Не только логистика.** Сверловка отверстий на печатной плате, облёт точек съёмки дроном,
+- Не только логистика: сверловка отверстий на печатной плате, облёт точек съёмки дроном,
   маршруты и патрули NPC в видеоиграх, обход ячеек склада комплектовщиком, планирование
-  обходов у выездных бригад — любая задача, где важен порядок посещения, а переходы
+  обходов у выездных бригад. Любая задача, где важен порядок посещения, а переходы
   асимметричны.
 
 ---
@@ -930,44 +934,46 @@ commiv), независимые валидаторы везде, где они �
 | CVRP Augerat (12) | HGS-CVRP, PyVRP | все около оптимума; commiv 0.000% |
 | CVRP Uchoa X (6) | HGS-CVRP, PyVRP | **commiv 0.320%** против HGS 0.965% и PyVRP 2.640% |
 | ACVRP (30) | LKH-3 (лучшие известные) | +0.010% к лучшим значениям LKH |
-| Дорожный CVRP (10) | PyVRP, VROOM | commiv впереди во всех ячейках кроме одной (nyc-100 −0.15%) |
+| Дорожный CVRP (10) | PyVRP, VROOM | commiv впереди во всех ячейках кроме одной (nyc-100 -0.15%) |
 | Дорожный VRPTW (9) | PyVRP, VROOM | commiv впереди в 8/9; VROOM отстаёт на 1-9% |
-| VRPTW Solomon/GH (18) | PyVRP | Solomon на уровне BKS; флот на GH R/RC — честная слабость |
+| VRPTW Solomon/GH (18) | PyVRP | Solomon на уровне BKS; флот на GH R/RC - честная слабость |
 | PDPTW Li & Lim (352) | VROOM | commiv развозит всё в **352/352**; VROOM оставляет заявки неразвезёнными в 238/352 |
 
-Единственная системная слабость — классы R/RC у Gehring-Homberger, где commiv
+Единственная системная слабость - классы R/RC у Gehring-Homberger, где commiv
 использует на 1-6 машин больше лучших известных решений (фаза минимизации флота пока
-есть только в PDPTW-движке). Всё остальное в таблице — лидерство или ничья.
+есть только в PDPTW-движке). Всё остальное в таблице - лидерство или ничья.
 
 
 ## commiv против остальных
 
-**Где он выигрывает**
+Где он выигрывает:
 
-- **Граница скорости и качества.** Близко к оптимуму за секунды, а не за минуты и часы,
-  которые тратят эталонные эвристики. Для планировщика, которому приходится пересчитывать
-  маршруты постоянно, важно именно это число.
-- **Направленные реальные дорожные матрицы.** Асимметричная стоимость — первоклассный
-  случай. FILO и HGS-CVRP, чемпионы симметричной скорости и качества, физически не умеют
-  читать направленную матрицу. На реальных данных по Москве commiv обходит OR-Tools, LKH-3
-  и VROOM и по стоимости, и по времени.
-- **Ноль зависимостей, малый объём памяти.** Один модуль на Zig, и направленная CVRP на
+- Граница скорости и качества. Близко к оптимуму за секунды, а не за минуты и часы,
+  которые тратят эталонные эвристики. Для планировщика, который постоянно пересчитывает
+  маршруты, важно именно это.
+- Направленные дорожные матрицы. FILO и HGS-CVRP, чемпионы симметричной скорости и
+  качества, физически не умеют читать направленную матрицу. На реальных данных по Москве
+  commiv обходит OR-Tools, LKH-3 и VROOM и по стоимости, и по времени.
+- Ноль зависимостей, малый объём памяти. Один модуль на Zig, и направленная CVRP на
   5000 узлов укладывается в 211 МБ.
 
-**Где выигрывают остальные, и это стоит знать**
+Где выигрывают остальные - лучше прочитать это здесь, чем узнать после интеграции:
 
-- **Абсолютная точность при огромных бюджетах.** LKH-3, HGS-CVRP и SISR (статья) достигают
-  меньших разрывов (примерно 0.16–0.39% на Uchoa X), когда им дают намного больше времени.
-  commiv меняет эту последнюю долю процента на большое преимущество в скорости. По точности на
-  границе он не SOTA.
-- **Огромные симметричные инстансы.** FILO решает симметричные CVRP с десятками тысяч узлов
-  быстрее всего, что здесь есть. commiv нацелен на направленный режим масштаба маршрутизации
-  (от сотен до нескольких тысяч).
-- **Производственная зрелость.** OR-Tools и VROOM — обкатанные стеки с богатым набором
-  ограничений (навыки, перерывы, мульти-депо, смены водителей) и годами эксплуатации.
-  commiv покрывает вместимости, временные окна, pickup-and-delivery, фиксацию флота и
-  денежную целевую функцию, но это быстрое сфокусированное ядро, а не полноценная
-  логистическая платформа.
+- Абсолютная точность при огромных бюджетах. LKH-3, HGS-CVRP и SISR (статья) достигают
+  меньших разрывов (примерно 0.16-0.39% на Uchoa X), когда им дают намного больше
+  времени. commiv меняет эту последнюю долю процента на большое преимущество в скорости
+  и не претендует на SOTA при безлимитном бюджете.
+- Специализированная минимизация парка. На иерархической цели Gehring-Homberger (сначала
+  машины, потом расстояние) commiv достигает лучшего известного парка только на 4 из 12
+  инстансов; рекордсмены используют фазу минимизации маршрутов, которой здесь пока нет.
+- Огромные симметричные инстансы. FILO решает симметричные CVRP с десятками тысяч узлов
+  быстрее всего, что здесь есть. commiv нацелен на направленный режим от сотен до
+  нескольких тысяч узлов.
+- Производственная зрелость. OR-Tools и VROOM - обкатанные стеки с богатым набором
+  ограничений (навыки, мульти-депо, смены водителей) и годами эксплуатации. commiv
+  покрывает вместимости, временные окна, pickup-and-delivery, гетерогенный парк,
+  перерывы водителей, фиксацию парка и денежную целевую функцию, но это быстрое
+  сфокусированное ядро, а не полноценная логистическая платформа.
 
 ---
 
@@ -975,16 +981,16 @@ commiv), независимые валидаторы везде, где они �
 
 ### На чём остановились и почему
 
-- **SISR (Slack Induction by String Removals) для большой и асимметричной CVRP — и VRPTW.**
+- **SISR (Slack Induction by String Removals) для большой и асимметричной CVRP - и VRPTW.**
   Разрушить несколько пространственно соседних строк, жадно вставить обратно со случайными
   «миганиями», принять по порогу или SA. Ставка: миллионы ходов `O(removed)` бьют тысячи
   ходов `O(n)`. Именно это вскрывает режимы большого n и направленности. Для временных окон
   тот же цикл работает со структурами префиксных/суффиксных запасов времени (Tws) на
-  маршрут, так что «допустима ли эта вставка и сколько она стоит» — O(1) на кандидата; одно
+  маршрут, так что «допустима ли эта вставка и сколько она стоит» - O(1) на кандидата; одно
   это изменение сократило московскую VRPTW n=1000 с 988 с (ILS) до 4 с при лучшей стоимости.
 - **HGS (популяция плюс Prins Split DP) для средней CVRP, n примерно до 500.** Генетическая
   популяция гигантских туров с оптимальным разбиением по вместимости и обучением локальным
-  поиском даёт лучшее качество на этом масштабе (числа 0.02–0.45% выше).
+  поиском даёт лучшее качество на этом масштабе (числа 0.02-0.45% выше).
 - **Поиск по недопустимым решениям со штрафом.** Разрешив локальному поиску пересекать
   недопустимые по вместимости области за штраф, удалось пробить жёсткий потолок качества около
   2%, который поиск только по допустимым решениям не мог.
@@ -994,18 +1000,18 @@ commiv), независимые валидаторы везде, где они �
   двойной мост) достигает оптимума быстрее, на n узлах вместо 2n.
 - **Гранулярный локальный поиск с очередью «не смотреть».** Ограничение ходов пространственными
   соседями и реактивация только концов изменённых рёбер сделали локальный поиск при большом n
-  в 2–4 раза быстрее при равном качестве.
+  в 2-4 раза быстрее при равном качестве.
 - **Затравка по виду матрицы на месте.** Затравка гигантского тура CVRP читает матрицу
   стоимостей напрямую через шаговый вид, а не копирует подматрицу `n x n` и не строит
-  2n-преобразование. Это снизило память при n=5000 примерно с 2 ГБ до 211 МБ, а решение — с
+  2n-преобразование. Это снизило память при n=5000 примерно с 2 ГБ до 211 МБ, а решение - с
   412 с до 109 с, при идентичном качестве (затравка одноразовая, SISR её перестраивает).
-- **Параллелизм — рычаг скорости, а не магия.** Затравки «лучшее из K» и рекомбинация EAX
+- **Параллелизм - рычаг скорости, а не магия.** Затравки «лучшее из K» и рекомбинация EAX
   помогают точности при равном настенном времени на нескольких ядрах; детерминированный режим
   деления бюджета меняет немного качества на примерно 2.5x скорости.
 
 ### Что попробовали и отбросили, и почему
 
-- **Статические дескрипторы ходов (SMD).** Наша очередь «не смотреть» в 4–5 раз быстрее при
+- **Статические дескрипторы ходов (SMD).** Наша очередь «не смотреть» в 4-5 раз быстрее при
   идентичном качестве; DLQ уже ловит ту локальность, которую покупает SMD. Тупик.
 - **Двухуровневый двусвязный список тура.** После исправления отката, который срабатывал на
   заведомо обречённых перестроениях, перестроения туров упали примерно в 10 раз, а остаток
@@ -1015,30 +1021,30 @@ commiv), независимые валидаторы везде, где они �
 - **Декомпозиция для большого n.** Выигрыш от пересчёта подзадач на сошедшихся турах TSP не
   обобщился на никогда не сходящийся SISR. Просто SISR, запущенный дольше, доминировал.
 - **Адаптивная переоценка кандидатов.** Даже идеальная переоценка оракулом смывается на полном
-  бюджете ILS. Порядок кандидатов — рычаг одного спуска, а не точности.
+  бюджете ILS. Порядок кандидатов - рычаг одного спуска, а не точности.
 - **Заморозка рёбер и голосование.** Заморозка даже чистого подмножества заведомо оптимальных
   рёбер теряет точность, потому что Lin-Kernighan вынужден ломать и перестраивать даже
   оптимальные рёбра по пути. Структурно.
 - **Ранняя остановка по границе назначения.** Нижняя граница AP слишком рыхлая, чтобы
-  заверить близость к оптимуму для CVRP с тугой вместимостью (19–52% на Москве). Как правило
+  заверить близость к оптимуму для CVRP с тугой вместимостью (19-52% на Москве). Как правило
   остановки здесь бесполезна.
 
 ---
 
 ## Ускорение на GPU (замерено: не окупается)
 
-Замерено и закрыто на GTX 1660 Ti (2026-07-13): ядро пакетной оценки ходов — 0.11x от
-12 потоков CPU при n=1001; 1536 параллельных цепочек на GPU — лишь 0.55x суммарной
+Замерено и закрыто на GTX 1660 Ti (2026-07-13): ядро пакетной оценки ходов - 0.11x от
+12 потоков CPU при n=1001; 1536 параллельных цепочек на GPU - лишь 0.55x суммарной
 пропускной способности CPU. Сильные стороны движка (разреженный поиск, глубокий отжиг,
-цепочки выталкивания) — ровно та работа, которую GPU делает плохо. Полные данные и
+цепочки выталкивания) - ровно та работа, которую GPU делает плохо. Полные данные и
 условия пересмотра: [`tools/gpu-probe/GPU-REPORT.md`](tools/gpu-probe/GPU-REPORT.md).
 
 
 ## Воспроизведение бенчмарков
 
 Инстансы лежат в `vendor/` (TSPLIB, CVRPLIB, ATSP, ACVRP, Solomon, Gehring-Homberger,
-Li & Lim, дорожные матрицы в `vendor/road/`). Адаптеры конкурентов — в
-[`tools/competitors/`](tools/competitors/). Команды сборки бенчей — в английской части
+Li & Lim, дорожные матрицы в `vendor/road/`). Адаптеры конкурентов - в
+[`tools/competitors/`](tools/competitors/). Команды сборки бенчей - в английской части
 выше; конфигурация каждой ячейки задокументирована в [BENCHMARKS.md](BENCHMARKS.md).
 
 
