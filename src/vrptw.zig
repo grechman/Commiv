@@ -1,5 +1,6 @@
 const std = @import("std");
 const core_anneal = @import("core/anneal.zig");
+const core_sisr = @import("core/sisr.zig");
 const core_neighbors = @import("core/neighbors.zig");
 const builtin = @import("builtin");
 const problem = @import("problem.zig");
@@ -2969,10 +2970,6 @@ pub fn solveVrptwSisrFrom(allocator: std.mem.Allocator, inst: VrptwInstance, opt
     const seed_distance = cur.cost - params.veh_penalty * cur.nonempty;
     const unit = @as(f64, @floatFromInt(seed_distance)) / @as(f64, @floatFromInt(n));
     const sched = core_anneal.geometric(unit, params.t0_factor, eff_params.tf_factor, params.iters);
-    const t0 = sched.t0;
-    const iters = sched.iters;
-    const cf = sched.cf;
-    var temp = t0;
 
     // Scratch list for params.polish: the distinct route indices a committed
     // iteration touched, re-derived from the undo journal before commit()
@@ -2980,83 +2977,107 @@ pub fn solveVrptwSisrFrom(allocator: std.mem.Allocator, inst: VrptwInstance, opt
     // polish is off (no allocation happens until the first append).
     var touched_scratch: std.ArrayList(usize) = .empty;
     defer touched_scratch.deinit(allocator);
-    // Counts ACCEPTED iterations, only while params.polish is true (see
-    // VrptwSisrParams.polish_every). Stays at 0 and unused on the polish=false
-    // path.
-    var accepted_count: usize = 0;
 
-    // Request-bank penalty: dominates veh_penalty, which dominates distance.
-    // On the uncapped default path n_unassigned is always 0 on both sides of
-    // every dt, so this term is always 0 there — bit-identical to before.
-    const UNASSIGNED_PEN: u64 = 1_000_000_000;
-    // Over-cap penalty: same magnitude, drives the search out of shift-cap
-    // violations. Always 0 when max_route_dur == 0 (overCapCount short-circuits),
-    // so the uncapped acceptance objective is bit-identical to before.
-    const CAP_PEN: u64 = 1_000_000_000;
-    const t_start = nanos();
-    var it: usize = 0;
-    while (it < iters) : (it += 1) {
-        if (params.time_ms > 0 and it % 256 == 0 and (nanos() - t_start) / std.time.ns_per_ms >= params.time_ms) break;
-        const saved_cost = cur.cost;
-        const saved_unassigned = cur.n_unassigned;
-        const saved_overcap = cur.overCapCount();
-        try cur.ruin(eff_params, rng, it);
-        try cur.recreate(eff_params, rng);
-        const eff = cur.cost + UNASSIGNED_PEN * @as(u64, @intCast(cur.n_unassigned)) + CAP_PEN * cur.overCapCount();
-        const saved_eff = saved_cost + UNASSIGNED_PEN * @as(u64, @intCast(saved_unassigned)) + CAP_PEN * saved_overcap;
-        const dt = @as(i64, @intCast(eff)) - @as(i64, @intCast(saved_eff));
-        if (@as(f64, @floatFromInt(dt)) < temp) {
+    // Hot loop = the shared SISR skeleton (core/sisr.zig). Every hook body
+    // below is the exact code the inline loop used to run, in the same order.
+    const Loop = struct {
+        cur: *SisrTw,
+        params: VrptwSisrParams,
+        eff_params: VrptwSisrParams,
+        allocator: std.mem.Allocator,
+        best: *?VrptwResult,
+        best_cost: *u64,
+        touched_scratch: *std.ArrayList(usize),
+        // Counts ACCEPTED iterations, only while params.polish is true (see
+        // VrptwSisrParams.polish_every). Stays at 0 and unused otherwise.
+        accepted_count: usize = 0,
+
+        // Request-bank penalty: dominates veh_penalty, which dominates distance.
+        // On the uncapped default path n_unassigned is always 0 on both sides of
+        // every dt, so this term is always 0 there — bit-identical to before.
+        const UNASSIGNED_PEN: u64 = 1_000_000_000;
+        // Over-cap penalty: same magnitude, drives the search out of shift-cap
+        // violations. Always 0 when max_route_dur == 0 (overCapCount
+        // short-circuits), so the uncapped objective is bit-identical to before.
+        const CAP_PEN: u64 = 1_000_000_000;
+
+        const Saved = struct { cost: u64, unassigned: usize, overcap: u64 };
+
+        pub fn save(l: *@This(), it: usize) Saved {
+            _ = it;
+            return .{ .cost = l.cur.cost, .unassigned = l.cur.n_unassigned, .overcap = l.cur.overCapCount() };
+        }
+        pub fn ruin(l: *@This(), rng_: std.Random, it: usize) !void {
+            try l.cur.ruin(l.eff_params, rng_, it);
+        }
+        pub fn recreate(l: *@This(), rng_: std.Random) !void {
+            try l.cur.recreate(l.eff_params, rng_);
+        }
+        pub fn delta(l: *@This(), sv: Saved) i64 {
+            const eff = l.cur.cost + UNASSIGNED_PEN * @as(u64, @intCast(l.cur.n_unassigned)) + CAP_PEN * l.cur.overCapCount();
+            const saved_eff = sv.cost + UNASSIGNED_PEN * @as(u64, @intCast(sv.unassigned)) + CAP_PEN * sv.overcap;
+            return @as(i64, @intCast(eff)) - @as(i64, @intCast(saved_eff));
+        }
+        pub fn accept(l: *@This(), sv: Saved, it: usize) !void {
+            _ = sv;
             var do_polish = false;
-            if (params.polish) {
-                accepted_count += 1;
-                do_polish = accepted_count % params.polish_every == 0;
+            if (l.params.polish) {
+                l.accepted_count += 1;
+                do_polish = l.accepted_count % l.params.polish_every == 0;
             }
             if (do_polish) {
-                touched_scratch.clearRetainingCapacity();
-                for (cur.undo_ops.items) |op| {
+                l.touched_scratch.clearRetainingCapacity();
+                for (l.cur.undo_ops.items) |op| {
                     const ri = switch (op) {
                         .remove => |r| r.ri,
                         .insert => |ins| ins.ri,
                     };
                     var seen = false;
-                    for (touched_scratch.items) |t| {
+                    for (l.touched_scratch.items) |t| {
                         if (t == ri) {
                             seen = true;
                             break;
                         }
                     }
-                    if (!seen) try touched_scratch.append(allocator, ri);
+                    if (!seen) try l.touched_scratch.append(l.allocator, ri);
                 }
             }
-            cur.commit();
-            if (params.tabu_tenure > 0) {
+            l.cur.commit();
+            if (l.params.tabu_tenure > 0) {
                 // Stamp every customer removed (and reinserted) this iteration:
                 // s.removed still holds that exact set — recreate() only reads
                 // it, and the next ruin() call clears it at its own top. Stamped
                 // BEFORE polish: polish's removeString calls append relocated
                 // customers to s.removed, and those were not part of this
                 // iteration's ruin, so they must not be tabu-stamped.
-                for (cur.removed.items) |c| cur.tabu_until[c] = it + params.tabu_tenure;
+                for (l.cur.removed.items) |c| l.cur.tabu_until[c] = it + l.params.tabu_tenure;
             }
             if (do_polish) {
-                try cur.polish(touched_scratch.items);
-                cur.commit(); // fold polish's own journal in — never rollback-able
+                try l.cur.polish(l.touched_scratch.items);
+                l.cur.commit(); // fold polish's own journal in — never rollback-able
             }
-            if (cur.n_unassigned == 0 and cur.withinDurCap() and (best == null or cur.cost < best_cost)) {
-                best_cost = cur.cost;
-                if (best) |*b| b.deinit();
-                best = try cur.toResult(allocator);
+            if (l.cur.n_unassigned == 0 and l.cur.withinDurCap() and (l.best.* == null or l.cur.cost < l.best_cost.*)) {
+                l.best_cost.* = l.cur.cost;
+                if (l.best.*) |*b| b.deinit();
+                l.best.* = try l.cur.toResult(l.allocator);
             }
-        } else {
-            try cur.rollback();
+        }
+        pub fn reject(l: *@This(), sv: Saved) !void {
+            try l.cur.rollback();
             // Debug invariant (mirrors the CVRP engine): rollback must restore the
             // incremental cost and unassigned count exactly, or the undo journal
             // is corrupting state.
-            if (builtin.mode == .Debug) std.debug.assert(cur.cost == saved_cost);
-            if (builtin.mode == .Debug) std.debug.assert(cur.n_unassigned == saved_unassigned);
+            if (builtin.mode == .Debug) std.debug.assert(l.cur.cost == sv.cost);
+            if (builtin.mode == .Debug) std.debug.assert(l.cur.n_unassigned == sv.unassigned);
         }
-        temp *= cf;
-    }
+        pub fn afterIter(l: *@This(), it: usize, rng_: std.Random) !void {
+            _ = l;
+            _ = it;
+            _ = rng_;
+        }
+    };
+    var loop = Loop{ .cur = &cur, .params = params, .eff_params = eff_params, .allocator = allocator, .best = &best, .best_cost = &best_cost, .touched_scratch = &touched_scratch };
+    try core_sisr.run(Loop, &loop, .{ .iters = sched.iters, .time_ms = params.time_ms, .t0 = sched.t0, .cf = sched.cf }, rng);
 
     if (best == null) return error.NoCompleteSolution;
 
