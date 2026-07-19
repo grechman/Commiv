@@ -2868,20 +2868,7 @@ const SisrTw = struct {
     }
 };
 
-fn nanos() u64 {
-    // Linux: raw vDSO syscall, libc-free (the historic path, byte-identical).
-    // Elsewhere (macOS wheels): libc clock_gettime — Zig always links
-    // libSystem on macOS, so this is safe even in the "libc-free" library.
-    if (builtin.os.tag == .linux) {
-        var ts: std.os.linux.timespec = undefined;
-        _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &ts);
-        return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
-    } else {
-        var ts: std.c.timespec = undefined;
-        _ = std.c.clock_gettime(.MONOTONIC, &ts);
-        return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
-    }
-}
+const nanos = @import("core/time.zig").nanos;
 
 /// SISR solver for (symmetric or asymmetric) VRPTW, uncapped fleet: the CVRP
 /// flagship engine with time windows wired into recreate via the Tws algebra.
