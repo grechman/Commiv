@@ -43,8 +43,8 @@ test {
 /// Solve CVRP with the default, highest-quality strategy: SISR (ruin-and-recreate
 /// + simulated annealing), which is the strongest solver here for large and/or
 /// directed (asymmetric) instances and a solid choice at every size. Reach for a
-/// specific entry point when you need it: `solveCvrpMulti` / `solveCvrpFleet` for
-/// the giant-tour ILS variants, `solveCvrpHgs` for the mid-size population method.
+/// specific entry point when you need it: `solveCvrpFleet` for the fixed-fleet
+/// giant-tour ILS, `solveCvrpHgs` for the mid-size population method.
 /// Capacity is enforced exactly. Tune the search via `CvrpSisrParams` on
 /// `solveCvrpSisr` directly. Returns `error.NoFeasibleSplit` if no packing exists.
 pub fn solveCvrp(allocator: std.mem.Allocator, inst: CvrpInstance, options: solver.SolveOptions) !CvrpResult {

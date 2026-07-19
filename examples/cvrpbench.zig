@@ -181,7 +181,6 @@ pub fn main(init: std.process.Init) !void {
             continue;
         }
         const use_sisr = std.mem.eql(u8, env.get("CB_SISR") orelse "0", "1");
-        const native_hgs = std.mem.eql(u8, env.get("CB_HGS") orelse "1", "1");
         const sisr_params = commiv.CvrpSisrParams{
             .iters = try std.fmt.parseInt(usize, env.get("CB_ITERS") orelse "300000", 10),
             .l_max = try std.fmt.parseInt(usize, env.get("CB_LMAX") orelse "10", 10),
