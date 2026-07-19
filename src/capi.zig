@@ -19,7 +19,7 @@ const asymmetric = @import("asymmetric.zig");
 //   * return codes, never Zig errors: 0 ok, negative = COMMIV_ERR_*.
 // =============================================================================
 
-const version_string = "0.4.0";
+const version_string = "0.5.0";
 
 // Thread-safe, libc-free allocator: the library must work when dlopen'd from
 // arbitrary hosts, so no global init/deinit entry points to forget.

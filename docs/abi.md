@@ -1,6 +1,6 @@
 # C ABI stability contract (M7)
 
-Effective from libcommiv **0.4.0** (2026-07-19). This is the promise an
+Effective from libcommiv **0.5.0** (2026-07-19; 0.4.0 contract superseded by the authorized 0.5.0 break below). This is the promise an
 integrator can build against.
 
 ## Versioning
@@ -37,6 +37,7 @@ integrator can build against.
 | 0.3.0 | 80 B | M1/M2 surface: cvrp/vrptw/pdptw/atsp + money knobs |
 | 0.4.0 | 88 B | + `max_route_duration` |
 | 0.4.0 | 104 B | + `break_duration/earliest/latest` + pad; `commiv_solve_pdptw_typed`, `commiv_solve_pdptw_dispatch`, `commiv_routes_type` (all additions within one release cycle, pre-first-publish) |
+| 0.5.0 | 88 B | BREAKING (authorized pre-adoption cleanup): removed `vrptw_rounds`/`vrptw_restarts` fields (legacy VRPTW ILS engine deleted; SISR is the only VRPTW engine), all later field offsets shift down 16 B. Also removed from the Zig API: `solveVrptw`/`VrptwParams`, `solvePdptw`/`PdpParams`, `solveCvrpMulti`/`CvrpMultiParams`, PDPTW `eval_threads`, `eject_k` (both engines). REST: `engine:"ils"` and `rounds`/`restarts` request fields gone. |
 
 ## Enforcement
 
