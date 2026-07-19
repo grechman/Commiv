@@ -57,15 +57,6 @@ pub const PdpSisrParams = struct {
     // Ejection counters steer away from cycling. Only fires when
     // max_vehicles > 0 blocks opening a route; default off.
     eject: bool = false,
-    // Max residents ejected per squeeze when a single eject can't restore
-    // feasibility (Nagata & Kobayashi 2010 k-eject ladder): rung 1 is the
-    // existing single-pair ejectCandidate; rungs 2 and 3 brute-force small
-    // subsets of resident pairs. Measured: on packed PDPTW instances
-    // (lc1_10_3 at fleet cap 86) 63% of squeezes find no single resident
-    // pair whose removal restores feasibility — ejecting a subset unlocks
-    // those. Clamped to [1, 3]; 0 is treated as 1. Only meaningful when
-    // eject = true.
-    eject_k: u8 = 1,
     // Inter-route pair exchange (SWAP*-shaped, Vidal 2022): every swap_kick
     // iterations, pick a random pair and try exchanging it with a kNN pair
     // from another route, each reinserted at its own best position. Strict
@@ -844,127 +835,13 @@ const S = struct {
         return best;
     }
 
-    const EjectSubset = struct { buf: [3]usize, len: usize };
-
-    /// Sorted-and-capped candidate pool for the eject_k >= 2 ladder rungs:
-    /// every resident pickup of route `ri` other than `skip_p`, excluding
-    /// locked pairs (same filter as ejectCandidate), ordered by
-    /// (eject_pen asc, pickup id asc) and truncated to the 12 lowest-key
-    /// entries — the ladder brute-forces subsets over this pool, so it must
-    /// stay small (C(12,3) = 220 feasibility checks worst case). Returns the
-    /// count written into `buf`.
-    fn ejectPool(s: *S, ri: usize, skip_p: usize, buf: *[12]usize) usize {
-        const inst = s.inst;
-        const it = s.routes.items[ri].items.items;
-        const lk = s.lockOf(ri);
-        var n: usize = 0;
-        for (it) |e| {
-            if (!inst.is_pickup[e] or e == skip_p) continue;
-            if (s.loc_pos[e] < lk or s.loc_pos[inst.pair_of[e]] < lk) continue;
-            if (n < buf.len) {
-                var pos = n;
-                while (pos > 0 and s.eject_pool_less(e, buf[pos - 1])) : (pos -= 1) buf[pos] = buf[pos - 1];
-                buf[pos] = e;
-                n += 1;
-            } else if (s.eject_pool_less(e, buf[n - 1])) {
-                var pos = n - 1;
-                while (pos > 0 and s.eject_pool_less(e, buf[pos - 1])) : (pos -= 1) buf[pos] = buf[pos - 1];
-                buf[pos] = e;
-            }
-        }
-        return n;
-    }
-
-    fn eject_pool_less(s: *const S, a: usize, b: usize) bool {
-        if (s.eject_pen[a] != s.eject_pen[b]) return s.eject_pen[a] < s.eject_pen[b];
-        return a < b;
-    }
-
-    /// Rungs 2-3 of the eject ladder: enumerate `size`-subsets (2 or 3) of
-    /// ejectPool(ri, skip_p) in lexicographic index order, feasibility-check
-    /// each (seqFeasible + the same Lseg load check ejectCandidate uses),
-    /// and keep the FEASIBLE subset minimizing (sum eject_pen over the
-    /// subset, then lexicographically smallest pickup-id tuple). Deterministic,
-    /// no RNG. Returns the chosen subset or null if no `size`-subset of the
-    /// pool restores feasibility.
-    fn ejectSubsetK(s: *S, ri: usize, skip_p: usize, size: usize) !?EjectSubset {
-        const rcap: i64 = s.routeCap(ri);
-        var pool: [12]usize = undefined;
-        const n = s.ejectPool(ri, skip_p, &pool);
-        if (n < size) return null;
-
-        const it = s.routes.items[ri].items.items;
-        var idx: [3]usize = undefined;
-        for (0..size) |i| idx[i] = i;
-
-        var best: ?EjectSubset = null;
-        var best_pen: u64 = undefined;
-
-        while (true) {
-            var cand: [3]usize = undefined;
-            for (0..size) |i| cand[i] = pool[idx[i]];
-            // insertion-sort cand[0..size] by id (size <= 3) for a canonical
-            // lexicographic-tuple comparison independent of pool order.
-            for (1..size) |i| {
-                const v = cand[i];
-                var j = i;
-                while (j > 0 and cand[j - 1] > v) : (j -= 1) cand[j] = cand[j - 1];
-                cand[j] = v;
-            }
-
-            s.keep_buf.clearRetainingCapacity();
-            route: for (it) |c| {
-                for (cand[0..size]) |e| {
-                    if (c == e or c == s.inst.pair_of[e]) continue :route;
-                }
-                try s.keep_buf.append(s.allocator, c);
-            }
-            feasible: {
-                if (!s.seqFeasible(s.keep_buf.items)) break :feasible;
-                const lg = pdp.routeLseg(s.inst, s.keep_buf.items);
-                if (!(lg.lo >= 0 and lg.hi <= rcap)) break :feasible;
-                var pen: u64 = 0;
-                for (cand[0..size]) |e| pen += s.eject_pen[e];
-                const better = best == null or pen < best_pen or
-                    (pen == best_pen and lexLess(cand[0..size], best.?.buf[0..best.?.len]));
-                if (better) {
-                    best = .{ .buf = cand, .len = size };
-                    best_pen = pen;
-                }
-            }
-
-            // advance idx to the next lexicographic size-combination over 0..n
-            var i = size;
-            var done = true;
-            while (i > 0) {
-                i -= 1;
-                if (idx[i] != i + n - size) {
-                    idx[i] += 1;
-                    for (i + 1..size) |j| idx[j] = idx[j - 1] + 1;
-                    done = false;
-                    break;
-                }
-            }
-            if (done) break;
-        }
-        return best;
-    }
-
-    fn lexLess(a: []const usize, b: []const usize) bool {
-        for (a, b) |x, y| {
-            if (x != y) return x < y;
-        }
-        return false;
-    }
-
     /// GES squeeze: insert (p, q) at the least-violating position among the
-    /// kNN candidate routes, then eject residents to restore feasibility —
-    /// rung 1 (unchanged) tries a single resident pair; if that fails and
-    /// eject_k allows it, rungs 2-3 brute-force small subsets (see
-    /// ejectSubsetK). The ejected pairs go to the request bank (NOT to
-    /// s.removed — recreate is iterating it). Returns true on success; on
-    /// total failure the route is restored exactly and (p, q) stays banked.
-    fn squeezeInsert(s: *S, p: usize, q: usize, params: PdpSisrParams) !bool {
+    /// kNN candidate routes, then eject the cheapest single resident pair to
+    /// restore feasibility (see ejectCandidate). The ejected pair goes to the
+    /// request bank (NOT to s.removed — recreate is iterating it). Returns
+    /// true on success; on total failure the route is restored exactly and
+    /// (p, q) stays banked.
+    fn squeezeInsert(s: *S, p: usize, q: usize) !bool {
         s.generation += 1;
         var best_ri: usize = NO_ROUTE;
         var best_ins: InsV = undefined;
@@ -1006,30 +883,6 @@ const S = struct {
             s.loc_route[ec] = NO_ROUTE;
             s.loc_route[ef] = NO_ROUTE;
             s.n_unassigned += 1;
-            s.eject_pen[p] +|= 1;
-            return true;
-        }
-
-        // Rungs 2-3: k-eject when a single resident pair can't restore
-        // feasibility (see PdpSisrParams.eject_k).
-        const eject_k: usize = @min(@max(params.eject_k, 1), 3);
-        var size: usize = 2;
-        while (size <= eject_k) : (size += 1) {
-            const sub = (try s.ejectSubsetK(best_ri, p, size)) orelse continue;
-            const cur = s.routes.items[best_ri].items.items;
-            s.keep_buf.clearRetainingCapacity();
-            route: for (cur) |c| {
-                for (sub.buf[0..sub.len]) |e| {
-                    if (c == e or c == s.inst.pair_of[e]) continue :route;
-                }
-                try s.keep_buf.append(s.allocator, c);
-            }
-            try s.install(best_ri, s.keep_buf.items);
-            for (sub.buf[0..sub.len]) |e| {
-                s.loc_route[e] = NO_ROUTE;
-                s.loc_route[s.inst.pair_of[e]] = NO_ROUTE;
-            }
-            s.n_unassigned += sub.len;
             s.eject_pen[p] +|= 1;
             return true;
         }
@@ -1229,7 +1082,7 @@ const S = struct {
             if (s.time_penalty > 0)
                 singleton += @intCast(s.time_penalty * sdur);
             if (best_ri == NO_ROUTE and !may_open) {
-                if (params.eject and try s.squeezeInsert(p, q, params)) {
+                if (params.eject and try s.squeezeInsert(p, q)) {
                     s.n_unassigned -= 1;
                 }
                 continue; // otherwise stays in the request bank
@@ -2239,118 +2092,6 @@ test "PDPTW SISR eject: off by default leaves engine bit-identical" {
     defer b.deinit();
     try std.testing.expectEqual(a.total_cost, b.total_cost);
     try std.testing.expectEqual(a.vehicles, b.vehicles);
-}
-
-test "PDPTW SISR eject_k: constructed 2-eject unlocks what single eject cannot" {
-    // Hand-built route: pairs A(1,2) and B(3,4), demand 5 each, are already
-    // resident; pair C(5,6), demand 6, is squeezed in ahead of both (as
-    // squeezeInsert leaves the route after insertPair, before ejection).
-    // Stacking all three pickups before any dropoff peaks the load at
-    // 5+5+6=16 against capacity 10. Removing either resident pair alone
-    // still leaves 5+6=11 > 10; removing BOTH leaves just C's own 6 <= 10.
-    // Wide TWs so only load binds, per the squeeze motivation.
-    const allocator = std.testing.allocator;
-    var matrix: [49]u32 = undefined;
-    for (0..7) |a| for (0..7) |b| {
-        matrix[a * 7 + b] = if (a == b) 0 else 10;
-    };
-    const inst = pdp.PdpInstance{
-        .n_pairs = 3,
-        .matrix = matrix[0..],
-        .capacity = 10,
-        .pair_of = &[_]usize{ 0, 2, 1, 4, 3, 6, 5 },
-        .is_pickup = &[_]bool{ false, true, false, true, false, true, false },
-        .demand_signed = &[_]i64{ 0, 5, -5, 5, -5, 6, -6 },
-        .ready = &[_]u32{ 0, 0, 0, 0, 0, 0, 0 },
-        .due = &[_]u32{ 100_000, 100_000, 100_000, 100_000, 100_000, 100_000, 100_000 },
-        .service = &[_]u32{ 0, 0, 0, 0, 0, 0, 0 },
-    };
-
-    const gran = try buildNeighbors(allocator, inst, 6, .sum);
-    defer allocator.free(gran);
-    var s = try S.init(allocator, inst, 10_000_000, 0, 0, &.{}, null, gran, 6);
-    defer s.deinit();
-    const ri = try s.addSlot();
-    try s.install(ri, &[_]usize{ 1, 3, 5, 2, 4, 6 });
-
-    // rung 1: no single resident pair restores feasibility
-    try std.testing.expectEqual(@as(?usize, null), try s.ejectCandidate(ri, 5));
-    // rung 2: ejecting both A and B does
-    const sub = (try s.ejectSubsetK(ri, 5, 2)) orelse return error.TestExpectedEject;
-    try std.testing.expectEqual(@as(usize, 2), sub.len);
-    var got = [_]usize{ sub.buf[0], sub.buf[1] };
-    std.mem.sort(usize, &got, {}, std.sort.asc(usize));
-    try std.testing.expectEqualSlices(usize, &[_]usize{ 1, 3 }, &got);
-}
-
-test "PDPTW SISR eject_k: default 1 leaves engine bit-identical" {
-    const allocator = std.testing.allocator;
-    var seed: u64 = 1;
-    while (seed <= 5) : (seed += 1) {
-        var ri = try pdp.randomInstance(allocator, 8, seed, true);
-        defer ri.deinit(allocator);
-        const inst = ri.inst();
-        var free_run = try solvePdptwSisr(allocator, inst, .{ .seed = seed, .iters = 2000, .veh_penalty = 10_000_000 });
-        defer free_run.deinit();
-        if (free_run.vehicles <= 1) continue;
-        const base = PdpSisrParams{
-            .seed = seed,
-            .iters = 8000,
-            .veh_penalty = 10_000_000,
-            .max_vehicles = free_run.vehicles - 1,
-            .eject = true,
-        };
-        var explicit_k1 = base;
-        explicit_k1.eject_k = 1;
-        const ra = solvePdptwSisr(allocator, inst, base);
-        const rb = solvePdptwSisr(allocator, inst, explicit_k1);
-        if (ra) |a_ok| {
-            var a = a_ok;
-            defer a.deinit();
-            var b = try rb;
-            defer b.deinit();
-            try std.testing.expectEqual(a.total_cost, b.total_cost);
-            try std.testing.expectEqual(a.vehicles, b.vehicles);
-        } else |err| {
-            try std.testing.expectError(err, rb);
-        }
-    }
-}
-
-test "PDPTW SISR eject_k: deep ejection churn (k=3) stays valid and cost-honest" {
-    // Same harness as the heavy-squeeze-churn test above, but with the
-    // ladder's deepest rung enabled: asserts no crash, no stale loc, and any
-    // returned solution passes the independent oracle at the exact reported
-    // cost under maximum 3-eject churn. Effectiveness is measured on Li &
-    // Lim outside the suite.
-    const allocator = std.testing.allocator;
-    var seed: u64 = 1;
-    while (seed <= 10) : (seed += 1) {
-        var ri = try pdp.randomInstance(allocator, 8, seed, true);
-        defer ri.deinit(allocator);
-        const inst = ri.inst();
-        var free_run = try solvePdptwSisr(allocator, inst, .{ .seed = seed, .iters = 2000, .veh_penalty = 10_000_000 });
-        defer free_run.deinit();
-        if (free_run.vehicles <= 1) continue;
-        var res = solvePdptwSisr(allocator, inst, .{
-            .seed = seed,
-            .iters = 20000,
-            .veh_penalty = 10_000_000,
-            .max_vehicles = free_run.vehicles - 1,
-            .eject = true,
-            .eject_k = 3,
-        }) catch |err| switch (err) {
-            error.NoCompleteSolution => continue, // legal; the point is not corrupting
-            else => return err,
-        };
-        defer res.deinit();
-        try std.testing.expect(res.vehicles <= free_run.vehicles - 1);
-        const rc = try allocator.alloc([]const usize, res.routes.len);
-        defer allocator.free(rc);
-        for (res.routes, 0..) |r, i| rc[i] = r;
-        const vc = pdp.validate(inst, rc) orelse return error.Infeasible;
-        try std.testing.expectEqual(vc, res.total_cost);
-    }
 }
 
 test "PDPTW SISR swap kick: stays valid and never worse than kick-off at fixed seed count" {
