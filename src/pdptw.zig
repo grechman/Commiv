@@ -196,36 +196,9 @@ pub fn validateWithBreak(inst: PdpInstance, routes: []const []const usize, brk_d
     return total;
 }
 
-/// Load-segment algebra: O(1)-concat capacity primitive. `lo`/`hi` are the
-/// min/max prefix sums over the segment, including the empty prefix (0).
-pub const Lseg = struct {
-    delta: i64, // net load change over the segment
-    lo: i64, // min prefix sum (<= 0)
-    hi: i64, // max prefix sum (>= 0)
-
-    pub fn empty() Lseg {
-        return .{ .delta = 0, .lo = 0, .hi = 0 };
-    }
-
-    pub fn node(inst: PdpInstance, c: usize) Lseg {
-        const q = inst.demand_signed[c];
-        return .{ .delta = q, .lo = @min(0, q), .hi = @max(0, q) };
-    }
-
-    /// Concatenate `a` then `b`.
-    pub fn merge(a: Lseg, b: Lseg) Lseg {
-        return .{
-            .delta = a.delta + b.delta,
-            .lo = @min(a.lo, a.delta + b.lo),
-            .hi = @max(a.hi, a.delta + b.hi),
-        };
-    }
-
-    /// Feasible from a starting load of 0 under `capacity`.
-    pub fn feasible(self: Lseg, capacity: i64) bool {
-        return self.lo >= 0 and self.hi <= capacity;
-    }
-};
+/// Load-segment algebra: shared O(1)-concat capacity primitive (see
+/// core/lseg.zig), instantiated over PdpInstance.
+pub const Lseg = @import("core/lseg.zig").Lseg(PdpInstance);
 
 /// Fold a node sequence into one Lseg (left to right, starting from empty()).
 pub fn routeLseg(inst: PdpInstance, nodes: []const usize) Lseg {
