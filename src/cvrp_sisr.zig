@@ -582,14 +582,13 @@ const SisrSlot = struct {
 };
 
 fn sisrWorker(slot: *SisrSlot) void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
     var opts = slot.options;
     opts.seed = slot.seed;
-    const res = solveCvrpSisr(arena.allocator(), slot.inst, opts, slot.params) catch {
+    var res = solveCvrpSisr(std.heap.smp_allocator, slot.inst, opts, slot.params) catch {
         slot.ok = false;
         return;
     };
+    defer res.deinit();
     // flatten arena-owned routes into the parent-owned slot buffers before teardown
     var w: usize = 0;
     for (res.routes, 0..) |route, ri| {
