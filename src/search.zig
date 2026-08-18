@@ -128,6 +128,7 @@ pub const LocalSearch = struct {
     // improved on the best (the caller re-runs with full=true to polish).
     pub fn improveLK(self: *LocalSearch, stats: *SolveStats, activate_all: bool, full: bool) !u64 {
         var moves: u64 = 0;
+        var bounded_cleanup_exhausted = false;
         if (activate_all) self.lkActivateAll();
         for (0..self.max_passes) |_| {
             self.lk_nodes_this_pass = 0;
@@ -145,14 +146,22 @@ pub const LocalSearch = struct {
                 stats.lk_moves += 1;
                 continue;
             }
-            if (self.enable_bounded_three_opt_cleanup and self.improveBoundedThreeOptCleanup(stats)) {
-                moves += 1;
-                stats.bounded_three_opt_cleanup_moves += 1;
-                continue;
+            if (self.enable_bounded_three_opt_cleanup) {
+                if (self.improveBoundedThreeOptCleanup(stats)) {
+                    moves += 1;
+                    stats.bounded_three_opt_cleanup_moves += 1;
+                    continue;
+                }
+                // The tour did not change, so immediately repeating this same
+                // deterministic O(n*k^2) sweep below cannot find a move.
+                bounded_cleanup_exhausted = true;
             }
             break;
         }
-        if (full and self.enable_bounded_three_opt_cleanup) {
+        // If max_passes stopped a still-improving descent, give cleanup its
+        // dedicated tail budget. A normally converged descent already ran and
+        // exhausted the identical sweep in the loop above.
+        if (full and self.enable_bounded_three_opt_cleanup and !bounded_cleanup_exhausted) {
             const bounded_cleanup_passes = @max(self.max_passes / 4, 1);
             for (0..bounded_cleanup_passes) |_| {
                 if (!self.improveBoundedThreeOptCleanup(stats)) break;
