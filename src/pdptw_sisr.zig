@@ -238,6 +238,7 @@ const S = struct {
     veh_penalty: u64,
     time_penalty: u64,
     max_route_dur: u64, // shift-length cap; 0 = off (see PdpSisrParams.max_route_dur)
+    windows_well_formed: bool, // all ready <= due; malformed inputs use historical Tws path
     // Heterogeneous fleet ledger (empty veh_types = uniform, everything below
     // inert). rtype[ri] is route ri's type index, meaningful while nonempty
     // and overwritten at the next opening; type_used counts nonempty routes
@@ -281,12 +282,20 @@ const S = struct {
 
     fn init(allocator: std.mem.Allocator, inst: pdp.PdpInstance, veh_penalty: u64, time_penalty: u64, max_route_dur: u64, veh_types: []const VehType, brk: ?Break, gran: []const usize, gk: usize) !S {
         const dim = inst.dim();
+        var windows_well_formed = true;
+        for (inst.ready, inst.due) |ready, due| {
+            if (ready > due) {
+                windows_well_formed = false;
+                break;
+            }
+        }
         const s = S{
             .allocator = allocator,
             .inst = inst,
             .veh_penalty = veh_penalty,
             .time_penalty = time_penalty,
             .max_route_dur = max_route_dur,
+            .windows_well_formed = windows_well_formed,
             .veh_types = veh_types,
             .brk = brk,
             .gran = gran,
@@ -622,7 +631,7 @@ const S = struct {
         // labels and signed loads, avoiding four segment merges per gap pair.
         if (s.brk != null) return s.evalPairInsertBrk(ri, p, q, params, rng);
         const p_dem = s.inst.demand_signed[p];
-        if (s.time_penalty == 0 and s.max_route_dur == 0 and p_dem >= 0 and s.inst.demand_signed[q] == -p_dem)
+        if (s.windows_well_formed and s.time_penalty == 0 and s.max_route_dur == 0 and p_dem >= 0 and s.inst.demand_signed[q] == -p_dem)
             return s.evalPairInsertFast(ri, p, q, params, rng);
         const blink = params.blink;
         const inst = s.inst;
