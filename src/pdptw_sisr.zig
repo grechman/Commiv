@@ -226,7 +226,7 @@ const Route = struct {
     }
 };
 
-const Snap = struct { ri: usize, items: []usize, dist: u64, dur: u64, rtype: u8, brk_ok: bool };
+const Snap = struct { ri: usize, start: usize, len: usize, dist: u64, dur: u64, rtype: u8, brk_ok: bool };
 
 const S = struct {
     allocator: std.mem.Allocator,
@@ -258,8 +258,12 @@ const S = struct {
     cand_mark: std.ArrayList(u64) = .empty, // route -> generation of last candidate visit
     ruin_mark: std.ArrayList(u64) = .empty, // route -> generation of last ruin
     generation: u64 = 0,
-    // whole-route snapshot journal for the current iteration
+    // Whole-route snapshot journal for the current iteration. Contents are
+    // packed into one retained buffer: allocating one slice per touched route
+    // made arena callers retain O(iterations) memory even though the engine
+    // correctly called free on every prior snapshot.
     snaps: std.ArrayList(Snap) = .empty,
+    snap_items: std.ArrayList(usize) = .empty,
     snap_mark: std.ArrayList(u64) = .empty, // route -> snap generation
     snap_gen: u64 = 0,
     min_empty_hint: usize = 0,
@@ -319,8 +323,8 @@ const S = struct {
         s.removed.deinit(s.allocator);
         s.cand_mark.deinit(s.allocator);
         s.ruin_mark.deinit(s.allocator);
-        for (s.snaps.items) |sn| s.allocator.free(sn.items);
         s.snaps.deinit(s.allocator);
+        s.snap_items.deinit(s.allocator);
         s.snap_mark.deinit(s.allocator);
         s.keep_buf.deinit(s.allocator);
         s.* = undefined;
@@ -390,9 +394,13 @@ const S = struct {
         if (s.snap_mark.items[ri] == s.snap_gen) return;
         s.snap_mark.items[ri] = s.snap_gen;
         const r = &s.routes.items[ri];
+        const start = s.snap_items.items.len;
+        try s.snap_items.appendSlice(s.allocator, r.items.items);
+        errdefer s.snap_items.items.len = start;
         try s.snaps.append(s.allocator, .{
             .ri = ri,
-            .items = try s.allocator.dupe(usize, r.items.items),
+            .start = start,
+            .len = r.items.items.len,
             .dist = r.dist,
             .dur = r.dur,
             .rtype = if (s.veh_types.len == 0) 0 else s.rtype.items[ri],
@@ -439,8 +447,8 @@ const S = struct {
 
     fn beginIter(s: *S) void {
         s.snap_gen += 1;
-        for (s.snaps.items) |sn| s.allocator.free(sn.items);
         s.snaps.clearRetainingCapacity();
+        s.snap_items.clearRetainingCapacity();
     }
 
     /// Restore every snapshotted route; loc entries of their members are
@@ -457,13 +465,14 @@ const S = struct {
         for (s.snaps.items) |sn| {
             const r = &s.routes.items[sn.ri];
             const was_empty = r.items.items.len == 0;
+            const saved = s.snap_items.items[sn.start .. sn.start + sn.len];
             r.items.clearRetainingCapacity();
-            try r.items.appendSlice(s.allocator, sn.items);
+            try r.items.appendSlice(s.allocator, saved);
             r.dist = sn.dist;
             r.dur = sn.dur;
             r.brk_ok = sn.brk_ok;
             r.dirty = true;
-            if (!was_empty and sn.items.len == 0 and sn.ri < s.min_empty_hint) s.min_empty_hint = sn.ri;
+            if (!was_empty and sn.len == 0 and sn.ri < s.min_empty_hint) s.min_empty_hint = sn.ri;
         }
         for (s.snaps.items) |sn| {
             for (s.routes.items[sn.ri].items.items, 0..) |c, p| {
