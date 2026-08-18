@@ -217,14 +217,17 @@ def version() -> str:
 
 
 def _as_u32_array(values, expected_len: int, what: str):
-    """Copy any u32 source (numpy array, list, nested rows) into a ctypes array."""
+    """Expose contiguous numpy u32 storage, or copy generic input to ctypes."""
     if hasattr(values, "astype") and hasattr(values, "ravel"):  # numpy fast path
         import numpy as np  # local import: numpy is optional
 
         arr = np.ascontiguousarray(values, dtype=np.uint32).ravel()
         if arr.size != expected_len:
             raise ValueError(f"{what}: expected {expected_len} entries, got {arr.size}")
-        return (ctypes.c_uint32 * expected_len).from_buffer_copy(arr.tobytes())
+        # as_ctypes is a zero-copy view and retains `arr` for its own lifetime.
+        # The old arr.tobytes() + from_buffer_copy path materialized two extra
+        # full copies — 200 MB of avoidable peak RSS for a 5000² matrix.
+        return np.ctypeslib.as_ctypes(arr)
     flat: list[int] = []
     if values and isinstance(values[0], (list, tuple)):
         for row in values:

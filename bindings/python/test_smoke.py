@@ -392,6 +392,16 @@ def check_numpy_if_available():
     sol = commiv.solve_cvrp(np.array(MATRIX), np.array(DEMAND), CAPACITY, seed=1)
     ref = commiv.solve_cvrp(MATRIX, DEMAND, CAPACITY, seed=1)
     assert sol == ref, "numpy path must match the list path"
+
+    # A contiguous uint32 input must be passed through, not copied into a bytes
+    # object and then copied again into ctypes. The ctypes view owns a reference
+    # to the ndarray, so this remains safe for the synchronous C call.
+    import ctypes
+    arr = np.ascontiguousarray(MATRIX, dtype=np.uint32).ravel()
+    view = commiv._as_u32_array(arr, arr.size, "matrix")
+    assert ctypes.addressof(view) == arr.ctypes.data, "numpy u32 path must be zero-copy"
+    arr[1] = 123
+    assert view[1] == 123, "ctypes view must share numpy storage"
     return "ok"
 
 
