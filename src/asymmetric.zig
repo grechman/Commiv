@@ -598,6 +598,50 @@ fn solveAtspNativeImpl(allocator: std.mem.Allocator, mat: MatView, n: usize, opt
     return .{ .allocator = allocator, .tour = tour, .length = best_len };
 }
 
+test "large native candidate builder returns the canonical nearest top-k" {
+    const allocator = std.testing.allocator;
+    const n: usize = 512; // exercises the bounded-selection branch
+    const k: usize = 16;
+    const matrix = try allocator.alloc(u32, n * n);
+    defer allocator.free(matrix);
+    for (0..n) |i| {
+        for (0..n) |j| {
+            const x = (@as(u64, @intCast(i)) *% 0x9e3779b185ebca87) ^
+                (@as(u64, @intCast(j)) *% 0xc2b2ae3d27d4eb4f);
+            matrix[i * n + j] = if (i == j) 0 else @truncate(x ^ (x >> 32));
+        }
+    }
+    const mat = MatView{ .base = matrix, .stride = n, .off = 0 };
+    const cand = try buildNativeCands(allocator, mat, n, k);
+    defer allocator.free(cand);
+
+    for (0..n) |i| {
+        const row = cand[i * k ..][0..k];
+        for (row, 0..) |j, p| {
+            try std.testing.expect(j < n and j != i);
+            const key = @min(mat.at(i, j), mat.at(j, i));
+            if (p > 0) {
+                const prev = row[p - 1];
+                const prev_key = @min(mat.at(i, prev), mat.at(prev, i));
+                try std.testing.expect(prev_key < key or
+                    (prev_key == key and prev < j));
+            }
+            for (row[0..p]) |prev| try std.testing.expect(prev != j);
+        }
+        const last = row[k - 1];
+        const last_key = @min(mat.at(i, last), mat.at(last, i));
+        for (0..n) |j| {
+            if (j == i) continue;
+            const key = @min(mat.at(i, j), mat.at(j, i));
+            if (key < last_key or (key == last_key and j < last)) {
+                var found = false;
+                for (row) |selected| found = found or selected == j;
+                try std.testing.expect(found);
+            }
+        }
+    }
+}
+
 test "ATSP transform recovers a known directed optimum" {
     const allocator = std.testing.allocator;
     // 4 cities; the cheap directed cycle is 0->1->2->3->0 (cost 4). The reverse
