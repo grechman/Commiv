@@ -1,0 +1,23 @@
+{
+  "run": "taskset -c 2 python3 bench/run.py --build --runs 5 --iters 20000 --seed 1",
+  "metric": {
+    "name": "median_ms",
+    "direction": "lower",
+    "extract": "json:.median_ms"
+  },
+  "baseline_ref": "1450221",
+  "margin_pct": 2.0,
+  "runs_per_measurement": 2,
+  "stochastic": false,
+  "seeds": [
+    1
+  ],
+  "env": {
+    "threads": 1,
+    "seed": 1,
+    "iters": 20000,
+    "instance": "lr2_10_1",
+    "machine": "windows-server-wsl2",
+    "cpu_affinity": 2
+  }
+}
