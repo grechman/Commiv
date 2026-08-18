@@ -364,14 +364,16 @@ const HgsSlot = struct {
 };
 
 fn hgsWorker(slot: *HgsSlot) void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
+    // HGS creates and destroys a full educated Solution for every offspring.
+    // An arena cannot reclaim those non-LIFO frees and retained thousands of
+    // O(n) workspaces per island until the worker exited.
     var opts = slot.options;
     opts.seed = slot.seed;
-    const res = solveCvrpHgs(arena.allocator(), slot.inst, opts, slot.params, slot.max_vehicles) catch {
+    var res = solveCvrpHgs(std.heap.smp_allocator, slot.inst, opts, slot.params, slot.max_vehicles) catch {
         slot.ok = false;
         return;
     };
+    defer res.deinit();
     var w: usize = 0;
     for (res.routes, 0..) |route, ri| {
         @memcpy(slot.order[w .. w + route.len], route);
