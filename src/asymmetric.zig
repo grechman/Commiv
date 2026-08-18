@@ -322,24 +322,72 @@ fn nativeLen(mat: MatView, n: usize, tour: []const usize) u64 {
 fn buildNativeCands(allocator: std.mem.Allocator, mat: MatView, n: usize, k: usize) ![]usize {
     const cand = try allocator.alloc(usize, n * k);
     errdefer allocator.free(cand);
-    const idx = try allocator.alloc(usize, n);
-    defer allocator.free(idx);
-    const key = try allocator.alloc(u64, n);
-    defer allocator.free(key);
+
+    // Preserve the historical (key-only, unstable-tie) ordering for small ATSPs,
+    // including the published benchmark set. Above this point a full n-element
+    // pdq sort for every city dominates the native seed: it spends O(n² log n)
+    // work to retain only 16 entries per row. Maintain those entries directly,
+    // in canonical (key, index) order, for O(n²) key evaluations instead.
+    if (n < 512) {
+        const idx = try allocator.alloc(usize, n);
+        defer allocator.free(idx);
+        const key = try allocator.alloc(u64, n);
+        defer allocator.free(key);
+        for (0..n) |i| {
+            var cnt: usize = 0;
+            for (0..n) |j| {
+                if (j == i) continue;
+                idx[cnt] = j;
+                key[j] = @min(mat.at(i, j), mat.at(j, i)); // directed proximity
+                cnt += 1;
+            }
+            std.sort.pdq(usize, idx[0..cnt], key, struct {
+                fn lt(kk: []const u64, a: usize, b: usize) bool {
+                    return kk[a] < kk[b];
+                }
+            }.lt);
+            for (0..k) |c| cand[i * k + c] = idx[c];
+        }
+        return cand;
+    }
+
+    const top_idx = try allocator.alloc(usize, k);
+    defer allocator.free(top_idx);
+    const top_key = try allocator.alloc(u64, k);
+    defer allocator.free(top_key);
     for (0..n) |i| {
         var cnt: usize = 0;
         for (0..n) |j| {
             if (j == i) continue;
-            idx[cnt] = j;
-            key[j] = @min(mat.at(i, j), mat.at(j, i)); // directed proximity
-            cnt += 1;
-        }
-        std.sort.pdq(usize, idx[0..cnt], key, struct {
-            fn lt(kk: []const u64, a: usize, b: usize) bool {
-                return kk[a] < kk[b];
+            const key: u64 = @min(mat.at(i, j), mat.at(j, i));
+            if (cnt < k) {
+                var pos = cnt;
+                while (pos > 0 and (top_key[pos - 1] > key or
+                    (top_key[pos - 1] == key and top_idx[pos - 1] > j))) : (pos -= 1) {}
+                var t = cnt;
+                while (t > pos) : (t -= 1) {
+                    top_key[t] = top_key[t - 1];
+                    top_idx[t] = top_idx[t - 1];
+                }
+                top_key[pos] = key;
+                top_idx[pos] = j;
+                cnt += 1;
+            } else if (key < top_key[k - 1] or
+                (key == top_key[k - 1] and j < top_idx[k - 1]))
+            {
+                var pos = k - 1;
+                while (pos > 0 and (top_key[pos - 1] > key or
+                    (top_key[pos - 1] == key and top_idx[pos - 1] > j))) : (pos -= 1) {}
+                var t = k - 1;
+                while (t > pos) : (t -= 1) {
+                    top_key[t] = top_key[t - 1];
+                    top_idx[t] = top_idx[t - 1];
+                }
+                top_key[pos] = key;
+                top_idx[pos] = j;
             }
-        }.lt);
-        for (0..k) |c| cand[i * k + c] = idx[c];
+        }
+        @memcpy(cand[i * k ..][0..k], top_idx);
     }
     return cand;
 }
