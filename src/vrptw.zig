@@ -2249,12 +2249,22 @@ const SisrTw = struct {
         const it = r.items.items;
         const prev: usize = if (g == 0) 0 else it[g - 1];
         const next: usize = if (g == it.len) 0 else it[g];
-        const with_c = Tws.merge(r.pre.items[g], @intCast(s.inst.d(prev, c)), Tws.client(s.inst, c));
-        const full = Tws.merge(with_c, @intCast(s.inst.d(c, next)), r.suf.items[g]);
-        if (full.tw != 0) return null;
-        // Shift-length cap: full spans depot->..->depot, so full.dur is the
-        // whole resulting route's duration. Reject insertions that exceed it.
-        if (s.max_route_dur > 0 and full.dur > @as(i64, @intCast(s.max_route_dur))) return null;
+        if (s.max_route_dur == 0) {
+            if (!Tws.insertFeasible(
+                r.pre.items[g],
+                @intCast(s.inst.d(prev, c)),
+                Tws.client(s.inst, c),
+                @intCast(s.inst.d(c, next)),
+                r.suf.items[g],
+            )) return null;
+        } else {
+            const with_c = Tws.merge(r.pre.items[g], @intCast(s.inst.d(prev, c)), Tws.client(s.inst, c));
+            const full = Tws.merge(with_c, @intCast(s.inst.d(c, next)), r.suf.items[g]);
+            if (full.tw != 0) return null;
+            // Shift-length cap: full spans depot->..->depot, so full.dur is the
+            // whole resulting route's duration. Reject insertions that exceed it.
+            if (full.dur > @as(i64, @intCast(s.max_route_dur))) return null;
+        }
         return @as(i64, @intCast(s.inst.d(prev, c) + s.inst.d(c, next))) - @as(i64, @intCast(s.inst.d(prev, next)));
     }
 

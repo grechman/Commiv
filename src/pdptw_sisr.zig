@@ -585,6 +585,30 @@ const S = struct {
     }
 
     const Ins = struct { a: usize, b: usize, delta: i64 };
+    const GranGate = struct { enabled: bool, generation: u64 };
+
+    /// Mark the union of kNN(p) and kNN(q) for optional pickup/dropoff gap
+    /// pruning. Shared by the duration-aware and feasibility-only evaluators so
+    /// both visit exactly the same `(a,b)` candidates and consume identical RNG.
+    fn pairGranGate(s: *S, it: []const usize, p: usize, q: usize, params: PdpSisrParams) GranGate {
+        var granular = params.gran_gaps != 0 and (params.max_vehicles == 0 or s.iter_start_complete) and
+            it.len >= params.gran_gap_min_len and s.nonempty <= params.gran_max_routes;
+        var gen: u64 = 0;
+        if (granular) {
+            s.nbr_gen += 1;
+            gen = s.nbr_gen;
+            for (0..s.gk) |ti| {
+                const np = s.gran[(p - 1) * s.gk + ti];
+                if (np != 0) s.nbr_mark_p[np] = gen;
+                const nq = s.gran[(q - 1) * s.gk + ti];
+                if (nq != 0) s.nbr_mark_p[nq] = gen;
+            }
+            var hits: usize = 0;
+            for (it) |c| hits += @intFromBool(s.nbr_mark_p[c] == gen);
+            if (hits < 4) granular = false;
+        }
+        return .{ .enabled = granular, .generation = gen };
+    }
 
     /// Best feasible insertion of pair (p, q) into route `ri`: p at gap `a`,
     /// q at gap `b` (both in the ORIGINAL array, a <= b, so q lands right
@@ -593,9 +617,13 @@ const S = struct {
     /// Time-warp and load violations are monotone under rightward extension,
     /// so an infeasible middle prunes the rest of its `b` loop.
     fn evalPairInsert(s: *S, ri: usize, p: usize, q: usize, params: PdpSisrParams, rng: std.Random) ?Ins {
-        // Break regime routes to its own O(route)-per-candidate evaluator;
-        // the null branch below is the pre-break code verbatim.
+        // Break and duration-priced/capped routes need the full Tws summary.
+        // The common feasibility-only objective can use scalar earliest/latest
+        // labels and signed loads, avoiding four segment merges per gap pair.
         if (s.brk != null) return s.evalPairInsertBrk(ri, p, q, params, rng);
+        const p_dem = s.inst.demand_signed[p];
+        if (s.time_penalty == 0 and s.max_route_dur == 0 and p_dem >= 0 and s.inst.demand_signed[q] == -p_dem)
+            return s.evalPairInsertFast(ri, p, q, params, rng);
         const blink = params.blink;
         const inst = s.inst;
         const rcap: i64 = s.routeCap(ri);
@@ -606,33 +634,10 @@ const S = struct {
         const q_t = Tws.client(inst, q);
         const q_l = pdp.Lseg.node(inst, q);
 
-        // Granular gate: marks are the UNION of kNN(p) and kNN(q) (a gap
-        // near the dropoff's neighbours is a fine pickup spot too, and vice
-        // versa). If the route holds fewer than 4 marked nodes the gate is
-        // dropped for this route: too sparse a mark set cannot consolidate
-        // (measured: n=1000 lr2 fleet blows 19 -> 30 without the fallback).
-        // Never gate while a fleet cap is active AND the iteration started
-        // with a nonempty request bank: capped consolidation needs the
-        // awkward insertions the gate skips (measured: lrc2 200-series loses
-        // a vehicle on 2/7 cells otherwise). Capped-complete iterations
-        // (bank empty at iteration start) are pure distance polish — the
-        // same regime as uncapped, where gating is the measured win.
-        var granular = params.gran_gaps != 0 and (params.max_vehicles == 0 or s.iter_start_complete) and
-            L >= params.gran_gap_min_len and s.nonempty <= params.gran_max_routes;
-        var genp: u64 = 0;
-        if (granular) {
-            s.nbr_gen += 1;
-            genp = s.nbr_gen;
-            for (0..s.gk) |ti| {
-                const np = s.gran[(p - 1) * s.gk + ti];
-                if (np != 0) s.nbr_mark_p[np] = genp;
-                const nq = s.gran[(q - 1) * s.gk + ti];
-                if (nq != 0) s.nbr_mark_p[nq] = genp;
-            }
-            var hits: usize = 0;
-            for (it) |c| hits += @intFromBool(s.nbr_mark_p[c] == genp);
-            if (hits < 4) granular = false;
-        }
+        // Granular gap pruning is shared with the fast feasibility-only path.
+        const gate = s.pairGranGate(it, p, q, params);
+        const granular = gate.enabled;
+        const genp = gate.generation;
 
         for (s.lockOf(ri)..L + 1) |a| {
             if (granular and (params.gran_gaps & 1) != 0 and a != 0 and a != L and
@@ -675,6 +680,89 @@ const S = struct {
                     if (m_l.lo < 0 or m_l.hi > rcap) break;
                     m_d += inst.d(last, it[b]);
                     last = it[b];
+                }
+            }
+        }
+        return best;
+    }
+
+    /// Feasibility-only pair insertion used by the default distance/fleet
+    /// objective. For a warp-free prefix, `early + dur` is its earliest
+    /// completion; for a warp-free suffix, `late` is its latest feasible start.
+    /// Walking the middle once per pickup gap therefore tests each dropoff gap
+    /// with scalar max/add/compare operations instead of two Tws and two Lseg
+    /// concatenations. The scan order and blink draws exactly match the general
+    /// evaluator above.
+    fn evalPairInsertFast(s: *S, ri: usize, p: usize, q: usize, params: PdpSisrParams, rng: std.Random) ?Ins {
+        const blink = params.blink;
+        const inst = s.inst;
+        const rcap = s.routeCap(ri);
+        const r = &s.routes.items[ri];
+        const it = r.items.items;
+        const L = it.len;
+        const p_dem = inst.demand_signed[p];
+        var best: ?Ins = null;
+
+        const gate = s.pairGranGate(it, p, q, params);
+        const granular = gate.enabled;
+        const genp = gate.generation;
+
+        for (s.lockOf(ri)..L + 1) |a| {
+            if (granular and (params.gran_gaps & 1) != 0 and a != 0 and a != L and
+                s.nbr_mark_p[it[a - 1]] != genp and s.nbr_mark_p[it[a]] != genp) continue;
+            const prev_a: usize = if (a == 0) 0 else it[a - 1];
+            const pre = r.pre_t.items[a];
+            if (pre.tw != 0 or pre.early > pre.late) continue;
+            const p_start = @max(
+                pre.early + pre.dur + @as(i64, @intCast(inst.d(prev_a, p))),
+                @as(i64, @intCast(inst.ready[p])),
+            );
+            if (p_start > @as(i64, @intCast(inst.due[p]))) continue;
+            var depart = p_start + @as(i64, @intCast(inst.service[p]));
+
+            // A legal pair adds +p_dem only between p and q. Before/after that
+            // interval the base route's loads are unchanged, so tracking its
+            // running load and peak is the complete capacity test.
+            var load = r.pre_l.items[a].delta + p_dem;
+            var peak = @max(r.pre_l.items[a].hi, load);
+            if (r.pre_l.items[a].lo < 0 or load < 0 or peak > rcap) continue;
+
+            var middle_dist: u64 = r.pre_d.items[a] + inst.d(prev_a, p);
+            var last = p;
+            var b = a;
+            while (b <= L) : (b += 1) {
+                blk: {
+                    if (rng.float(f64) < blink) break :blk;
+                    const nxt: usize = if (b == L) 0 else it[b];
+                    if (granular and (params.gran_gaps & 2) != 0 and b != a and b != L and
+                        s.nbr_mark_p[last] != genp and s.nbr_mark_p[nxt] != genp) break :blk;
+
+                    const q_start = @max(
+                        depart + @as(i64, @intCast(inst.d(last, q))),
+                        @as(i64, @intCast(inst.ready[q])),
+                    );
+                    const suffix = r.suf_t.items[b];
+                    if (q_start > @as(i64, @intCast(inst.due[q])) or suffix.tw != 0 or suffix.early > suffix.late) break :blk;
+                    const suffix_arrival = q_start + @as(i64, @intCast(inst.service[q])) + @as(i64, @intCast(inst.d(q, nxt)));
+                    if (suffix_arrival > suffix.late) break :blk;
+
+                    const new_dist = middle_dist + inst.d(last, q) + inst.d(q, nxt) + r.tail_d.items[b];
+                    const delta = @as(i64, @intCast(new_dist)) - @as(i64, @intCast(r.dist));
+                    if (best == null or delta < best.?.delta) best = .{ .a = a, .b = b, .delta = delta };
+                }
+                if (b < L) {
+                    const c = it[b];
+                    const start = @max(
+                        depart + @as(i64, @intCast(inst.d(last, c))),
+                        @as(i64, @intCast(inst.ready[c])),
+                    );
+                    if (start > @as(i64, @intCast(inst.due[c]))) break;
+                    depart = start + @as(i64, @intCast(inst.service[c]));
+                    load += inst.demand_signed[c];
+                    peak = @max(peak, load);
+                    if (load < 0 or peak > rcap) break;
+                    middle_dist += inst.d(last, c);
+                    last = c;
                 }
             }
         }

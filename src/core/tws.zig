@@ -25,6 +25,19 @@ pub fn Tws(comptime Inst: type) type {
         pub fn depotNode(inst: Inst) Self {
             return .{ .dur = 0, .tw = 0, .early = 0, .late = @intCast(inst.due[0]) };
         }
+
+        /// Feasibility-only fast path for prefix + one node + suffix. For
+        /// warp-free segments, `early + dur` is the earliest completion of the
+        /// prefix and `late` is the latest feasible start of the suffix. This is
+        /// algebraically identical to checking the two merges' final `tw`, but
+        /// avoids constructing either summary when their duration is not needed.
+        pub inline fn insertFeasible(prefix: Self, edge_before: i64, node: Self, edge_after: i64, suffix: Self) bool {
+            if (prefix.tw != 0 or node.tw != 0 or suffix.tw != 0) return false;
+            if (prefix.early > prefix.late or node.early > node.late or suffix.early > suffix.late) return false;
+            const start = @max(prefix.early + prefix.dur + edge_before, node.early);
+            return start <= node.late and start + node.dur + edge_after <= suffix.late;
+        }
+
         /// Merge `left` then `right`, connected by an edge of travel time `edge`.
         pub fn merge(left: Self, edge: i64, right: Self) Self {
             const delta = left.dur - left.tw + edge;
