@@ -3207,14 +3207,13 @@ const SisrTwSlot = struct {
 };
 
 fn sisrTwWorker(slot: *SisrTwSlot) void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
     var opts = slot.options;
     opts.seed = slot.seed;
-    const res = solveVrptwSisr(arena.allocator(), slot.inst, opts, slot.params) catch {
+    var res = solveVrptwSisr(std.heap.smp_allocator, slot.inst, opts, slot.params) catch {
         slot.ok = false;
         return;
     };
+    defer res.deinit();
     var w: usize = 0;
     for (res.routes, 0..) |route, ri| {
         @memcpy(slot.order[w .. w + route.len], route);
