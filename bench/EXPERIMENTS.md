@@ -35,3 +35,15 @@ It rejects any fixed-seed result-signature disagreement before emitting JSON.
 - Windows server: `maxgrechkov@100.123.98.112`, Ubuntu under WSL2, CPU pinned as recorded.
 - PDPTW instance: vendored Li & Lim `vendor/pdptw/1000/lr2_10_1.txt`.
 - Baseline refs are commit hashes, never moving branches.
+
+
+## Post-fix opposition audit
+
+| date | candidate | scope | result | artifacts |
+|---|---|---|---|---|
+| 2026-08-18 | `26c8a1c` | Fresh equal-wall sentinels against PyVRP 0.13.4, HGS-CVRP, VROOM 1.14.0, OR-Tools 9.15.6755, and LKH-3.0.14 | Road CVRP best-of-three 4/4 vs PyVRP (paired 10/0/2); road VRPTW cost-only 2/3 and fleet-first 3/3; X-n1001 wins vs PyVRP/HGS; GH c1_10_1 narrow loss; PDPTW sample 3/1/1; money sentinel 27.097% lower | `bench/OPPOSITION_POSTFIX.md`, `bench/postfix-opposition.jsonl`; server `~/postfix-opposition/raw.log` |
+
+Commiv was pinned to CPUs 0-9 while the main competitor processes were
+unpinned. This is conservative for Commiv and valid for freshly anchored
+head-to-head quality, but the resulting wall times are not a before/after speed
+comparison with the unpinned July campaign.

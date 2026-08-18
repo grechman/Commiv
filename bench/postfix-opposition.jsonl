@@ -1,0 +1,73 @@
+{"external_wall": 28.53521227836609, "family": "road", "instance": "moscow-1000", "row": "moscow-1000,1000,0.1079,0.7470,1.1119,204320,0,0.00,50,28497", "seed": 1, "solver": "commiv"}
+{"external_wall": 27.946794271469116, "family": "road", "instance": "moscow-1000", "row": "moscow-1000,1000,0.1079,0.7470,1.1119,204381,0,0.00,50,27921", "seed": 2, "solver": "commiv"}
+{"external_wall": 28.572690963745117, "family": "road", "instance": "moscow-1000", "row": "moscow-1000,1000,0.1079,0.7470,1.1119,204326,0,0.00,50,28547", "seed": 3, "solver": "commiv"}
+{"family": "road", "instance": "moscow-1000", "row": "pyvrp,moscow-1000,cvrp,1000,207926,50,29.3,True", "seed": 1, "solver": "pyvrp", "wall_budget": 29}
+{"family": "road", "instance": "moscow-1000", "row": "pyvrp,moscow-1000,cvrp,1000,206726,50,29.3,True", "seed": 2, "solver": "pyvrp", "wall_budget": 29}
+{"family": "road", "instance": "moscow-1000", "row": "pyvrp,moscow-1000,cvrp,1000,206900,50,29.3,True", "seed": 3, "solver": "pyvrp", "wall_budget": 29}
+{"external_wall": 36.647088050842285, "family": "road", "instance": "nyc-1000", "row": "nyc-1000,1000,0.1232,0.7398,1.1335,91801,0,0.00,11,36607", "seed": 1, "solver": "commiv"}
+{"external_wall": 36.48521018028259, "family": "road", "instance": "nyc-1000", "row": "nyc-1000,1000,0.1232,0.7398,1.1335,91771,0,0.00,11,36461", "seed": 2, "solver": "commiv"}
+{"external_wall": 36.93743848800659, "family": "road", "instance": "nyc-1000", "row": "nyc-1000,1000,0.1232,0.7398,1.1335,91735,0,0.00,11,36913", "seed": 3, "solver": "commiv"}
+{"family": "road", "instance": "nyc-1000", "row": "pyvrp,nyc-1000,cvrp,1000,93825,11,37.4,True", "seed": 1, "solver": "pyvrp", "wall_budget": 37}
+{"family": "road", "instance": "nyc-1000", "row": "pyvrp,nyc-1000,cvrp,1000,93070,11,37.4,True", "seed": 2, "solver": "pyvrp", "wall_budget": 37}
+{"family": "road", "instance": "nyc-1000", "row": "pyvrp,nyc-1000,cvrp,1000,94089,11,37.3,True", "seed": 3, "solver": "pyvrp", "wall_budget": 37}
+{"external_wall": 38.73255634307861, "family": "road", "instance": "berlin-1000", "row": "berlin-1000,1000,0.0586,0.7181,1.0594,109105,0,0.00,11,38694", "seed": 1, "solver": "commiv"}
+{"external_wall": 37.87754678726196, "family": "road", "instance": "berlin-1000", "row": "berlin-1000,1000,0.0586,0.7181,1.0594,109119,0,0.00,11,37849", "seed": 2, "solver": "commiv"}
+{"external_wall": 37.77171492576599, "family": "road", "instance": "berlin-1000", "row": "berlin-1000,1000,0.0586,0.7181,1.0594,108909,0,0.00,11,37746", "seed": 3, "solver": "commiv"}
+{"family": "road", "instance": "berlin-1000", "row": "pyvrp,berlin-1000,cvrp,1000,109833,10,39.4,True", "seed": 1, "solver": "pyvrp", "wall_budget": 39}
+{"family": "road", "instance": "berlin-1000", "row": "pyvrp,berlin-1000,cvrp,1000,109460,11,39.4,True", "seed": 2, "solver": "pyvrp", "wall_budget": 39}
+{"family": "road", "instance": "berlin-1000", "row": "pyvrp,berlin-1000,cvrp,1000,109386,11,39.4,True", "seed": 3, "solver": "pyvrp", "wall_budget": 39}
+{"external_wall": 10.550400972366333, "family": "roadtw", "instance": "moscow-1000", "row": "moscow-1000,230098,51,10526", "seed": 1, "solver": "commiv"}
+{"external_wall": 10.719753503799438, "family": "roadtw", "instance": "moscow-1000", "row": "moscow-1000,230098,51,10698", "seed": 2, "solver": "commiv"}
+{"external_wall": 10.571529626846313, "family": "roadtw", "instance": "moscow-1000", "row": "moscow-1000,230098,51,10550", "seed": 3, "solver": "commiv"}
+{"family": "roadtw", "instance": "moscow-1000", "row": "pyvrp,moscow-1000,vrptw,1000,238232,51,11.3,True", "seed": 1, "solver": "pyvrp", "wall_budget": 11}
+{"family": "roadtw", "instance": "moscow-1000", "row": "pyvrp,moscow-1000,vrptw,1000,237541,52,11.3,True", "seed": 2, "solver": "pyvrp", "wall_budget": 11}
+{"family": "roadtw", "instance": "moscow-1000", "row": "pyvrp,moscow-1000,vrptw,1000,237868,51,11.3,True", "seed": 3, "solver": "pyvrp", "wall_budget": 11}
+{"external_wall": 29.960845232009888, "family": "roadtw", "instance": "nyc-1000", "row": "nyc-1000,133869,18,29937", "seed": 1, "solver": "commiv"}
+{"external_wall": 29.526954412460327, "family": "roadtw", "instance": "nyc-1000", "row": "nyc-1000,133869,18,29506", "seed": 2, "solver": "commiv"}
+{"external_wall": 30.604684114456177, "family": "roadtw", "instance": "nyc-1000", "row": "nyc-1000,133869,18,30583", "seed": 3, "solver": "commiv"}
+{"family": "roadtw", "instance": "nyc-1000", "row": "pyvrp,nyc-1000,vrptw,1000,133865,20,31.4,True", "seed": 1, "solver": "pyvrp", "wall_budget": 31}
+{"family": "roadtw", "instance": "nyc-1000", "row": "pyvrp,nyc-1000,vrptw,1000,135011,20,31.5,True", "seed": 2, "solver": "pyvrp", "wall_budget": 31}
+{"family": "roadtw", "instance": "nyc-1000", "row": "pyvrp,nyc-1000,vrptw,1000,134457,20,31.4,True", "seed": 3, "solver": "pyvrp", "wall_budget": 31}
+{"external_wall": 29.219505071640015, "family": "roadtw", "instance": "berlin-1000", "row": "berlin-1000,152140,21,29197", "seed": 1, "solver": "commiv"}
+{"external_wall": 29.14531421661377, "family": "roadtw", "instance": "berlin-1000", "row": "berlin-1000,152056,20,29124", "seed": 2, "solver": "commiv"}
+{"external_wall": 29.13293957710266, "family": "roadtw", "instance": "berlin-1000", "row": "berlin-1000,152056,20,29112", "seed": 3, "solver": "commiv"}
+{"family": "roadtw", "instance": "berlin-1000", "row": "pyvrp,berlin-1000,vrptw,1000,153243,23,30.4,True", "seed": 1, "solver": "pyvrp", "wall_budget": 30}
+{"family": "roadtw", "instance": "berlin-1000", "row": "pyvrp,berlin-1000,vrptw,1000,152701,21,30.3,True", "seed": 2, "solver": "pyvrp", "wall_budget": 30}
+{"family": "roadtw", "instance": "berlin-1000", "row": "pyvrp,berlin-1000,vrptw,1000,152670,22,30.4,True", "seed": 3, "solver": "pyvrp", "wall_budget": 30}
+{"external_wall": 100.49765038490295, "family": "cvrp_x", "instance": "X-n1001-k43", "row": "X-n1001-k43,1000,72355,72966,0.844,43,0,100491,true", "seed": 1, "solver": "commiv"}
+{"external_wall": 100.36622643470764, "family": "cvrp_x", "instance": "X-n1001-k43", "row": "X-n1001-k43,1000,72355,72966,0.844,43,0,100361,true", "seed": 2, "solver": "commiv"}
+{"external_wall": 99.90714383125305, "family": "cvrp_x", "instance": "X-n1001-k43", "row": "X-n1001-k43,1000,72355,72966,0.844,43,0,99902,true", "seed": 3, "solver": "commiv"}
+{"family": "cvrp_x", "instance": "X-n1001-k43", "row": "pyvrp,X-n1001-k43,1000,73370,43,101.3,True,1", "seed": 1, "solver": "pyvrp", "wall_budget": 101}
+{"family": "cvrp_x", "instance": "X-n1001-k43", "row": "pyvrp,X-n1001-k43,1000,73650,43,101.3,True,2", "seed": 2, "solver": "pyvrp", "wall_budget": 101}
+{"family": "cvrp_x", "instance": "X-n1001-k43", "row": "pyvrp,X-n1001-k43,1000,73467,43,101.3,True,3", "seed": 3, "solver": "pyvrp", "wall_budget": 101}
+{"cost": 74433, "family": "cvrp_x", "instance": "X-n1001-k43", "seed": 1, "solver": "hgs", "wall_budget": 101}
+{"cost": 74481, "family": "cvrp_x", "instance": "X-n1001-k43", "seed": 2, "solver": "hgs", "wall_budget": 101}
+{"cost": 74806, "family": "cvrp_x", "instance": "X-n1001-k43", "seed": 3, "solver": "hgs", "wall_budget": 101}
+{"external_wall": 30.409573793411255, "family": "pdptw", "instance": "lc2_2_3", "row": "lc2_2_3,101,6,6,1844.324,1844.324,0.00,15116,20090.331,246.007", "size": "200", "solver": "commiv", "wall_budget": 15}
+{"external_wall": 30.409573793411255, "family": "pdptw", "instance": "lr2_2_7", "row": "lr2_2_7,101,3,3,3098.349,3230.225,4.26,15281,6239.302,1009.077", "size": "200", "solver": "commiv", "wall_budget": 15}
+{"external_wall": 1.2412824630737305, "family": "pdptw", "instance": "lc2_2_3", "row": "lc2_2_3,1847364,0,0.5,veh=6,dur=20093371,wait=246007", "size": "200", "solver": "vroom", "wall_budget": 15}
+{"external_wall": 1.2412824630737305, "family": "pdptw", "instance": "lr2_2_7", "row": "lr2_2_7,3451028,0,0.7,veh=3,dur=6158585,wait=707557", "size": "200", "solver": "vroom", "wall_budget": 15}
+{"external_wall": 183.2728705406189, "family": "pdptw", "instance": "lc2_10_1", "row": "lc2_10_1,507,30,30,16879.220,16879.220,0.00,91249,106879.220,0.000", "size": "1000", "solver": "commiv", "wall_budget": 90}
+{"external_wall": 183.2728705406189, "family": "pdptw", "instance": "lr2_10_1", "row": "lr2_10_1,503,17,19,62859.299,45718.585,-27.27,92007,122306.419,66587.834", "size": "1000", "solver": "commiv", "wall_budget": 90}
+{"external_wall": 28.414295434951782, "family": "pdptw", "instance": "lc2_10_1", "row": "lc2_10_1,16879220,0,12.8,veh=30,dur=106879220,wait=0", "size": "1000", "solver": "vroom", "wall_budget": 90}
+{"external_wall": 28.414295434951782, "family": "pdptw", "instance": "lr2_10_1", "row": "lr2_10_1,59693203,62,14.9,veh=17,dur=111015813,wait=41942610", "size": "1000", "solver": "vroom", "wall_budget": 90}
+{"external_wall": 91.02575540542603, "family": "money", "instance": "lr2_10_1", "row": "lr2_10_1,503,17,19,62859.299,51564.144,-17.97,91019,112480.229,50916.085", "solver": "commiv", "wall_budget": 90}
+{"external_wall": 81.2168538570404, "family": "money", "instance": "lr2_10_1", "row": "lr2_10_1,47663195,0,80.8,veh=26,dur=160313305,wait=102650110", "solver": "vroom", "wall_budget": 90}
+{"external_wall": 10.077776670455933, "family": "pdptw", "instance": "lc104", "row": "lc104,53,9,9,860.012,864.176,0.48,10074,9896.380,32.204", "seed": 1, "size": "100", "solver": "commiv", "wall_budget": 10}
+{"external_wall": 10.055700063705444, "family": "pdptw", "instance": "lc104", "row": "lc104,53,9,9,860.012,864.176,0.48,10053,9896.380,32.204", "seed": 2, "size": "100", "solver": "commiv", "wall_budget": 10}
+{"external_wall": 10.039404392242432, "family": "pdptw", "instance": "lc104", "row": "lc104,53,9,9,860.012,864.176,0.48,10037,9896.380,32.204", "seed": 3, "size": "100", "solver": "commiv", "wall_budget": 10}
+{"external_wall": 0.15060186386108398, "family": "pdptw", "instance": "lc104", "row": "lc104,861956,0,0.1,veh=9,dur=9894160,wait=32204", "size": "100", "solver": "vroom", "wall_budget": 10}
+{"external_wall": 20.184622049331665, "family": "vrptw_gh", "instance": "c1_10_1", "row": "c1_10_1,1000,100,42478.95,100,42486.02,0.017,20176,true,true", "seed": 1, "solver": "commiv"}
+{"external_wall": 19.9846670627594, "family": "vrptw_gh", "instance": "c1_10_1", "row": "c1_10_1,1000,100,42478.95,100,42486.02,0.017,19979,true,true", "seed": 2, "solver": "commiv"}
+{"external_wall": 20.027037620544434, "family": "vrptw_gh", "instance": "c1_10_1", "row": "c1_10_1,1000,100,42478.95,100,42486.11,0.017,20020,true,true", "seed": 3, "solver": "commiv"}
+{"family": "vrptw_gh", "instance": "c1_10_1", "row": "pyvrp,c1_10_1,1000,42481.46,100,21.3,True,1", "seed": 1, "solver": "pyvrp", "wall_budget": 21}
+{"family": "vrptw_gh", "instance": "c1_10_1", "row": "pyvrp,c1_10_1,1000,42478.98,100,21.3,True,2", "seed": 2, "solver": "pyvrp", "wall_budget": 21}
+{"family": "vrptw_gh", "instance": "c1_10_1", "row": "pyvrp,c1_10_1,1000,42479.08,100,21.3,True,3", "seed": 3, "solver": "pyvrp", "wall_budget": 21}
+{"external_wall": 183.11356806755066, "family": "road", "instance": "nyc-2000", "row": "nyc-2000,2000,0.1196,0.7246,1.1287,133378,0,0.00,11,182963", "seed": 1, "solver": "commiv"}
+{"external_wall": 185.0873749256134, "family": "road", "instance": "nyc-2000", "row": "nyc-2000,2000,0.1196,0.7246,1.1287,133558,0,0.00,11,184962", "seed": 2, "solver": "commiv"}
+{"external_wall": 180.52061653137207, "family": "road", "instance": "nyc-2000", "row": "nyc-2000,2000,0.1196,0.7246,1.1287,132354,0,0.00,11,180393", "seed": 3, "solver": "commiv"}
+{"family": "road", "instance": "nyc-2000", "row": "pyvrp,nyc-2000,cvrp,2000,132425,11,184.6,True", "seed": 1, "solver": "pyvrp", "wall_budget": 183}
+{"family": "road", "instance": "nyc-2000", "row": "pyvrp,nyc-2000,cvrp,2000,133384,11,184.6,True", "seed": 2, "solver": "pyvrp", "wall_budget": 183}
+{"family": "road", "instance": "nyc-2000", "row": "pyvrp,nyc-2000,cvrp,2000,134046,10,184.7,True", "seed": 3, "solver": "pyvrp", "wall_budget": 183}
+{"family": "road", "instance": "moscow-1000", "row": "ortools,vendor/road/moscow-1000.road,1000,235079,50,29.0,OK", "solver": "ortools", "version": "9.15.6755", "wall_budget": 29}
+{"family": "road", "instance": "moscow-1000", "row": "lkh-warm,vendor/road/moscow-1000.road,1000,415634,52,30.7,OK", "solver": "lkh-warm", "version": "3.0.14", "wall_budget": 29}
