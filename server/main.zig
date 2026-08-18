@@ -86,8 +86,10 @@ fn handleConnection(gpa: std.mem.Allocator, io: std.Io, stream: std.Io.net.Strea
 }
 
 fn handleRequest(gpa: std.mem.Allocator, req: *std.http.Server.Request, cfg: ServerConfig) !void {
-    // Everything a request allocates (body, parsed JSON, flattened matrices,
-    // solver result, response JSON) lives in one arena.
+    // Request parsing and response serialization are bulk-lifetime work, so
+    // keep them in one arena. Solvers with balanced allocation churn must use
+    // `gpa` instead: an arena ignores their frees and retains every temporary
+    // allocation until the request ends (PDPTW snapshots once did this here).
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -126,10 +128,10 @@ fn handleRequest(gpa: std.mem.Allocator, req: *std.http.Server.Request, cfg: Ser
     switch (route) {
         .cvrp => return solveCvrp(arena, req, body),
         .vrptw => return solveVrptw(arena, req, body),
-        .pdptw => return solvePdptw(arena, req, body),
-        .pdptw_dispatch => return solvePdptwDispatch(arena, req, body),
+        .pdptw => return solvePdptw(arena, gpa, req, body),
+        .pdptw_dispatch => return solvePdptwDispatch(arena, gpa, req, body),
         .atsp => return solveAtsp(arena, req, body),
-        .compat_vroom => return solveCompatVroom(arena, req, body),
+        .compat_vroom => return solveCompatVroom(arena, gpa, req, body),
     }
 }
 
@@ -284,7 +286,7 @@ const PdptwRequest = struct {
     driver_break: []const u32 = &.{},
 };
 
-fn solvePdptw(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []const u8) !void {
+fn solvePdptw(arena: std.mem.Allocator, solver_allocator: std.mem.Allocator, req: *std.http.Server.Request, body: []const u8) !void {
     const p = parseSolveRequest(PdptwRequest, arena, req, body) orelse return;
     const r = p.request;
     const flat = p.matrix;
@@ -383,12 +385,12 @@ fn solvePdptw(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []c
 
     var result = blk: {
         if (r.fleet_min)
-            break :blk commiv.internal.pdptw_sisr.solvePdptwSisrFleetMin(arena, inst, params, budget) catch |err|
+            break :blk commiv.internal.pdptw_sisr.solvePdptwSisrFleetMin(solver_allocator, inst, params, budget) catch |err|
                 return respondSolverError(req, err);
         if (r.max_vehicles != 0)
-            break :blk commiv.internal.pdptw_sisr.solvePdptwSisrPinned(arena, inst, params, budget, @intCast(r.max_vehicles)) catch |err|
+            break :blk commiv.internal.pdptw_sisr.solvePdptwSisrPinned(solver_allocator, inst, params, budget, @intCast(r.max_vehicles)) catch |err|
                 return respondSolverError(req, err);
-        break :blk commiv.solvePdptwSisr(arena, inst, params) catch |err|
+        break :blk commiv.solvePdptwSisr(solver_allocator, inst, params) catch |err|
             return respondSolverError(req, err);
     };
     defer result.deinit();
@@ -431,7 +433,7 @@ const PdptwDispatchRequest = struct {
 /// Rolling-horizon PDPTW re-solve: the /solve/pdptw instance contract plus
 /// the CURRENT plan and its LOCKED prefixes. fleet_min/max_vehicles are not
 /// accepted here — dispatch keeps the current fleet shape. See docs/rest.md.
-fn solvePdptwDispatch(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []const u8) !void {
+fn solvePdptwDispatch(arena: std.mem.Allocator, solver_allocator: std.mem.Allocator, req: *std.http.Server.Request, body: []const u8) !void {
     const p = parseSolveRequest(PdptwDispatchRequest, arena, req, body) orelse return;
     const r = p.request;
     const flat = p.matrix;
@@ -545,7 +547,7 @@ fn solvePdptwDispatch(arena: std.mem.Allocator, req: *std.http.Server.Request, b
     } else if (r.driver_break.len != 0 and r.driver_break.len != 3)
         return respondError(req, .unprocessable_entity, "driver_break must be [duration, earliest, latest]");
 
-    var result = commiv.internal.pdptw_sisr.solvePdptwSisrDispatch(arena, inst, params, current, locked) catch |err|
+    var result = commiv.internal.pdptw_sisr.solvePdptwSisrDispatch(solver_allocator, inst, params, current, locked) catch |err|
         return respondSolverError(req, err);
     defer result.deinit();
 
@@ -664,7 +666,7 @@ fn taskWindow(tw: []const []const u32, horizon: u32) [2]u32 {
     return .{ 0, horizon };
 }
 
-fn solveCompatVroom(arena: std.mem.Allocator, req: *std.http.Server.Request, body: []const u8) !void {
+fn solveCompatVroom(arena: std.mem.Allocator, solver_allocator: std.mem.Allocator, req: *std.http.Server.Request, body: []const u8) !void {
     const vr = std.json.parseFromSliceLeaky(VroomRequest, arena, body, .{ .ignore_unknown_fields = true }) catch
         return respondVroomError(req, .bad_request, "invalid VROOM JSON body; see docs/rest.md /compat/vroom");
 
@@ -727,6 +729,10 @@ fn solveCompatVroom(arena: std.mem.Allocator, req: *std.http.Server.Request, bod
     }
 
     var result_routes: [][]usize = undefined;
+    // PDPTW uses a freeing allocator (its hot loop has balanced transient
+    // allocations); keep ownership alive through VROOM response emission.
+    var pdptw_result: ?commiv.PdpResult = null;
+    defer if (pdptw_result) |*res| res.deinit();
 
     if (has_ships) {
         // ---- shipments -> PDPTW ----
@@ -795,9 +801,9 @@ fn solveCompatVroom(arena: std.mem.Allocator, req: *std.http.Server.Request, bod
             .time_penalty = vr.commiv.time_penalty,
         };
         if (vr.commiv.wall_ms != 0) params.time_ms = vr.commiv.wall_ms;
-        const res = commiv.solvePdptwSisr(arena, inst, params) catch |err|
+        pdptw_result = commiv.solvePdptwSisr(solver_allocator, inst, params) catch |err|
             return respondVroomSolverError(req, err);
-        result_routes = res.routes;
+        result_routes = pdptw_result.?.routes;
     } else {
         // ---- jobs -> VRPTW ----
         if (vr.commiv.time_penalty != 0)
