@@ -45,6 +45,15 @@ const MatView = struct {
 pub fn solveAtsp(allocator: std.mem.Allocator, asym: []const u32, n: usize, options: solver.SolveOptions) !solver.SolveResult {
     if (n < 2 or asym.len != n * n) return error.InvalidMatrix;
 
+    // Large n always routes to the native directed search: the doubled-graph LK
+    // works 2n nodes and is not worth it at scale. Keep this before the O(n^2)
+    // degeneracy scan: large native descents are not cheap enough for its ×100
+    // trial multiplier, and scanning a matrix whose dispatch is already known is
+    // pure startup cost.
+    if (@as(u64, 2 * n) * @as(u64, 2 * n) > ATSP_TRANSFORM_MAX_CELLS) {
+        return solveAtspNative(allocator, asym, n, options);
+    }
+
     // Degeneracy = arcs tying their row minimum, averaged per row (~1 for a real /
     // classic matrix, ~15-31 for the rbg stacker-crane set). On those degenerate
     // instances the 2n transform is a net loss: the native directed search reaches
@@ -68,17 +77,6 @@ pub fn solveAtsp(allocator: std.mem.Allocator, asym: []const u32, n: usize, opti
             nopts.budget.trials = options.budget.trials *| 100;
             return solveAtspNative(allocator, asym, n, nopts);
         }
-    }
-
-    // Large n routes to the native directed search: the doubled-graph LK works
-    // 2n nodes and isn't worth it at scale, especially for a throwaway seed
-    // SISR will rip apart. (This gate was originally also about the transform's
-    // 32n^2 B materialization; the jv_transform view below killed that cost,
-    // but the routing stays — it's a measured speed/regime decision and moving
-    // it would change published results.) Budget passed through as-is (no
-    // degeneracy ×100 — large-n native descents aren't cheap).
-    if (@as(u64, 2 * n) * @as(u64, 2 * n) > ATSP_TRANSFORM_MAX_CELLS) {
-        return solveAtspNative(allocator, asym, n, options);
     }
 
     var max_arc: u64 = 0;
