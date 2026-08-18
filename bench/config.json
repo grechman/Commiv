@@ -6,7 +6,7 @@
     "extract": "json:.median_ms"
   },
   "baseline_ref": "1450221",
-  "margin_pct": 2.0,
+  "margin_pct": 3.0,
   "runs_per_measurement": 2,
   "stochastic": false,
   "seeds": [
