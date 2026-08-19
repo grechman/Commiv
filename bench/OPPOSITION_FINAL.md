@@ -76,7 +76,7 @@ python3 bench/audit_postfix.py --require-valid-gh
 
 ## Causal old/new CPU and RSS evidence
 
-These are fixed-work A/B measurements from [`BENCH.md`](../BENCH.md), not the
+These are fixed-work A/B measurements from [`bench/README.md`](README.md), not the
 fresh wall-bound campaign:
 
 | retained change | old -> new result |

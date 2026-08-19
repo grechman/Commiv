@@ -1,4 +1,4 @@
-# distribution.md — the build order for turning the benchmark lead into adoption
+# distribution — the build order for turning the benchmark lead into adoption
 
 Written 2026-07-16, off the competitive-intelligence read of the 2026-07-13/14
 campaign + 2026-07-15 rebench.
@@ -91,7 +91,7 @@ r1_4_1=39 — already slipped through once).
   "a capability demonstration."
 
 Acceptance: a `REPRODUCTION.md` with the second-machine numbers within wall
-noise of `BENCHMARKS.md`, and one real-matrix money cell with the cost model
+noise of `benchmarks.md`, and one real-matrix money cell with the cost model
 stated and the command next to the number (per the "no unreproducible number"
 rule).
 
@@ -188,7 +188,7 @@ that flags ABI changes.
 
 UPDATE 2026-07-16 (status + reorder): M1 DONE (7f5290b, C ABI 0.3.0, verified).
 M2 DONE (6aa588a, Python + REST + docs, smoke-verified). M3 substantially done
-(MONEY_REAL.md: real prices, real matrices, audited VROOM head-to-heads both
+(money-real.md: real prices, real matrices, audited VROOM head-to-heads both
 regimes; remaining: tightness sweep + equal-compute n=2000 rerun in flight).
 NEW ORDER for the rest: finish bench campaign -> **M6 (dispatch API, pulled up —
 express-delivery market)** -> M4 (VROOM migration + waiting-cost demo) -> M5 ->

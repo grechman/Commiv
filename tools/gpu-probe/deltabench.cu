@@ -1,5 +1,5 @@
 // Phase 1 gate: batched 2-opt move-delta evaluation throughput,
-// GTX 1660 Ti vs host CPU (1 thread and all threads), per commiv gpu.md.
+// GTX 1660 Ti vs host CPU (1 thread and all threads), per commiv docs/gpu.md.
 // Realistic accounting: every GPU batch pays the tour-array upload (SoA
 // next/pos) and the best-move readback; the matrix is device-resident.
 // Integer objective, deterministic tie-break (packed delta|index atomicMin).

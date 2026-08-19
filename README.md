@@ -418,7 +418,7 @@ part of this API and free to change between versions.
 Full campaign, one machine (Ryzen 5 2600X, 12 threads, WSL2), 2026-07-14: every family,
 every real competitor, equal wall-clock anchored on commiv's own runtime, independent
 validators wherever one exists. **All tables, per-instance data, and methodology:
-[BENCHMARKS.md](BENCHMARKS.md).** The essentials:
+[docs/benchmarks.md](docs/benchmarks.md).** The essentials:
 
 | family | field | verdict (equal wall, best of 3 seeds) |
 |---|---|---|
@@ -450,7 +450,7 @@ A profiling pass over the released engine. Every number below is a fixed-work
 A/B: same instance, same seed, same iteration budget. Every row except the ATSP
 one produced byte-identical solver output before and after, so those are pure
 speed and memory measurements, not quality trades. Ledger and reproduce
-commands: [BENCH.md](BENCH.md).
+commands: [bench/README.md](bench/README.md).
 
 | path | what changed | measured |
 |---|---|---|
@@ -496,14 +496,14 @@ Where it wins:
 Where the competition wins:
 
 - Give LKH-3, HGS-CVRP, or the original SISR far more time than the equal-wall budgets
-  in [BENCHMARKS.md](BENCHMARKS.md) and they reach lower gaps (0.16% to 0.39% on
+  in [docs/benchmarks.md](docs/benchmarks.md) and they reach lower gaps (0.16% to 0.39% on
   Uchoa X); PyVRP crosses commiv's numbers at roughly 10x the compute, later on bigger
   and more asymmetric instances. At the unlimited-budget frontier commiv is not
   state-of-the-art.
 - On the vehicles-first Gehring-Homberger objective commiv matches the best-known fleet
   on 4 of 12 instances. The record holders run an ejection-pool route-minimization
   phase commiv doesn't have. (Priced in money instead of vehicle count, this mostly
-  stops mattering - see the money bench in [BENCHMARKS.md](BENCHMARKS.md).)
+  stops mattering - see the money bench in [docs/benchmarks.md](docs/benchmarks.md).)
 - FILO solves symmetric CVRPs with tens of thousands of nodes faster than anything here.
 - OR-Tools and VROOM have been in production for years and cover skills, multi-depot,
   driver shifts, the long tail of real constraints. commiv covers capacities, time
@@ -584,7 +584,7 @@ Measured and closed on a GTX 1660 Ti (2026-07-13): the batched move-delta kernel
 0.55x of the CPU's aggregate throughput - the engine's winning moves (sparse don't-look
 scans, deep anneals, ejection chains) are exactly the work GPUs are bad at. Full
 evidence and reopen conditions: [`tools/gpu-probe/GPU-REPORT.md`](tools/gpu-probe/GPU-REPORT.md);
-original design spec kept in [`gpu.md`](gpu.md).
+original design spec kept in [`docs/gpu.md`](docs/gpu.md).
 
 
 ## Reproducing the benchmarks
@@ -605,8 +605,8 @@ zig build pdptwbench -Doptimize=ReleaseFast && ./zig-out/bin/commiv-pdptwbench  
 zig build bench      -Doptimize=ReleaseFast                                     # TSP suite (runs)
 ```
 
-Per-cell configs, walls, and the campaign driver that produced BENCHMARKS.md are
-documented in [BENCHMARKS.md](BENCHMARKS.md) itself.
+Per-cell configs, walls, and the campaign driver that produced docs/benchmarks.md are
+documented in [docs/benchmarks.md](docs/benchmarks.md) itself.
 
 
 ## License
@@ -646,7 +646,7 @@ ACVRP, VRPTW, PDPTW) с точностью до долей процента от
 | LKH-3 | 221 487 | 456 с |
 | OR-Tools | 225 917 | 60 с |
 
-Каждое число воспроизводится одной командой; см. [BENCHMARKS.md](BENCHMARKS.md).
+Каждое число воспроизводится одной командой; см. [docs/benchmarks.md](docs/benchmarks.md).
 
 ```sh
 zig build                                  # собрать библиотеку
@@ -958,7 +958,7 @@ matrix, capacity, pair_of, is_pickup, demand_signed, ready, due, service }` с �
 Полная кампания на одной машине (Ryzen 5 2600X, 12 потоков, WSL2), 2026-07-14: все
 семейства, все реальные конкуренты, равное время на инстанс (по замеренному времени
 commiv), независимые валидаторы везде, где они есть. **Все таблицы и методика:
-[BENCHMARKS.md](BENCHMARKS.md).** Главное:
+[docs/benchmarks.md](docs/benchmarks.md).** Главное:
 
 | семейство | конкуренты | вердикт (равное время, лучший из 3 сидов) |
 |---|---|---|
@@ -991,7 +991,7 @@ commiv), независимые валидаторы везде, где они �
 фиксированной работе: тот же инстанс, тот же сид, тот же бюджет итераций. Все
 строки, кроме ATSP, дали побайтово совпадающий результат до и после - это чистые
 замеры скорости и памяти, а не размен качества. Журнал и команды воспроизведения:
-[BENCH.md](BENCH.md).
+[bench/README.md](bench/README.md).
 
 | путь | что изменилось | замер |
 |---|---|---|
@@ -1039,13 +1039,13 @@ commiv), независимые валидаторы везде, где они �
 Где выигрывают остальные:
 
 - Дайте LKH-3, HGS-CVRP или оригинальному SISR в разы больше времени, чем в
-  [BENCHMARKS.md](BENCHMARKS.md), и они дожмут разрыв до 0.16-0.39% на Uchoa X.
+  [docs/benchmarks.md](docs/benchmarks.md), и они дожмут разрыв до 0.16-0.39% на Uchoa X.
   На безлимитном бюджете commiv не SOTA.
 - На иерархической цели Gehring-Homberger (сначала машины, потом расстояние) commiv
   достигает лучшего известного парка на 4 из 12 инстансов. Рекордсмены гоняют фазу
   выталкивания маршрутов (ejection pool), которой здесь нет. (В деньгах, а не в числе
   машин, эта слабость почти не играет - см. денежный бенч в
-  [BENCHMARKS.md](BENCHMARKS.md).)
+  [docs/benchmarks.md](docs/benchmarks.md).)
 - FILO решает симметричные CVRP с десятками тысяч узлов быстрее всего, что здесь есть.
 - OR-Tools и VROOM годами в проде и покрывают навыки, мульти-депо, смены водителей -
   весь длинный хвост реальных ограничений. commiv покрывает вместимости, временные
@@ -1127,7 +1127,7 @@ commiv), независимые валидаторы везде, где они �
 Инстансы лежат в `vendor/` (TSPLIB, CVRPLIB, ATSP, ACVRP, Solomon, Gehring-Homberger,
 Li & Lim, дорожные матрицы в `vendor/road/`). Адаптеры конкурентов - в
 [`tools/competitors/`](tools/competitors/). Команды сборки бенчей - в английской части
-выше; конфигурация каждой ячейки задокументирована в [BENCHMARKS.md](BENCHMARKS.md).
+выше; конфигурация каждой ячейки задокументирована в [docs/benchmarks.md](docs/benchmarks.md).
 
 
 ## Лицензия

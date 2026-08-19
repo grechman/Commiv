@@ -38,7 +38,7 @@ integrator can build against.
 | 0.4.0 | 88 B | + `max_route_duration` |
 | 0.4.0 | 104 B | + `break_duration/earliest/latest` + pad; `commiv_solve_pdptw_typed`, `commiv_solve_pdptw_dispatch`, `commiv_routes_type` (all additions within one release cycle, pre-first-publish) |
 | 0.5.0 | 88 B | BREAKING (authorized pre-adoption cleanup): removed `vrptw_rounds`/`vrptw_restarts` fields (legacy VRPTW ILS engine deleted; SISR is the only VRPTW engine), all later field offsets shift down 16 B. Also removed from the Zig API: `solveVrptw`/`VrptwParams`, `solvePdptw`/`PdpParams`, `solveCvrpMulti`/`CvrpMultiParams`, PDPTW `eval_threads`, `eject_k` (both engines). REST: `engine:"ils"` and `rounds`/`restarts` request fields gone. |
-| 0.5.1 | 88 B | No ABI change: same exports, same `commiv_options` layout. Performance/memory pass (see [BENCH.md](../BENCH.md)). Behavior note, allowed by the PATCH rule above: a large native ATSP (above about n=2900) on a degenerate matrix no longer multiplies the requested `trials` by 100, and its candidate build breaks key ties differently, so a given seed can produce a different tour than 0.5.0. |
+| 0.5.1 | 88 B | No ABI change: same exports, same `commiv_options` layout. Performance/memory pass (see [bench/README.md](../bench/README.md)). Behavior note, allowed by the PATCH rule above: a large native ATSP (above about n=2900) on a degenerate matrix no longer multiplies the requested `trials` by 100, and its candidate build breaks key ties differently, so a given seed can produce a different tour than 0.5.0. |
 
 ## Enforcement
 

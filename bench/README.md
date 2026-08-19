@@ -43,7 +43,7 @@ The command emits raw runs to stderr and one JSON object to stdout. See
 ## Final quality audit
 
 The completed post-fix campaign is documented in
-[`bench/OPPOSITION_FINAL.md`](bench/OPPOSITION_FINAL.md), with 1,611 raw rows,
+[`OPPOSITION_FINAL.md`](OPPOSITION_FINAL.md), with 1,611 raw rows,
 1,589 journaled cells, full 352-cell PDPTW and money grids, and a derived
 1,670-row de-duplicated opposition view. The refreshed academic-money result is
 VROOM +$1,266,042/+11.540%; the primary PDPTW comparison is Commiv 283/53/16

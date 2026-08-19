@@ -305,7 +305,7 @@ knobs; report best-of.
 
 ## 5. Honest verdict and reconciliation with the published +11.6%
 
-The published money bench (BENCHMARKS.md §Money, Li&Lim, +11.6%/$1.27M) and this result
+The published money bench (benchmarks.md §Money, Li&Lim, +11.6%/$1.27M) and this result
 are both correct; they measure different regimes:
 
 - **Li&Lim windows are tight.** Waiting is frequent and structurally unavoidable, and

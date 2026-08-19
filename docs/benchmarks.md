@@ -674,7 +674,7 @@ declared prices — a capability demonstration, not a customer-savings claim.
 
 Measured and closed (NO-GO) on consumer hardware, 2026-07-13: batched move-delta kernel
 0.11x vs the 12-thread CPU at n=1001; massively-parallel chains 0.55x aggregate at 1536
-chains. Full evidence: [`tools/gpu-probe/GPU-REPORT.md`](tools/gpu-probe/GPU-REPORT.md).
+chains. Full evidence: [`tools/gpu-probe/GPU-REPORT.md`](../tools/gpu-probe/GPU-REPORT.md).
 
 ## Reproducing
 

@@ -5,9 +5,9 @@ Hardware: GTX 1660 Ti 6 GB (sm_75) in WSL2 (driver 560.94, CUDA 12.6), host Ryze
 Repro: `nvcc -O3 -arch=sm_75 -Xcompiler -fopenmp -o <x> <x>.cu` then `./deltabench <n> <k>
 <batches>` / `./chainbench <n> <k> <iters> <chains>`.
 
-## Verdict: NO-GO on this hardware for this engine. Both gpu.md kernels fail their gates.
+## Verdict: NO-GO on this hardware for this engine. Both docs/gpu.md kernels fail their gates.
 
-### Gate 1 — batched move-delta kernel (gpu.md kernel #2)
+### Gate 1 — batched move-delta kernel (docs/gpu.md kernel #2)
 
 Device-resident matrix, per-batch tour upload + best readback (the realistic
 integration cost), deterministic packed atomicMin reduction. GPU results byte-match
@@ -20,14 +20,14 @@ the CPU best on every run.
 | n=5000 k=32 | 45 Me/s | 131 Me/s | 518 Me/s | 3.97x |
 
 Fixed per-batch cost (~150 us: WSL kernel launch + 2 uploads + readback) buries the
-GPU at n~1000 — the gpu.md acceptance instance itself. It only wins on big dense
+GPU at n~1000 — the docs/gpu.md acceptance instance itself. It only wins on big dense
 sweeps (n>=5000, wide k). But the CPU engine does NOT do dense sweeps: the don't-look
 queue (measured 2-4x, dlq memory) evaluates a sparse fraction of n*k per iteration
 precisely because dense scanning loses. Integrating this kernel = replacing a smart
 sparse scan with a brute dense one that is at best 1.6-4x faster than a dense scan
 nobody runs.
 
-### Gate 2 — massively-parallel chains (gpu.md kernel #3, proxy)
+### Gate 2 — massively-parallel chains (docs/gpu.md kernel #3, proxy)
 
 One chain per block, Or-opt with O(1) apply (an UPPER bound on SISR chain speed —
 real ruin/recreate has far more state and divergence), identical start tours, same
