@@ -1,0 +1,14 @@
+
+2026-08-18 14:43:07 money-real/moscow-100/vroom
+Traceback (most recent call last):
+  File "/mnt/c/WSL/postfix_remaining.py", line 42, in cell
+    objs=fn()
+         ^^^^
+  File "/mnt/c/WSL/postfix_remaining.py", line 105, in vfn
+    row=line_start(out,'vroom,')
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/c/WSL/postfix_remaining.py", line 56, in line_start
+    if len(rows)!=1: raise RuntimeError(f'expected one {prefix!r} row, got {len(rows)}')
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: expected one 'vroom,' row, got 0
+

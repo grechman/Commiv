@@ -1,0 +1,375 @@
+{
+  "academic_money": {
+    "fresh_by_size": [
+      {
+        "commiv_total_usd": 213188.3905,
+        "delta_usd": 4167.4024999999965,
+        "instances": 56,
+        "size": 100,
+        "vroom_overspend_pct": 1.9547980498497264,
+        "vroom_total_usd": 217355.793,
+        "wtl": [
+          35,
+          20,
+          1
+        ]
+      },
+      {
+        "commiv_total_usd": 518045.19,
+        "delta_usd": 20355.36599999998,
+        "instances": 60,
+        "size": 200,
+        "vroom_overspend_pct": 3.929264549295386,
+        "vroom_total_usd": 538400.556,
+        "wtl": [
+          46,
+          5,
+          9
+        ]
+      },
+      {
+        "commiv_total_usd": 1051284.342,
+        "delta_usd": 73471.42200000002,
+        "instances": 58,
+        "size": 400,
+        "vroom_overspend_pct": 6.988729791240433,
+        "vroom_total_usd": 1124755.764,
+        "wtl": [
+          52,
+          0,
+          6
+        ]
+      },
+      {
+        "commiv_total_usd": 1974125.7625,
+        "delta_usd": 198392.66799999983,
+        "instances": 60,
+        "size": 600,
+        "vroom_overspend_pct": 10.04964687501766,
+        "vroom_total_usd": 2172518.4305,
+        "wtl": [
+          55,
+          0,
+          5
+        ]
+      },
+      {
+        "commiv_total_usd": 3041197.454,
+        "delta_usd": 387343.4040000001,
+        "instances": 60,
+        "size": 800,
+        "vroom_overspend_pct": 12.736542426422792,
+        "vroom_total_usd": 3428540.858,
+        "wtl": [
+          59,
+          0,
+          1
+        ]
+      },
+      {
+        "commiv_total_usd": 4172834.7835,
+        "delta_usd": 582312.227,
+        "instances": 58,
+        "size": 1000,
+        "vroom_overspend_pct": 13.954835434715696,
+        "vroom_total_usd": 4755147.0105,
+        "wtl": [
+          57,
+          1,
+          0
+        ]
+      }
+    ],
+    "fresh_total": {
+      "commiv_total_usd": 10970675.9225,
+      "delta_usd": 1266042.489500001,
+      "instances": 352,
+      "vroom_overspend_pct": 11.540241444043087,
+      "vroom_total_usd": 12236718.412,
+      "wtl": [
+        304,
+        26,
+        22
+      ]
+    },
+    "historical_total": {
+      "commiv_total_usd": 10969101.878,
+      "delta_usd": 1267610.2,
+      "vroom_overspend_pct": 11.5561895048341,
+      "vroom_total_usd": 12236712.078
+    },
+    "vroom_incomplete": 0
+  },
+  "artifacts": {
+    "combined_rows": 1670,
+    "combined_sha256": "2aac76f9dd266a2b22bfd72054c6ca08a556392713bf51ad4e2e4dcbe4c84928",
+    "li_lim_manifest_sha256": "fa3240ddec9c98b4fdb6d53d1a8d4257fbb194dc6829f616cfbdaff3016f4943",
+    "phase1_results_sha256": "93c9d69f7f33b00cbde485ea7dc6c0e503d3bd20c9e7146df153c2e8b3da8d2b",
+    "postfix_remaining_cells_sha256": "ab8f26ebdadc15da85e061fbb23ab35de89b2c3cbd0e0b4385c8db005d5fdc6a",
+    "postfix_remaining_errors_sha256": "833acb026d070da5d961e661910ab16c4b0c0f1db01897eead56a63b9af6060e",
+    "postfix_remaining_jsonl_sha256": "2a99114cd125343e05e2506802f58af32e2f238c6a39e400a89983e4dc28a88f",
+    "postfix_remaining_raw_log_sha256": "d9fec27f1eb26e8ff86c0a4400d45e051bb7e0f933d2db06281f97c503858938",
+    "postfix_remaining_runner_sha256": "d6f2343a9d06db6ff88072252a77fae412b75a14afd899f619f00876e8c92841"
+  },
+  "campaign": {
+    "commit": "26c8a1cca3f97e6d38498a968c6a4e786c8815ca",
+    "completed_at": "2026-08-19 06:22:00",
+    "journal_cells": 1589,
+    "results_rows": 1611,
+    "status": "CAMPAIGN_COMPLETE"
+  },
+  "family_rows": {
+    "meta": 1,
+    "money": 704,
+    "money_real": 24,
+    "pdptw": 816,
+    "road": 18,
+    "roadtw": 18,
+    "vrptw_gh": 30
+  },
+  "feasibility": {
+    "gh_commiv_bad": 0,
+    "gh_py_bad": 9,
+    "money_vroom_unassigned_cells": 0,
+    "pd_vroom_unassigned_cells": 238,
+    "pd_vroom_unassigned_total": 5752,
+    "real_vroom_unassigned": 0,
+    "road_commiv_bad": 0,
+    "road_py_bad": 0,
+    "roadtw_py_bad": 0
+  },
+  "known_limitations": [
+    "9 of 15 new GH PyVRP rows fail the adapter exact-Euclidean schedule validation and are excluded",
+    "configured solver limits are soft and are not equal realized external walls",
+    "academic VROOM feasibility is adapter-reported; ordinary mode is BKS-fleet constrained",
+    "fresh pinned vs historical unpinned wall-bound runs are not causal speed A/B evidence"
+  ],
+  "pdptw": {
+    "by_size": [
+      {
+        "fresh_lex_wtl": [
+          22,
+          33,
+          1
+        ],
+        "instances": 56,
+        "old_lex_wtl": [
+          22,
+          33,
+          1
+        ],
+        "size": 100,
+        "vroom_incomplete_cells": 6,
+        "vroom_unassigned": 18
+      },
+      {
+        "fresh_lex_wtl": [
+          44,
+          12,
+          4
+        ],
+        "instances": 60,
+        "old_lex_wtl": [
+          45,
+          12,
+          3
+        ],
+        "size": 200,
+        "vroom_incomplete_cells": 28,
+        "vroom_unassigned": 138
+      },
+      {
+        "fresh_lex_wtl": [
+          53,
+          3,
+          2
+        ],
+        "instances": 58,
+        "old_lex_wtl": [
+          53,
+          3,
+          2
+        ],
+        "size": 400,
+        "vroom_incomplete_cells": 46,
+        "vroom_unassigned": 588
+      },
+      {
+        "fresh_lex_wtl": [
+          55,
+          2,
+          3
+        ],
+        "instances": 60,
+        "old_lex_wtl": [
+          55,
+          2,
+          3
+        ],
+        "size": 600,
+        "vroom_incomplete_cells": 52,
+        "vroom_unassigned": 1162
+      },
+      {
+        "fresh_lex_wtl": [
+          55,
+          2,
+          3
+        ],
+        "instances": 60,
+        "old_lex_wtl": [
+          55,
+          2,
+          3
+        ],
+        "size": 800,
+        "vroom_incomplete_cells": 54,
+        "vroom_unassigned": 1628
+      },
+      {
+        "fresh_lex_wtl": [
+          54,
+          1,
+          3
+        ],
+        "instances": 58,
+        "old_lex_wtl": [
+          54,
+          1,
+          3
+        ],
+        "size": 1000,
+        "vroom_incomplete_cells": 52,
+        "vroom_unassigned": 2218
+      }
+    ],
+    "fresh_fleet_total": 8799,
+    "fresh_total_lex_wtl": [
+      283,
+      53,
+      16
+    ],
+    "fresh_vroom_complete": 114,
+    "fresh_vroom_incomplete": 238,
+    "fresh_vroom_unassigned": 5752,
+    "old_fleet_total": 8810,
+    "old_to_fresh_commiv_lex_wtl": [
+      103,
+      208,
+      41
+    ]
+  },
+  "real_money": {
+    "cells": [
+      {
+        "commiv_external_s": 30.02316403388977,
+        "commiv_movement_pct": 0.0,
+        "fresh_commiv_usd": 1117.6,
+        "fresh_commiv_vehicles": 3,
+        "fresh_driver": "plain",
+        "fresh_vroom_overspend_pct": 1.5730136005726703,
+        "fresh_vroom_usd": 1135.18,
+        "fresh_vroom_vehicles": 3,
+        "instance": "moscow-100",
+        "nominal_s": 30,
+        "old_commiv_usd": 1117.6,
+        "vroom_external_s": 1.4733967781066895,
+        "vroom_unassigned": 0
+      },
+      {
+        "commiv_external_s": 30.020288705825806,
+        "commiv_movement_pct": 0.0,
+        "fresh_commiv_usd": 1024.09,
+        "fresh_commiv_vehicles": 3,
+        "fresh_driver": "fleetmin",
+        "fresh_vroom_overspend_pct": 2.911853450380364,
+        "fresh_vroom_usd": 1053.91,
+        "fresh_vroom_vehicles": 3,
+        "instance": "nyc-100",
+        "nominal_s": 30,
+        "old_commiv_usd": 1024.09,
+        "vroom_external_s": 1.3019154071807861,
+        "vroom_unassigned": 0
+      },
+      {
+        "commiv_external_s": 61.21020793914795,
+        "commiv_movement_pct": 0.28747185394522035,
+        "fresh_commiv_usd": 10301.84,
+        "fresh_commiv_vehicles": 28,
+        "fresh_driver": "fleetmin",
+        "fresh_vroom_overspend_pct": 4.501137660845056,
+        "fresh_vroom_usd": 10765.54,
+        "fresh_vroom_vehicles": 29,
+        "instance": "moscow-1000",
+        "nominal_s": 60,
+        "old_commiv_usd": 10272.31,
+        "vroom_external_s": 75.67620873451233,
+        "vroom_unassigned": 0
+      },
+      {
+        "commiv_external_s": 61.165138721466064,
+        "commiv_movement_pct": -0.4546022941943617,
+        "fresh_commiv_usd": 8545.73,
+        "fresh_commiv_vehicles": 24,
+        "fresh_driver": "fleetmin",
+        "fresh_vroom_overspend_pct": 3.6246172064879234,
+        "fresh_vroom_usd": 8855.48,
+        "fresh_vroom_vehicles": 25,
+        "instance": "nyc-1000",
+        "nominal_s": 60,
+        "old_commiv_usd": 8584.7565,
+        "vroom_external_s": 77.25912666320801,
+        "vroom_unassigned": 0
+      },
+      {
+        "commiv_external_s": 124.42700791358948,
+        "commiv_movement_pct": -0.7427751600582955,
+        "fresh_commiv_usd": 20104.67,
+        "fresh_commiv_vehicles": 54,
+        "fresh_driver": "fleetmin",
+        "fresh_vroom_overspend_pct": -1.437128786495856,
+        "fresh_vroom_usd": 19815.74,
+        "fresh_vroom_vehicles": 53,
+        "instance": "moscow-2000",
+        "nominal_s": 120,
+        "old_commiv_usd": 20255.12,
+        "vroom_external_s": 205.95300722122192,
+        "vroom_unassigned": 0
+      },
+      {
+        "commiv_external_s": 125.22513771057129,
+        "commiv_movement_pct": 0.0,
+        "fresh_commiv_usd": 17095.14,
+        "fresh_commiv_vehicles": 47,
+        "fresh_driver": "fleetmin",
+        "fresh_vroom_overspend_pct": 0.3616817411264295,
+        "fresh_vroom_usd": 17156.97,
+        "fresh_vroom_vehicles": 48,
+        "instance": "nyc-2000",
+        "nominal_s": 120,
+        "old_commiv_usd": 17095.14,
+        "vroom_external_s": 218.92787432670593,
+        "vroom_unassigned": 0
+      }
+    ],
+    "dump_hashes_match_historical": true,
+    "formula": "(drive + 7*duration + 30000*vehicles) * 0.0015 USD"
+  },
+  "walls": {
+    "money_vroom_max": {
+      "actual_s": 174.38239765167236,
+      "instance": "lrc2_10_4",
+      "nominal_s": 90,
+      "ratio": 1.9375821961296928
+    },
+    "money_vroom_nominal_overshoots": 84,
+    "money_vroom_over_10pct": 62,
+    "pdptw_vroom_nominal_overshoots": 0,
+    "real_money_vroom_max": {
+      "actual_s": 218.92787432670593,
+      "instance": "nyc-2000",
+      "nominal_s": 120,
+      "ratio": 1.8243989527225495
+    }
+  }
+}

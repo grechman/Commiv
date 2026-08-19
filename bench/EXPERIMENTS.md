@@ -47,3 +47,15 @@ Commiv was pinned to CPUs 0-9 while the main competitor processes were
 unpinned. This is conservative for Commiv and valid for freshly anchored
 head-to-head quality, but the resulting wall times are not a before/after speed
 comparison with the unpinned July campaign.
+
+### Completed full-grid extension
+
+| date | candidate | scope | result | artifacts |
+|---|---|---|---|---|
+| 2026-08-19 | `26c8a1c` | Remaining large road/road-TW/GH cells plus all 352 academic-money and all 352 ordinary PDPTW cells | Manifest exact: 1,611 rows/1,589 cells. Money: Commiv $10,970,675.92 vs VROOM $12,236,718.41, W/T/L 304/26/22. PDPTW completion+fleet+distance: 283/53/16; VROOM fixed-fleet adapter incomplete on 238 cells. Road CVRP best 6/7 vs PyVRP; road-TW cost best 5/6, fleet-first 4/6. GH family scoreboard withheld because 9/15 new PyVRP rows failed exact schedule validation. | `bench/OPPOSITION_FINAL.md`, `bench/postfix-remaining.jsonl`, `bench/postfix-remaining.cells`, `bench/postfix-final-summary.json`, `bench/postfix-opposition-combined.jsonl` |
+
+The final service reached `CAMPAIGN_COMPLETE` after append-only recovery from
+WSL restarts. The full-grid artifact supersedes 14 overlapping phase-1
+PDPTW/money rows only in derived summaries; both raw sources remain immutable.
+Configured time limits are soft rather than equal realized walls, especially
+for money-mode VROOM (maximum 174.4 s at a nominal 90 s).

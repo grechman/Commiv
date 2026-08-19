@@ -1,5 +1,9 @@
 # Post-fix opposition audit
 
+> **Extended by [`OPPOSITION_FINAL.md`](OPPOSITION_FINAL.md).** This phase-1
+> artifact remains immutable; the final full PDPTW/money grid supersedes its 14
+> overlapping sentinel rows for aggregate analysis.
+
 This is the fresh quality audit for commit `26c8a1c` after the performance
 campaign. It is deliberately separate from the frozen mechanical A/B results:
 quality campaigns compare solvers at a newly anchored wall budget, while the
