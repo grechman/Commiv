@@ -444,6 +444,38 @@ optimizes that objective natively (`time_penalty`); VROOM cannot price driver ti
 all (their issue #1130), which is where the +11.6% money-bench gap comes from.
 
 
+## Speed and memory (2026-08)
+
+A profiling pass over the released engine. Every number below is a fixed-work
+A/B - same instance, same seed, same iteration budget, and byte-identical solver
+output before and after - so these are speed and memory measurements, not
+quality trades. Ledger and reproduce commands: [BENCH.md](BENCH.md).
+
+| path | what changed | measured |
+|---|---|---|
+| PDPTW insertion, ordinary objective | scalar time-window labels instead of two segment concatenations per candidate gap | **20.9% / 22.7% less time**, identical routes |
+| PDPTW over REST | solver work moved off the per-request arena | peak RSS **-92.6%** solve, -67.0% dispatch, -68.2% VROOM compat |
+| PDPTW rollback journal | packed snapshots instead of one allocation per touched route | peak RSS **-91.4%** |
+| Parallel HGS / VRPTW workers | workers free their own workspaces | peak RSS **-85.2% / -80.2%** |
+| Fleet-capped Split DP | route-count columns bounded by proof instead of by n | **4.86x**, RSS -71.8% |
+| Large native ATSP | requested trial count honored; bounded top-k candidate build | about **37x** at `trials=1`, **2.12x** on the candidate build |
+| Python bindings | contiguous NumPy input passed without copies | **66.2x** conversion, peak RSS -60.3% |
+
+**The money objective is deliberately absent from that list.** The insertion win
+comes from replacing the time-window algebra with scalar arrival labels, and the
+money objective prices the merged route duration that those labels cannot
+produce - so it keeps the exact Tws summary and the fast path stays off. Money
+mode is bit-identical before and after this pass, which is also why the money
+benchmark above scores the same search either way. An Lseg-only variant for money
+mode measured mean -1.97% across four interleaved replicates and was rejected
+under the same 2-3% margin every other lever answers to (`bench/EXPERIMENTS.md`, #13).
+
+One behavior change to know about: a large ATSP (above about n=2900) whose matrix
+has many arcs tying their row minimum used to multiply your requested trial count
+by 100 behind your back. It now runs the trials you asked for - far faster, and a
+shorter search unless you raise `trials` yourself.
+
+
 ## Where it wins, where it loses
 
 Where it wins:
@@ -946,6 +978,38 @@ commiv), независимые валидаторы везде, где они �
 оплаченное ожидание, которыми её убирают. commiv оптимизирует эту цель напрямую
 (`time_penalty`); VROOM цену времени водителя выразить не может вообще (их issue
 #1130) - отсюда и +11.6% в денежном бенче.
+
+
+## Скорость и память (2026-08)
+
+Проход по производительности уже выпущенного движка. Каждое число ниже - A/B при
+фиксированной работе: тот же инстанс, тот же сид, тот же бюджет итераций и
+побайтово совпадающий результат до и после. Это замеры скорости и памяти, а не
+размен качества. Журнал и команды воспроизведения: [BENCH.md](BENCH.md).
+
+| путь | что изменилось | замер |
+|---|---|---|
+| Вставка пары в PDPTW, обычная цель | скалярные метки времён вместо двух склеек сегментов на каждый кандидат | **на 20.9% / 22.7% меньше времени**, маршруты те же |
+| PDPTW через REST | работа солвера ушла с арены запроса | пик RSS **-92.6%** solve, -67.0% dispatch, -68.2% VROOM-совместимость |
+| Журнал отката PDPTW | упакованные снимки вместо аллокации на каждый тронутый маршрут | пик RSS **-91.4%** |
+| Параллельные воркеры HGS / VRPTW | воркеры освобождают свою память сами | пик RSS **-85.2% / -80.2%** |
+| Split DP с ограниченным парком | число колонок ограничено доказуемой границей, а не n | **4.86x**, RSS -71.8% |
+| Большой нативный ATSP | запрошенное число попыток соблюдается; отбор кандидатов через ограниченный top-k | около **37x** при `trials=1`, **2.12x** на построении кандидатов |
+| Python-биндинги | непрерывный массив NumPy передаётся без копий | **66.2x** на конвертации, пик RSS -60.3% |
+
+**Денежной цели в этом списке нет, и это осознанно.** Выигрыш на вставке взялся
+из замены оконной алгебры скалярными метками прибытия, а денежная цель считает
+именно суммарную длительность маршрута, которую такие метки не дают - поэтому там
+остаётся полная сводка Tws, а быстрый путь выключен. Денежный режим побайтово
+одинаков до и после этого прохода; поэтому денежный бенчмарк выше меряет один и
+тот же поиск в обоих случаях. Вариант только с заменой Lseg дал в среднем -1.97%
+на четырёх чередующихся повторах и был отклонён по тому же порогу 2-3%, по
+которому судятся все остальные рычаги (`bench/EXPERIMENTS.md`, #13).
+
+Одно изменение поведения, о котором стоит знать: большой ATSP (примерно от n=2900)
+на матрице, где много дуг делят минимум строки, раньше молча умножал запрошенное
+число попыток на 100. Теперь он выполняет ровно столько попыток, сколько попросили:
+намного быстрее и с более коротким поиском, если не поднять `trials` вручную.
 
 
 ## commiv против остальных
