@@ -447,9 +447,10 @@ all (their issue #1130), which is where the +11.6% money-bench gap comes from.
 ## Speed and memory (2026-08)
 
 A profiling pass over the released engine. Every number below is a fixed-work
-A/B - same instance, same seed, same iteration budget, and byte-identical solver
-output before and after - so these are speed and memory measurements, not
-quality trades. Ledger and reproduce commands: [BENCH.md](BENCH.md).
+A/B: same instance, same seed, same iteration budget. Every row except the ATSP
+one produced byte-identical solver output before and after, so those are pure
+speed and memory measurements, not quality trades. Ledger and reproduce
+commands: [BENCH.md](BENCH.md).
 
 | path | what changed | measured |
 |---|---|---|
@@ -458,7 +459,7 @@ quality trades. Ledger and reproduce commands: [BENCH.md](BENCH.md).
 | PDPTW rollback journal | packed snapshots instead of one allocation per touched route | peak RSS **-91.4%** |
 | Parallel HGS / VRPTW workers | workers free their own workspaces | peak RSS **-85.2% / -80.2%** |
 | Fleet-capped Split DP | route-count columns bounded by proof instead of by n | **4.86x**, RSS -71.8% |
-| Large native ATSP | requested trial count honored; bounded top-k candidate build | about **37x** at `trials=1`, **2.12x** on the candidate build |
+| Large native ATSP | requested trial count honored; bounded top-k candidate build | about **37x** at `trials=1`, **2.12x** on the candidate build (output can move, see below) |
 | Python bindings | contiguous NumPy input passed without copies | **66.2x** conversion, peak RSS -60.3% |
 
 **The money objective is deliberately absent from that list.** The insertion win
@@ -470,10 +471,14 @@ benchmark above scores the same search either way. An Lseg-only variant for mone
 mode measured mean -1.97% across four interleaved replicates and was rejected
 under the same 2-3% margin every other lever answers to (`bench/EXPERIMENTS.md`, #13).
 
-One behavior change to know about: a large ATSP (above about n=2900) whose matrix
-has many arcs tying their row minimum used to multiply your requested trial count
-by 100 behind your back. It now runs the trials you asked for - far faster, and a
-shorter search unless you raise `trials` yourself.
+The ATSP row is the one place where output can change, in two ways. A large ATSP
+(above about n=2900) whose matrix has many arcs tying their row minimum used to
+multiply your requested trial count by 100 behind your back; it now runs the
+trials you asked for, which is far faster and a genuinely shorter search unless
+you raise `trials` yourself (at equal 100-trial work the old result reproduces
+exactly). And the bounded top-k candidate build breaks key ties differently: the
+n=3000 unique-key case is byte-identical, but across 15 real road runs quality
+moved 4 better / 7 equal / 4 worse, mean +0.049%, at mean 1038 -> 947 ms.
 
 
 ## Where it wins, where it loses
@@ -983,9 +988,10 @@ commiv), независимые валидаторы везде, где они �
 ## Скорость и память (2026-08)
 
 Проход по производительности уже выпущенного движка. Каждое число ниже - A/B при
-фиксированной работе: тот же инстанс, тот же сид, тот же бюджет итераций и
-побайтово совпадающий результат до и после. Это замеры скорости и памяти, а не
-размен качества. Журнал и команды воспроизведения: [BENCH.md](BENCH.md).
+фиксированной работе: тот же инстанс, тот же сид, тот же бюджет итераций. Все
+строки, кроме ATSP, дали побайтово совпадающий результат до и после - это чистые
+замеры скорости и памяти, а не размен качества. Журнал и команды воспроизведения:
+[BENCH.md](BENCH.md).
 
 | путь | что изменилось | замер |
 |---|---|---|
@@ -994,7 +1000,7 @@ commiv), независимые валидаторы везде, где они �
 | Журнал отката PDPTW | упакованные снимки вместо аллокации на каждый тронутый маршрут | пик RSS **-91.4%** |
 | Параллельные воркеры HGS / VRPTW | воркеры освобождают свою память сами | пик RSS **-85.2% / -80.2%** |
 | Split DP с ограниченным парком | число колонок ограничено доказуемой границей, а не n | **4.86x**, RSS -71.8% |
-| Большой нативный ATSP | запрошенное число попыток соблюдается; отбор кандидатов через ограниченный top-k | около **37x** при `trials=1`, **2.12x** на построении кандидатов |
+| Большой нативный ATSP | запрошенное число попыток соблюдается; отбор кандидатов через ограниченный top-k | около **37x** при `trials=1`, **2.12x** на построении кандидатов (результат может сдвинуться, см. ниже) |
 | Python-биндинги | непрерывный массив NumPy передаётся без копий | **66.2x** на конвертации, пик RSS -60.3% |
 
 **Денежной цели в этом списке нет, и это осознанно.** Выигрыш на вставке взялся
@@ -1006,10 +1012,15 @@ commiv), независимые валидаторы везде, где они �
 на четырёх чередующихся повторах и был отклонён по тому же порогу 2-3%, по
 которому судятся все остальные рычаги (`bench/EXPERIMENTS.md`, #13).
 
-Одно изменение поведения, о котором стоит знать: большой ATSP (примерно от n=2900)
-на матрице, где много дуг делят минимум строки, раньше молча умножал запрошенное
-число попыток на 100. Теперь он выполняет ровно столько попыток, сколько попросили:
-намного быстрее и с более коротким поиском, если не поднять `trials` вручную.
+Строка про ATSP - единственное место, где результат может измениться, и сразу по
+двум причинам. Большой ATSP (примерно от n=2900) на матрице, где много дуг делят
+минимум строки, раньше молча умножал запрошенное число попыток на 100; теперь он
+выполняет ровно столько, сколько попросили - намного быстрее и с честно более
+коротким поиском, если не поднять `trials` вручную (при равной работе в 100
+попыток старый результат воспроизводится точь-в-точь). А ограниченный top-k
+иначе разрешает равенства ключей: случай n=3000 с уникальными ключами совпадает
+побайтово, но на 15 реальных дорожных прогонах качество сдвинулось на 4 лучше /
+7 поровну / 4 хуже, в среднем +0.049%, при среднем времени 1038 -> 947 мс.
 
 
 ## commiv против остальных
