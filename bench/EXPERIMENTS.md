@@ -29,6 +29,7 @@ It rejects any fixed-seed result-signature disagreement before emitting JSON.
 | 10 | Proof-bounded capped Split columns | n route-count columns allocate ~382 MiB even when only K can win | `c272171` | `1450221` Split | old `0.40 / 0.33 / 0.34 / 0.35 / 0.34 / 0.38 / 0.34 / 0.34 / 0.35 / 0.33 / 0.36 / 0.34 / 0.33 / 0.33 / 0.33 / 0.37 / 0.33 / 0.33 / 0.33 / 0.33` s and RSS `489016 / 488900 / 488728 / 487440 / 487596 / 487368 / 488048 / 487368 / 488504 / 487968 / 488332 / 487436 / 488424 / 489080 / 488108 / 487536 / 489080 / 487540 / 487368 / 489016` KiB; new `0.07 / 0.07 / 0.07 / 0.07 / 0.07 / 0.07 / 0.09 / 0.07 / 0.07 / 0.07 / 0.07 / 0.07 / 0.07 / 0.07 / 0.07 / 0.07 / 0.07 / 0.07 / 0.07 / 0.07` s and RSS `137424 / 137424 / 137424 / 137424 / 137424 / 137428 / 137428 / 137424 / 137424 / 137424 / 137424 / 137424 / 137428 / 137424 / 137488 / 137428 / 137428 / 137488 / 137420 / 137420` KiB | 4.86x; RSS -71.8% | WIN | n=5000, K=500; all 40 cost/route/hash results identical; 100-case full-DP differential test |
 | 11 | Free parallel VRPTW SISR worker allocations | Worker arenas retain every improved incumbent result | `95d22a2` | `c272171` | old time `2.99 / 2.93 / 2.96 / 2.95 / 2.95 / 2.95 / 2.96 / 3.06 / 2.80 / 2.98`, RSS `56552 / 54664 / 54840 / 54704 / 54280 / 58412 / 58312 / 52888 / 54840 / 59700` KiB; new time `2.88 / 2.96 / 3.18 / 2.89 / 2.91 / 3.00 / 2.93 / 2.93 / 2.92 / 3.04`, RSS `10864 / 10752 / 10884 / 10628 / 10844 / 10900 / 10772 / 10900 / 10908 / 10948` KiB | RSS -80.2%; time +0.9% | WIN | All 20 route hashes/costs identical |
 | 12 | Free parallel CVRP SISR worker allocations | CVRP workers may have the same arena-retention problem | `01f2aaa` | `95d22a2` | old `1.59 / 1.69 / 1.54 / 1.59 / 1.60 / 1.59 / 1.57 / 1.52 / 1.51 / 1.50 / 1.51 / 1.54 / 1.60 / 1.51 / 1.62`, RSS median 13380 KiB; new `1.61 / 1.65 / 1.47 / 1.66 / 1.53 / 1.63 / 1.57 / 1.64 / 1.58 / 1.62 / 1.61 / 1.61 / 1.73 / 1.50 / 1.63`, RSS median 13396 KiB | -2.55%, no memory win | DEAD | Reverted by `60bfce2` |
+| 13 | Lseg-free money-mode pair insertion | Money mode still pays two Lseg concatenations per candidate gap pair that a running load/peak scalar replaces exactly | not landed | `66d73f5` | interleaved medians of 5, `lr2_10_1` money mode: old `3325 / 3329 / 3281 / 3182` ms, new `3254 / 3225 / 3198 / 3181` ms | -2.14% / -3.12% / -2.53% / -0.03%, mean of medians -1.97% | DEAD | Exact signature (23 veh, 65947.311 dist, 121213.662 dur, 45266.351 wait) on all runs. Below the 2-3% protocol margin and absent in one replicate, so the 70-line third copy of the insertion loop was not kept. The time algebra is NOT removable here: the objective prices the merged route duration, which scalar arrival labels cannot produce, so only the load half of experiment 7 transfers |
 
 ## Fixed artifacts
 
@@ -59,3 +60,27 @@ WSL restarts. The full-grid artifact supersedes 14 overlapping phase-1
 PDPTW/money rows only in derived summaries; both raw sources remain immutable.
 Configured time limits are soft rather than equal realized walls, especially
 for money-mode VROOM (maximum 174.4 s at a nominal 90 s).
+
+## Money mode and the ordinary-PDPTW speedup
+
+Experiment 7's 20.9%/22.7% win comes from replacing the time-window algebra
+with scalar arrival labels. Money mode (`PB_TIMEPEN=1`) is the one mode that
+cannot use it: the merged route duration those labels do not produce IS its
+objective, so `evalPairInsert` keeps the full Tws summary and the fast path is
+gated off. Verified consequence: money-mode results are bit-identical on
+`18b3a5f` (pre-branch main), on `66d73f5`, and with experiment 13 applied -
+23 vehicles / 65947.311 distance / 121213.662 duration / 45266.351 wait on
+`lr2_10_1` at 20k iterations, seed 1. The 352-cell money grid therefore scores
+the same search on main and on this branch.
+
+Money mode costs about 29% more wall than ordinary mode at equal iterations
+(3325 vs 2581 ms medians, same instance and budget). Much of that is not
+algebra overhead: money consolidates to 23 vehicles where ordinary uses 25, and
+longer routes mean more gap pairs per request.
+
+Reproduce either mode with the same harness:
+
+```bash
+taskset -c 2 python3 bench/run.py --runs 5 --iters 20000 --seed 1                      # ordinary
+taskset -c 2 python3 bench/run.py --runs 5 --iters 20000 --seed 1 --time-pen 1 --veh-pen 280000   # money
+```

@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Fixed-work PDPTW throughput harness used by bench/config.json.
 
+Defaults reproduce the frozen ordinary-PDPTW command in bench/config.json.
+--time-pen/--veh-pen switch the same fixed-work protocol to money mode.
+
 The solver owns its iteration budget (no wall timeout), so timing comparisons do
 not silently compare different amounts of search. Raw rows go to stderr and the
 last stdout line is one JSON object for the bench extractor.
@@ -23,6 +26,8 @@ def main() -> int:
     ap.add_argument("--iters", type=int, default=20_000)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--build", action="store_true")
+    ap.add_argument("--time-pen", type=int, default=0, help="PB_TIMEPEN; >0 selects money mode")
+    ap.add_argument("--veh-pen", type=int, default=0, help="PB_VEH_PEN; money mode fleet price")
     args = ap.parse_args()
     if args.runs < 1 or args.iters < 1:
         ap.error("--runs and --iters must be positive")
@@ -46,6 +51,8 @@ def main() -> int:
         PB_TIME_MS="0",
         PB_ITERS=str(args.iters),
         PB_SEED=str(args.seed),
+        PB_TIMEPEN=str(args.time_pen),
+        PB_VEH_PEN=str(args.veh_pen),
     )
     rows: list[list[str]] = []
     for run in range(args.runs):
@@ -80,6 +87,8 @@ def main() -> int:
         "wait": float(first[9]),
         "seed": args.seed,
         "iters": args.iters,
+        "time_pen": args.time_pen,
+        "veh_pen": args.veh_pen,
     }, sort_keys=True))
     return 0
 

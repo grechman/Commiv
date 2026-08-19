@@ -38,6 +38,7 @@ The command emits raw runs to stderr and one JSON object to stdout. See
 | Scalar VRPTW feasibility | 1.0% slower | `7cc58d4` |
 | Duplicate converged cleanup shortcut | only 1.66% mean; inconsistent at 2% margin | `fd16622` |
 | Freeing allocator for parallel CVRP SISR | 2.55% slower, no RSS win | `60bfce2` |
+| Lseg-free money-mode pair insertion | mean -1.97%, absent in one of four replicates | not landed |
 
 ## Final quality audit
 
@@ -49,6 +50,14 @@ VROOM +$1,266,042/+11.540%; the primary PDPTW comparison is Commiv 283/53/16
 when completion, fleet, and distance are respected. Nine of 15 new GH PyVRP
 rows failed exact schedule validation and are explicitly excluded rather than
 silently scored.
+
+## Money mode is not covered by the PDPTW speedup
+
+Experiment 7's win replaces the time-window algebra with scalar arrival labels.
+Money mode (`PB_TIMEPEN=1`) prices the merged route duration those labels cannot
+produce, so it keeps the full Tws summary and the fast path is gated off.
+Money-mode results are bit-identical on `18b3a5f`, on `66d73f5`, and under the
+rejected experiment 13. See `bench/EXPERIMENTS.md` for the measurement.
 
 ## Queue
 
