@@ -202,6 +202,37 @@ pub fn walkWithBreak(inst: pdp.PdpInstance, nodes: []const usize, brk: Break) Br
 
 const NO_ROUTE = std.math.maxInt(usize);
 
+fn blinkDraw(prng: *std.Random.DefaultPrng) f64 {
+    const rand = prng.next();
+    var rand_lz: u64 = @clz(rand);
+    if (rand_lz >= 12) {
+        rand_lz = 12;
+        while (true) {
+            const addl_rand_lz: u64 = @clz(prng.next());
+            rand_lz += addl_rand_lz;
+            if (addl_rand_lz != 64) break;
+            if (rand_lz >= 1022) {
+                rand_lz = 1022;
+                break;
+            }
+        }
+    }
+    const mantissa = rand & 0xFFFFFFFFFFFFF;
+    const exponent = (1022 - rand_lz) << 52;
+    return @bitCast(exponent | mantissa);
+}
+
+test "blinkDraw reproduces std.Random.float(f64) draw for draw" {
+    var a = std.Random.DefaultPrng.init(0x50_44_50_7457);
+    var b = std.Random.DefaultPrng.init(0x50_44_50_7457);
+    const rb = b.random();
+    for (0..2_000_000) |_| try std.testing.expectEqual(rb.float(f64), blinkDraw(&a));
+    var c = std.Random.DefaultPrng.init(0);
+    var d = std.Random.DefaultPrng.init(0);
+    const rd = d.random();
+    for (0..2_000_000) |_| try std.testing.expectEqual(rd.float(f64), blinkDraw(&c));
+}
+
 const Route = struct {
     items: std.ArrayList(usize) = .empty,
     dist: u64 = 0, // arc sum depot -> items -> depot (0 when empty)
@@ -251,6 +282,7 @@ const S = struct {
     // Driver break regime (null = off, every site below guarded on it).
     brk: ?Break,
     brk_scratch: []usize, // preallocated (dim + 2): candidate sequences for break-aware eval
+    prng: *std.Random.DefaultPrng,
     gran: []const usize,
     gk: usize,
     loc_route: []usize, // node -> route index (NO_ROUTE when removed)
@@ -280,7 +312,7 @@ const S = struct {
     // Granular pruning is safe there (see the gran gate in evalPairInsert).
     iter_start_complete: bool = false,
 
-    fn init(allocator: std.mem.Allocator, inst: pdp.PdpInstance, veh_penalty: u64, time_penalty: u64, max_route_dur: u64, veh_types: []const VehType, brk: ?Break, gran: []const usize, gk: usize) !S {
+    fn init(allocator: std.mem.Allocator, inst: pdp.PdpInstance, veh_penalty: u64, time_penalty: u64, max_route_dur: u64, veh_types: []const VehType, brk: ?Break, gran: []const usize, gk: usize, prng: *std.Random.DefaultPrng) !S {
         const dim = inst.dim();
         var windows_well_formed = true;
         for (inst.ready, inst.due) |ready, due| {
@@ -300,6 +332,7 @@ const S = struct {
             .brk = brk,
             .gran = gran,
             .gk = gk,
+            .prng = prng,
             .loc_route = try allocator.alloc(usize, dim),
             .loc_pos = try allocator.alloc(usize, dim),
             .brk_scratch = try allocator.alloc(usize, dim + 2),
@@ -625,14 +658,14 @@ const S = struct {
     /// freshened prefix/suffix arrays + an incremental middle segment.
     /// Time-warp and load violations are monotone under rightward extension,
     /// so an infeasible middle prunes the rest of its `b` loop.
-    fn evalPairInsert(s: *S, ri: usize, p: usize, q: usize, params: PdpSisrParams, rng: std.Random) ?Ins {
+    fn evalPairInsert(s: *S, ri: usize, p: usize, q: usize, params: PdpSisrParams) ?Ins {
         // Break and duration-priced/capped routes need the full Tws summary.
         // The common feasibility-only objective can use scalar earliest/latest
         // labels and signed loads, avoiding four segment merges per gap pair.
-        if (s.brk != null) return s.evalPairInsertBrk(ri, p, q, params, rng);
+        if (s.brk != null) return s.evalPairInsertBrk(ri, p, q, params);
         const p_dem = s.inst.demand_signed[p];
         if (s.windows_well_formed and s.time_penalty == 0 and s.max_route_dur == 0 and p_dem >= 0 and s.inst.demand_signed[q] == -p_dem)
-            return s.evalPairInsertFast(ri, p, q, params, rng);
+            return s.evalPairInsertFast(ri, p, q, params);
         const blink = params.blink;
         const inst = s.inst;
         const rcap: i64 = s.routeCap(ri);
@@ -663,7 +696,7 @@ const S = struct {
             var b = a;
             while (b <= L) : (b += 1) {
                 blk: {
-                    if (rng.float(f64) < blink) break :blk;
+                    if (blinkDraw(s.prng) < blink) break :blk;
                     const nxt: usize = if (b == L) 0 else it[b];
                     if (granular and (params.gran_gaps & 2) != 0 and b != a and b != L and
                         s.nbr_mark_p[last] != genp and s.nbr_mark_p[nxt] != genp) break :blk;
@@ -702,7 +735,7 @@ const S = struct {
     /// with scalar max/add/compare operations instead of two Tws and two Lseg
     /// concatenations. The scan order and blink draws exactly match the general
     /// evaluator above.
-    fn evalPairInsertFast(s: *S, ri: usize, p: usize, q: usize, params: PdpSisrParams, rng: std.Random) ?Ins {
+    fn evalPairInsertFast(s: *S, ri: usize, p: usize, q: usize, params: PdpSisrParams) ?Ins {
         const blink = params.blink;
         const inst = s.inst;
         const rcap = s.routeCap(ri);
@@ -741,7 +774,7 @@ const S = struct {
             var b = a;
             while (b <= L) : (b += 1) {
                 blk: {
-                    if (rng.float(f64) < blink) break :blk;
+                    if (blinkDraw(s.prng) < blink) break :blk;
                     const nxt: usize = if (b == L) 0 else it[b];
                     if (granular and (params.gran_gaps & 2) != 0 and b != a and b != L and
                         s.nbr_mark_p[last] != genp and s.nbr_mark_p[nxt] != genp) break :blk;
@@ -784,7 +817,7 @@ const S = struct {
     /// walkWithBreak over the materialized sequence, which also yields the
     /// duration the money objective prices. No granular gating (break routes
     /// are shift-bounded and short; correctness first for v1).
-    fn evalPairInsertBrk(s: *S, ri: usize, p: usize, q: usize, params: PdpSisrParams, rng: std.Random) ?Ins {
+    fn evalPairInsertBrk(s: *S, ri: usize, p: usize, q: usize, params: PdpSisrParams) ?Ins {
         const blink = params.blink;
         const inst = s.inst;
         const rcap: i64 = s.routeCap(ri);
@@ -808,7 +841,7 @@ const S = struct {
             var b = a;
             while (b <= L) : (b += 1) {
                 blk: {
-                    if (rng.float(f64) < blink) break :blk;
+                    if (blinkDraw(s.prng) < blink) break :blk;
                     const nxt: usize = if (b == L) 0 else it[b];
                     const f1 = Tws.merge(m_t, @intCast(inst.d(last, q)), q_t);
                     const f2 = Tws.merge(f1, @intCast(inst.d(q, nxt)), r.suf_t.items[b]);
@@ -1016,10 +1049,10 @@ const S = struct {
                 if (!try s.removeStringPaired(r1, s.loc_pos[p1], 1)) break :trial;
                 if (!try s.removeStringPaired(r2, s.loc_pos[p2], 1)) break :trial;
                 try s.freshen(r2);
-                const ins1 = s.evalPairInsert(r2, p1, q1, params, rng) orelse break :trial;
+                const ins1 = s.evalPairInsert(r2, p1, q1, params) orelse break :trial;
                 try s.insertPair(r2, p1, q1, ins1.a, ins1.b);
                 try s.freshen(r1);
-                const ins2 = s.evalPairInsert(r1, p2, q2, params, rng) orelse break :trial;
+                const ins2 = s.evalPairInsert(r1, p2, q2, params) orelse break :trial;
                 try s.insertPair(r1, p2, q2, ins2.a, ins2.b);
                 if (s.cost < saved_cost) {
                     s.removed.clearRetainingCapacity();
@@ -1130,7 +1163,7 @@ const S = struct {
                     if (s.cand_mark.items[ri] == s.generation) continue;
                     s.cand_mark.items[ri] = s.generation;
                     try s.freshen(ri);
-                    const ins = s.evalPairInsert(ri, p, q, params, rng) orelse continue;
+                    const ins = s.evalPairInsert(ri, p, q, params) orelse continue;
                     if (best_ri == NO_ROUTE or ins.delta < best_ins.delta) {
                         best_ri = ri;
                         best_ins = ins;
@@ -1335,7 +1368,9 @@ fn solvePdptwSisrFromLocked(allocator: std.mem.Allocator, inst: pdp.PdpInstance,
     const gran = try buildNeighbors(allocator, inst, gk, params.nbr_key);
     defer allocator.free(gran);
 
-    var s = try S.init(allocator, inst, params.veh_penalty, params.time_penalty, params.max_route_dur, params.veh_types, params.brk, gran, gk);
+    var prng = std.Random.DefaultPrng.init(params.seed ^ 0x50_44_50_7457);
+    const rng = prng.random();
+    var s = try S.init(allocator, inst, params.veh_penalty, params.time_penalty, params.max_route_dur, params.veh_types, params.brk, gran, gk, &prng);
     defer s.deinit();
 
     for (seed_sol.items, 0..) |r, wi| {
@@ -1390,9 +1425,6 @@ fn solvePdptwSisrFromLocked(allocator: std.mem.Allocator, inst: pdp.PdpInstance,
     var best: ?pdp.PdpResult = if (s.n_unassigned == 0 and s.withinDurCap() and s.brkAllOk()) try s.toResult(allocator) else null;
     errdefer if (best) |*b| b.deinit();
     var best_cost = s.cost;
-
-    var prng = std.Random.DefaultPrng.init(params.seed ^ 0x50_44_50_7457);
-    const rng = prng.random();
 
     // Request-bank penalty: dominates veh_penalty, which dominates distance.
     const UNASSIGNED_PEN: u64 = 1_000_000_000;
