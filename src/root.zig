@@ -88,7 +88,14 @@ pub const validatePdptw = pdptw.validate;
 pub const validatePdptwTyped = pdptw.validateTyped; // per-route vehicle-type capacities
 pub const validatePdptwWithBreak = pdptw.validateWithBreak; // driver-break contract oracle
 pub const solvePdptwSisr = pdptw_sisr.solvePdptwSisr; // flagship SISR engine for PDPTW
+pub const solvePdptwSisrFleetMin = pdptw_sisr.solvePdptwSisrFleetMin;
+pub const solvePdptwSisrFleetMinParallel = pdptw_sisr.solvePdptwSisrFleetMinParallel;
+pub const solvePdptwSisrPinned = pdptw_sisr.solvePdptwSisrPinned;
+pub const solvePdptwSisrDispatch = pdptw_sisr.solvePdptwSisrDispatch;
 pub const PdpSisrParams = pdptw_sisr.PdpSisrParams;
+pub const PdpVehType = pdptw_sisr.VehType;
+pub const PdpBreak = pdptw_sisr.Break;
+pub const pdpMaxVehTypes = pdptw_sisr.MAX_VEH_TYPES;
 
 // ---- Asymmetry analysis -----------------------------------------------------
 pub const conservativeness = asymmetric.conservativeness;

@@ -302,7 +302,7 @@ fn solvePdptw(arena: std.mem.Allocator, solver_allocator: std.mem.Allocator, req
         return respondError(req, .unprocessable_entity, "capacity must be > 0");
     if (r.ready[0] != 0 or r.service[0] != 0)
         return respondError(req, .unprocessable_entity, "depot slots ready[0] and service[0] must be 0");
-    if (r.vehicle_types.len > commiv.internal.pdptw_sisr.MAX_VEH_TYPES)
+    if (r.vehicle_types.len > commiv.pdpMaxVehTypes)
         return respondError(req, .unprocessable_entity, "vehicle_types supports at most 8 types");
     if (r.vehicle_types.len != 0 and (r.fleet_min or r.max_vehicles != 0))
         return respondError(req, .unprocessable_entity, "vehicle_types is incompatible with fleet_min/max_vehicles; bound the fleet with per-type counts");
@@ -313,7 +313,7 @@ fn solvePdptw(arena: std.mem.Allocator, solver_allocator: std.mem.Allocator, req
     if (r.driver_break.len == 3 and r.driver_break[1] > r.driver_break[2])
         return respondError(req, .unprocessable_entity, "driver_break earliest must be <= latest");
     // Typed fleet: effective uniform capacity for the shape checks = largest type.
-    var vt: [commiv.internal.pdptw_sisr.MAX_VEH_TYPES]commiv.internal.pdptw_sisr.VehType = undefined;
+    var vt: [commiv.pdpMaxVehTypes]commiv.PdpVehType = undefined;
     var eff_cap: u32 = r.capacity;
     if (r.vehicle_types.len != 0) {
         eff_cap = 0;
@@ -385,10 +385,10 @@ fn solvePdptw(arena: std.mem.Allocator, solver_allocator: std.mem.Allocator, req
 
     var result = blk: {
         if (r.fleet_min)
-            break :blk commiv.internal.pdptw_sisr.solvePdptwSisrFleetMin(solver_allocator, inst, params, budget) catch |err|
+            break :blk commiv.solvePdptwSisrFleetMin(solver_allocator, inst, params, budget) catch |err|
                 return respondSolverError(req, err);
         if (r.max_vehicles != 0)
-            break :blk commiv.internal.pdptw_sisr.solvePdptwSisrPinned(solver_allocator, inst, params, budget, @intCast(r.max_vehicles)) catch |err|
+            break :blk commiv.solvePdptwSisrPinned(solver_allocator, inst, params, budget, @intCast(r.max_vehicles)) catch |err|
                 return respondSolverError(req, err);
         break :blk commiv.solvePdptwSisr(solver_allocator, inst, params) catch |err|
             return respondSolverError(req, err);
@@ -547,7 +547,7 @@ fn solvePdptwDispatch(arena: std.mem.Allocator, solver_allocator: std.mem.Alloca
     } else if (r.driver_break.len != 0 and r.driver_break.len != 3)
         return respondError(req, .unprocessable_entity, "driver_break must be [duration, earliest, latest]");
 
-    var result = commiv.internal.pdptw_sisr.solvePdptwSisrDispatch(solver_allocator, inst, params, current, locked) catch |err|
+    var result = commiv.solvePdptwSisrDispatch(solver_allocator, inst, params, current, locked) catch |err|
         return respondSolverError(req, err);
     defer result.deinit();
 
