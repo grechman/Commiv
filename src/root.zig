@@ -23,6 +23,8 @@ const vrptw = internal.vrptw;
 const pdptw = internal.pdptw;
 const pdptw_sisr = internal.pdptw_sisr;
 
+pub const version = @import("version.zig").string;
+
 // ---- Parsing ----------------------------------------------------------------
 pub const parseTsplib = tsplib.parse;
 pub const ParseOptions = tsplib.ParseOptions;
