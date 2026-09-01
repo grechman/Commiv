@@ -259,40 +259,19 @@ export fn commiv_solve_vrptw(
     return COMMIV_OK;
 }
 
-/// Argument validation + coverage/pairing pass for commiv_solve_pdptw. Fills the
-/// caller-provided `seen` scratch (len == dim). Returns 0 when the instance shape
-/// is usable, a COMMIV_ERR_* otherwise.
-fn checkPdpArgs(
-    n_pairs: usize,
-    dim: usize,
-    pickup_node: [*]const u32,
-    delivery_node: [*]const u32,
-    demand: [*]const u32,
-    capacity: u32,
-    ready: [*]const u32,
-    service: [*]const u32,
-    seen: []bool,
-) c_int {
-    if (n_pairs == 0 or capacity == 0) return COMMIV_ERR_INVALID_ARGUMENT;
-    // Time-window depot sanity (due[0] = horizon, any value allowed).
-    if (ready[0] != 0 or service[0] != 0) return COMMIV_ERR_INVALID_ARGUMENT;
+const PdpArgError = pdptw.PairingError || error{InvalidArgument};
 
-    @memset(seen, false);
-    for (0..n_pairs) |i| {
-        const p = pickup_node[i];
-        const q = delivery_node[i];
-        if (p == 0 or q == 0 or p >= dim or q >= dim or p == q) return COMMIV_ERR_INVALID_ARGUMENT;
-        if (seen[p] or seen[q]) return COMMIV_ERR_INVALID_ARGUMENT; // duplicate use of a node
-        seen[p] = true;
-        seen[q] = true;
-        // A request whose load exceeds capacity can never be packed: fast-fail.
-        if (demand[i] > capacity) return COMMIV_ERR_INFEASIBLE;
-    }
-    // Coverage: every node 1..dim-1 must be named exactly once.
-    for (seen[1..dim]) |s| {
-        if (!s) return COMMIV_ERR_INVALID_ARGUMENT;
-    }
-    return COMMIV_OK;
+fn pdpPairing(n_pairs: usize, dim: usize, pickup_node: [*]const u32, delivery_node: [*]const u32, demand: [*]const u32, capacity: u32, ready: [*]const u32, service: [*]const u32) PdpArgError!pdptw.Pairing {
+    if (ready[0] != 0 or service[0] != 0) return error.InvalidArgument;
+    return pdptw.buildPairing(gpa, dim, pickup_node[0..n_pairs], delivery_node[0..n_pairs], demand[0..n_pairs], capacity);
+}
+
+fn mapPairingError(err: PdpArgError) c_int {
+    return switch (err) {
+        error.DemandExceedsCapacity => COMMIV_ERR_INFEASIBLE,
+        error.OutOfMemory => COMMIV_ERR_OUT_OF_MEMORY,
+        error.InvalidArgument, error.PairIdOutOfRange, error.PairNodeReused, error.NodeUncovered => COMMIV_ERR_INVALID_ARGUMENT,
+    };
 }
 
 /// Directed PDPTW (pickup-and-delivery with time windows), SISR solver.
@@ -328,41 +307,17 @@ export fn commiv_solve_pdptw(
     const dim = 2 * n_pairs + 1;
     _ = std.math.mul(usize, dim, dim) catch return COMMIV_ERR_INVALID_ARGUMENT;
 
-    // Synthesized instance arrays + the validation scratch, all length dim.
-    const seen = gpa.alloc(bool, dim) catch return COMMIV_ERR_OUT_OF_MEMORY;
-    defer gpa.free(seen);
-    const rc = checkPdpArgs(n_pairs, dim, pick, drop, dem, capacity, rdy, srv, seen);
-    if (rc != COMMIV_OK) return rc;
-
-    const pair_of = gpa.alloc(usize, dim) catch return COMMIV_ERR_OUT_OF_MEMORY;
-    defer gpa.free(pair_of);
-    const is_pickup = gpa.alloc(bool, dim) catch return COMMIV_ERR_OUT_OF_MEMORY;
-    defer gpa.free(is_pickup);
-    const demand_signed = gpa.alloc(i64, dim) catch return COMMIV_ERR_OUT_OF_MEMORY;
-    defer gpa.free(demand_signed);
-
-    pair_of[0] = 0;
-    is_pickup[0] = false;
-    demand_signed[0] = 0;
-    for (0..n_pairs) |i| {
-        const p = pick[i];
-        const q = drop[i];
-        pair_of[p] = q;
-        pair_of[q] = p;
-        is_pickup[p] = true;
-        is_pickup[q] = false;
-        demand_signed[p] = @as(i64, dem[i]);
-        demand_signed[q] = -@as(i64, dem[i]);
-    }
+    var pairing = pdpPairing(n_pairs, dim, pick, drop, dem, capacity, rdy, srv) catch |err| return mapPairingError(err);
+    defer pairing.deinit();
 
     const o = resolveOptions(options);
     const inst = pdptw.PdpInstance{
         .n_pairs = n_pairs,
         .matrix = m[0 .. dim * dim],
         .capacity = @intCast(capacity),
-        .pair_of = pair_of,
-        .is_pickup = is_pickup,
-        .demand_signed = demand_signed,
+        .pair_of = pairing.pair_of,
+        .is_pickup = pairing.is_pickup,
+        .demand_signed = pairing.demand_signed,
         .ready = rdy[0..dim],
         .due = du[0..dim],
         .service = srv[0..dim],
@@ -456,41 +411,16 @@ export fn commiv_solve_pdptw_typed(
     const dim = 2 * n_pairs + 1;
     _ = std.math.mul(usize, dim, dim) catch return COMMIV_ERR_INVALID_ARGUMENT;
 
-    const seen = gpa.alloc(bool, dim) catch return COMMIV_ERR_OUT_OF_MEMORY;
-    defer gpa.free(seen);
-    // maxcap plays the uniform capacity's role in the shape checks (a demand
-    // no type can carry fast-fails as INFEASIBLE, same as the uniform door).
-    const rc = checkPdpArgs(n_pairs, dim, pick, drop, dem, maxcap, rdy, srv, seen);
-    if (rc != COMMIV_OK) return rc;
-
-    const pair_of = gpa.alloc(usize, dim) catch return COMMIV_ERR_OUT_OF_MEMORY;
-    defer gpa.free(pair_of);
-    const is_pickup = gpa.alloc(bool, dim) catch return COMMIV_ERR_OUT_OF_MEMORY;
-    defer gpa.free(is_pickup);
-    const demand_signed = gpa.alloc(i64, dim) catch return COMMIV_ERR_OUT_OF_MEMORY;
-    defer gpa.free(demand_signed);
-
-    pair_of[0] = 0;
-    is_pickup[0] = false;
-    demand_signed[0] = 0;
-    for (0..n_pairs) |i| {
-        const p = pick[i];
-        const q = drop[i];
-        pair_of[p] = q;
-        pair_of[q] = p;
-        is_pickup[p] = true;
-        is_pickup[q] = false;
-        demand_signed[p] = @as(i64, dem[i]);
-        demand_signed[q] = -@as(i64, dem[i]);
-    }
+    var pairing = pdpPairing(n_pairs, dim, pick, drop, dem, maxcap, rdy, srv) catch |err| return mapPairingError(err);
+    defer pairing.deinit();
 
     const inst = pdptw.PdpInstance{
         .n_pairs = n_pairs,
         .matrix = m[0 .. dim * dim],
         .capacity = @intCast(maxcap),
-        .pair_of = pair_of,
-        .is_pickup = is_pickup,
-        .demand_signed = demand_signed,
+        .pair_of = pairing.pair_of,
+        .is_pickup = pairing.is_pickup,
+        .demand_signed = pairing.demand_signed,
         .ready = rdy[0..dim],
         .due = du[0..dim],
         .service = srv[0..dim],
@@ -517,7 +447,7 @@ export fn commiv_solve_pdptw_typed(
 
 /// Validate the current-plan + locked-prefix contract for
 /// commiv_solve_pdptw_dispatch. dim/pair_of/is_pickup describe the instance
-/// (already validated by checkPdpArgs). `cur_offsets` has n_routes + 1
+/// (already validated by pdpPairing). `cur_offsets` has n_routes + 1
 /// entries (route r = cur_nodes[cur_offsets[r]..cur_offsets[r+1]]), `locked`
 /// has n_routes entries. `seen` is caller scratch, length dim. Only called
 /// when n_routes > 0 (the n_routes == 0 cold-start case is trivially valid
@@ -622,37 +552,14 @@ export fn commiv_solve_pdptw_dispatch(
     const dim = 2 * n_pairs + 1;
     _ = std.math.mul(usize, dim, dim) catch return COMMIV_ERR_INVALID_ARGUMENT;
 
-    const seen = gpa.alloc(bool, dim) catch return COMMIV_ERR_OUT_OF_MEMORY;
-    defer gpa.free(seen);
-    const rc = checkPdpArgs(n_pairs, dim, pick, drop, dem, capacity, rdy, srv, seen);
-    if (rc != COMMIV_OK) return rc;
-
-    const pair_of = gpa.alloc(usize, dim) catch return COMMIV_ERR_OUT_OF_MEMORY;
-    defer gpa.free(pair_of);
-    const is_pickup = gpa.alloc(bool, dim) catch return COMMIV_ERR_OUT_OF_MEMORY;
-    defer gpa.free(is_pickup);
-    const demand_signed = gpa.alloc(i64, dim) catch return COMMIV_ERR_OUT_OF_MEMORY;
-    defer gpa.free(demand_signed);
-
-    pair_of[0] = 0;
-    is_pickup[0] = false;
-    demand_signed[0] = 0;
-    for (0..n_pairs) |i| {
-        const p = pick[i];
-        const q = drop[i];
-        pair_of[p] = q;
-        pair_of[q] = p;
-        is_pickup[p] = true;
-        is_pickup[q] = false;
-        demand_signed[p] = @as(i64, dem[i]);
-        demand_signed[q] = -@as(i64, dem[i]);
-    }
+    var pairing = pdpPairing(n_pairs, dim, pick, drop, dem, capacity, rdy, srv) catch |err| return mapPairingError(err);
+    defer pairing.deinit();
 
     // Dispatch-specific: validate the current plan + the locked-prefix contract.
     if (n_routes > 0) {
         const plan_seen = gpa.alloc(bool, dim) catch return COMMIV_ERR_OUT_OF_MEMORY;
         defer gpa.free(plan_seen);
-        const rc2 = checkDispatchArgs(dim, pair_of, is_pickup, n_routes, cur_offsets.?, cur_nodes, locked.?, plan_seen);
+        const rc2 = checkDispatchArgs(dim, pairing.pair_of, pairing.is_pickup, n_routes, cur_offsets.?, cur_nodes, locked.?, plan_seen);
         if (rc2 != COMMIV_OK) return rc2;
     }
 
@@ -661,9 +568,9 @@ export fn commiv_solve_pdptw_dispatch(
         .n_pairs = n_pairs,
         .matrix = m[0 .. dim * dim],
         .capacity = @intCast(capacity),
-        .pair_of = pair_of,
-        .is_pickup = is_pickup,
-        .demand_signed = demand_signed,
+        .pair_of = pairing.pair_of,
+        .is_pickup = pairing.is_pickup,
+        .demand_signed = pairing.demand_signed,
         .ready = rdy[0..dim],
         .due = du[0..dim],
         .service = srv[0..dim],

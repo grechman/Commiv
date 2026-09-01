@@ -32,6 +32,71 @@ pub const PdpInstance = struct {
     }
 };
 
+pub const PairingError = error{ PairIdOutOfRange, PairNodeReused, DemandExceedsCapacity, NodeUncovered, OutOfMemory };
+
+pub const Pairing = struct {
+    allocator: std.mem.Allocator,
+    pair_of: []usize,
+    is_pickup: []bool,
+    demand_signed: []i64,
+
+    pub fn deinit(self: *Pairing) void {
+        self.allocator.free(self.pair_of);
+        self.allocator.free(self.is_pickup);
+        self.allocator.free(self.demand_signed);
+        self.* = undefined;
+    }
+};
+
+pub fn buildPairing(allocator: std.mem.Allocator, dim: usize, pickups: []const u32, deliveries: []const u32, demand: []const u32, capacity: u32) PairingError!Pairing {
+    const pair_of = try allocator.alloc(usize, dim);
+    errdefer allocator.free(pair_of);
+    const is_pickup = try allocator.alloc(bool, dim);
+    errdefer allocator.free(is_pickup);
+    const demand_signed = try allocator.alloc(i64, dim);
+    errdefer allocator.free(demand_signed);
+    const seen = try allocator.alloc(bool, dim);
+    defer allocator.free(seen);
+    @memset(seen, false);
+    pair_of[0] = 0;
+    is_pickup[0] = false;
+    demand_signed[0] = 0;
+    for (pickups, deliveries, demand) |pu32, qu32, dm| {
+        const pu: usize = pu32;
+        const qu: usize = qu32;
+        if (pu == 0 or qu == 0 or pu >= dim or qu >= dim or pu == qu) return error.PairIdOutOfRange;
+        if (seen[pu] or seen[qu]) return error.PairNodeReused;
+        if (dm > capacity) return error.DemandExceedsCapacity;
+        seen[pu] = true;
+        seen[qu] = true;
+        pair_of[pu] = qu;
+        pair_of[qu] = pu;
+        is_pickup[pu] = true;
+        is_pickup[qu] = false;
+        demand_signed[pu] = @as(i64, dm);
+        demand_signed[qu] = -@as(i64, dm);
+    }
+    for (seen[1..dim]) |s| {
+        if (!s) return error.NodeUncovered;
+    }
+    return .{ .allocator = allocator, .pair_of = pair_of, .is_pickup = is_pickup, .demand_signed = demand_signed };
+}
+
+test "buildPairing: accepts a valid pairing and reports each violation in scan order" {
+    const allocator = std.testing.allocator;
+    var ok = try buildPairing(allocator, 5, &.{ 1, 2 }, &.{ 3, 4 }, &.{ 4, 5 }, 10);
+    defer ok.deinit();
+    try std.testing.expectEqualSlices(usize, &.{ 0, 3, 4, 1, 2 }, ok.pair_of);
+    try std.testing.expectEqualSlices(bool, &.{ false, true, true, false, false }, ok.is_pickup);
+    try std.testing.expectEqualSlices(i64, &.{ 0, 4, 5, -4, -5 }, ok.demand_signed);
+    try std.testing.expectError(error.PairIdOutOfRange, buildPairing(allocator, 5, &.{ 1, 2 }, &.{ 1, 4 }, &.{ 4, 5 }, 10));
+    try std.testing.expectError(error.PairIdOutOfRange, buildPairing(allocator, 5, &.{ 1, 2 }, &.{ 3, 5 }, &.{ 4, 5 }, 10));
+    try std.testing.expectError(error.PairNodeReused, buildPairing(allocator, 5, &.{ 1, 2 }, &.{ 3, 3 }, &.{ 4, 5 }, 10));
+    try std.testing.expectError(error.DemandExceedsCapacity, buildPairing(allocator, 5, &.{ 1, 2 }, &.{ 3, 4 }, &.{ 11, 5 }, 10));
+    try std.testing.expectError(error.DemandExceedsCapacity, buildPairing(allocator, 5, &.{ 1, 2 }, &.{ 3, 3 }, &.{ 11, 5 }, 10));
+    try std.testing.expectError(error.NodeUncovered, buildPairing(allocator, 7, &.{ 1, 2 }, &.{ 3, 4 }, &.{ 4, 5 }, 10));
+}
+
 /// Independent feasibility + cost checker for a whole solution.
 /// Returns the recomputed total directed distance, or null on ANY violation
 /// (membership / duplicate / unvisited / pairing / precedence / capacity / TW).

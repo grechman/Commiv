@@ -324,45 +324,15 @@ fn solvePdptw(arena: std.mem.Allocator, solver_allocator: std.mem.Allocator, req
         }
     }
 
-    // Synthesize the pairing arrays the engine consumes and validate coverage:
-    // every node 1..dim-1 must be named exactly once across pickups/deliveries.
-    const pair_of = arena.alloc(usize, dim) catch return respondError(req, .internal_server_error, "out of memory");
-    const is_pickup = arena.alloc(bool, dim) catch return respondError(req, .internal_server_error, "out of memory");
-    const demand_signed = arena.alloc(i64, dim) catch return respondError(req, .internal_server_error, "out of memory");
-    const seen = arena.alloc(bool, dim) catch return respondError(req, .internal_server_error, "out of memory");
-    @memset(seen, false);
-    pair_of[0] = 0;
-    is_pickup[0] = false;
-    demand_signed[0] = 0;
-    for (0..n_pairs) |i| {
-        const pu: usize = r.pickups[i];
-        const qu: usize = r.deliveries[i];
-        if (pu == 0 or qu == 0 or pu >= dim or qu >= dim or pu == qu)
-            return respondError(req, .unprocessable_entity, "pickup/delivery ids must be distinct and in 1..dim-1");
-        if (seen[pu] or seen[qu])
-            return respondError(req, .unprocessable_entity, "each node may appear only once across pickups/deliveries");
-        if (r.demand[i] > eff_cap)
-            return respondError(req, .unprocessable_entity, "a request's demand exceeds capacity (infeasible)");
-        seen[pu] = true;
-        seen[qu] = true;
-        pair_of[pu] = qu;
-        pair_of[qu] = pu;
-        is_pickup[pu] = true;
-        is_pickup[qu] = false;
-        demand_signed[pu] = @as(i64, r.demand[i]);
-        demand_signed[qu] = -@as(i64, r.demand[i]);
-    }
-    for (seen[1..dim]) |s| {
-        if (!s) return respondError(req, .unprocessable_entity, "every node 1..dim-1 must be named exactly once across pickups/deliveries");
-    }
+    const pairing = pdpPairing(arena, req, dim, r.pickups, r.deliveries, r.demand, eff_cap) orelse return;
 
     const inst = commiv.PdpInstance{
         .n_pairs = n_pairs,
         .matrix = flat,
         .capacity = @intCast(eff_cap),
-        .pair_of = pair_of,
-        .is_pickup = is_pickup,
-        .demand_signed = demand_signed,
+        .pair_of = pairing.pair_of,
+        .is_pickup = pairing.is_pickup,
+        .demand_signed = pairing.demand_signed,
         .ready = r.ready,
         .due = r.due,
         .service = r.service,
@@ -452,37 +422,7 @@ fn solvePdptwDispatch(arena: std.mem.Allocator, solver_allocator: std.mem.Alloca
     if (r.locked.len != r.current.len)
         return respondError(req, .unprocessable_entity, "locked must have exactly one entry per route in current");
 
-    // Synthesize the pairing arrays the engine consumes and validate coverage
-    // (identical to /solve/pdptw): every node 1..dim-1 named exactly once.
-    const pair_of = arena.alloc(usize, dim) catch return respondError(req, .internal_server_error, "out of memory");
-    const is_pickup = arena.alloc(bool, dim) catch return respondError(req, .internal_server_error, "out of memory");
-    const demand_signed = arena.alloc(i64, dim) catch return respondError(req, .internal_server_error, "out of memory");
-    const seen = arena.alloc(bool, dim) catch return respondError(req, .internal_server_error, "out of memory");
-    @memset(seen, false);
-    pair_of[0] = 0;
-    is_pickup[0] = false;
-    demand_signed[0] = 0;
-    for (0..n_pairs) |i| {
-        const pu: usize = r.pickups[i];
-        const qu: usize = r.deliveries[i];
-        if (pu == 0 or qu == 0 or pu >= dim or qu >= dim or pu == qu)
-            return respondError(req, .unprocessable_entity, "pickup/delivery ids must be distinct and in 1..dim-1");
-        if (seen[pu] or seen[qu])
-            return respondError(req, .unprocessable_entity, "each node may appear only once across pickups/deliveries");
-        if (r.demand[i] > r.capacity)
-            return respondError(req, .unprocessable_entity, "a request's demand exceeds capacity (infeasible)");
-        seen[pu] = true;
-        seen[qu] = true;
-        pair_of[pu] = qu;
-        pair_of[qu] = pu;
-        is_pickup[pu] = true;
-        is_pickup[qu] = false;
-        demand_signed[pu] = @as(i64, r.demand[i]);
-        demand_signed[qu] = -@as(i64, r.demand[i]);
-    }
-    for (seen[1..dim]) |s| {
-        if (!s) return respondError(req, .unprocessable_entity, "every node 1..dim-1 must be named exactly once across pickups/deliveries");
-    }
+    const pairing = pdpPairing(arena, req, dim, r.pickups, r.deliveries, r.demand, r.capacity) orelse return;
 
     // Validate the current plan + the locked-prefix contract, then convert
     // node ids (u32 over the wire) into the usize slices the engine wants.
@@ -508,10 +448,10 @@ fn solvePdptwDispatch(arena: std.mem.Allocator, solver_allocator: std.mem.Alloca
     for (current, 0..) |route, i| {
         const lk = locked[i];
         for (route[0..lk]) |c| {
-            if (is_pickup[c]) continue;
+            if (pairing.is_pickup[c]) continue;
             var found = false;
             for (route[0..lk]) |x| {
-                if (x == pair_of[c]) {
+                if (x == pairing.pair_of[c]) {
                     found = true;
                     break;
                 }
@@ -524,9 +464,9 @@ fn solvePdptwDispatch(arena: std.mem.Allocator, solver_allocator: std.mem.Alloca
         .n_pairs = n_pairs,
         .matrix = flat,
         .capacity = @intCast(r.capacity),
-        .pair_of = pair_of,
-        .is_pickup = is_pickup,
-        .demand_signed = demand_signed,
+        .pair_of = pairing.pair_of,
+        .is_pickup = pairing.is_pickup,
+        .demand_signed = pairing.demand_signed,
         .ready = r.ready,
         .due = r.due,
         .service = r.service,
@@ -740,33 +680,24 @@ fn solveCompatVroom(arena: std.mem.Allocator, solver_allocator: std.mem.Allocato
         if (dim != 2 * n_pairs + 1)
             return respondVroomError(req, .unprocessable_entity, "v1 shipments: matrix dim must equal 2*n_pairs+1 (depot + one row per pickup and delivery; no unused rows)");
 
-        const pair_of = arena.alloc(usize, dim) catch return respondVroomError(req, .internal_server_error, "out of memory");
-        const is_pickup = arena.alloc(bool, dim) catch return respondVroomError(req, .internal_server_error, "out of memory");
-        const demand_signed = arena.alloc(i64, dim) catch return respondVroomError(req, .internal_server_error, "out of memory");
-        const seen = arena.alloc(bool, dim) catch return respondVroomError(req, .internal_server_error, "out of memory");
-        @memset(seen, false);
-        pair_of[0] = 0;
-        is_pickup[0] = false;
-        demand_signed[0] = 0;
-
+        const pk = arena.alloc(u32, n_pairs) catch return respondVroomError(req, .internal_server_error, "out of memory");
+        const dl = arena.alloc(u32, n_pairs) catch return respondVroomError(req, .internal_server_error, "out of memory");
+        const am = arena.alloc(u32, n_pairs) catch return respondVroomError(req, .internal_server_error, "out of memory");
+        for (vr.shipments, 0..) |sh, i| {
+            pk[i] = sh.pickup.location_index;
+            dl[i] = sh.delivery.location_index;
+            am[i] = if (sh.amount.len > 0) sh.amount[0] else 0;
+        }
+        const pairing = commiv.buildPdpPairing(arena, dim, pk, dl, am, cap) catch |err| return switch (err) {
+            error.PairIdOutOfRange => respondVroomError(req, .unprocessable_entity, "pickup/delivery location_index must be distinct and in 1..dim-1"),
+            error.PairNodeReused => respondVroomError(req, .unprocessable_entity, "each location may appear at most once across pickups/deliveries"),
+            error.DemandExceedsCapacity => respondVroomError(req, .unprocessable_entity, "a shipment's amount exceeds capacity (infeasible)"),
+            error.NodeUncovered => respondVroomError(req, .unprocessable_entity, "the matrix must cover exactly depot + every pickup/delivery node once"),
+            error.OutOfMemory => respondVroomError(req, .internal_server_error, "out of memory"),
+        };
         for (vr.shipments) |sh| {
             const p: usize = sh.pickup.location_index;
             const q: usize = sh.delivery.location_index;
-            if (p == 0 or q == 0 or p >= dim or q >= dim or p == q)
-                return respondVroomError(req, .unprocessable_entity, "pickup/delivery location_index must be distinct and in 1..dim-1");
-            if (seen[p] or seen[q])
-                return respondVroomError(req, .unprocessable_entity, "each location may appear at most once across pickups/deliveries");
-            const amt: u32 = if (sh.amount.len > 0) sh.amount[0] else 0;
-            if (amt > cap)
-                return respondVroomError(req, .unprocessable_entity, "a shipment's amount exceeds capacity (infeasible)");
-            seen[p] = true;
-            seen[q] = true;
-            pair_of[p] = q;
-            pair_of[q] = p;
-            is_pickup[p] = true;
-            is_pickup[q] = false;
-            demand_signed[p] = @as(i64, amt);
-            demand_signed[q] = -@as(i64, amt);
             const pw = taskWindow(sh.pickup.time_windows, horizon);
             const dw = taskWindow(sh.delivery.time_windows, horizon);
             ready[p] = pw[0];
@@ -780,17 +711,14 @@ fn solveCompatVroom(arena: std.mem.Allocator, solver_allocator: std.mem.Allocato
             node_kind[p] = .pickup;
             node_kind[q] = .delivery;
         }
-        for (seen[1..dim]) |s| {
-            if (!s) return respondVroomError(req, .unprocessable_entity, "the matrix must cover exactly depot + every pickup/delivery node once");
-        }
 
         const inst = commiv.PdpInstance{
             .n_pairs = n_pairs,
             .matrix = flat,
             .capacity = @intCast(cap),
-            .pair_of = pair_of,
-            .is_pickup = is_pickup,
-            .demand_signed = demand_signed,
+            .pair_of = pairing.pair_of,
+            .is_pickup = pairing.is_pickup,
+            .demand_signed = pairing.demand_signed,
             .ready = ready,
             .due = due,
             .service = service,
@@ -1022,6 +950,19 @@ fn respondVroomError(req: *std.http.Server.Request, status: std.http.Status, mes
 }
 
 // ---- plumbing ----------------------------------------------------------------
+
+fn pdpPairing(arena: std.mem.Allocator, req: *std.http.Server.Request, dim: usize, pickups: []const u32, deliveries: []const u32, demand: []const u32, capacity: u32) ?commiv.PdpPairing {
+    return commiv.buildPdpPairing(arena, dim, pickups, deliveries, demand, capacity) catch |err| {
+        switch (err) {
+            error.PairIdOutOfRange => respondError(req, .unprocessable_entity, "pickup/delivery ids must be distinct and in 1..dim-1") catch {},
+            error.PairNodeReused => respondError(req, .unprocessable_entity, "each node may appear only once across pickups/deliveries") catch {},
+            error.DemandExceedsCapacity => respondError(req, .unprocessable_entity, "a request's demand exceeds capacity (infeasible)") catch {},
+            error.NodeUncovered => respondError(req, .unprocessable_entity, "every node 1..dim-1 must be named exactly once across pickups/deliveries") catch {},
+            error.OutOfMemory => respondError(req, .internal_server_error, "out of memory") catch {},
+        }
+        return null;
+    };
+}
 
 fn parseBody(comptime T: type, arena: std.mem.Allocator, req: *std.http.Server.Request, body: []const u8) ?T {
     return std.json.parseFromSliceLeaky(T, arena, body, .{ .ignore_unknown_fields = true }) catch {
