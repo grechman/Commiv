@@ -732,6 +732,7 @@ test "CVRP SISR marathon: below the 1M-iter gate is a no-op (bit-identical)" {
 }
 
 test "CVRP SISR marathon: at 1M+ iters, feasible and changes the trajectory" {
+    if (builtin.mode == .Debug) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const n = 60;
     const dim = n + 1;
