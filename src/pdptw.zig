@@ -712,16 +712,74 @@ fn buildInsertion(allocator: std.mem.Allocator, out: *std.ArrayList(usize), rout
     }
 }
 
+const NO_ARRIVAL: i64 = -(1 << 62);
+
+const RouteLabels = struct {
+    depart: std.ArrayList(i64) = .empty,
+    load: std.ArrayList(i64) = .empty,
+    pre_d: std.ArrayList(u64) = .empty,
+    latest: std.ArrayList(i64) = .empty,
+    tail_d: std.ArrayList(u64) = .empty,
+
+    fn deinit(self: *RouteLabels, allocator: std.mem.Allocator) void {
+        self.depart.deinit(allocator);
+        self.load.deinit(allocator);
+        self.pre_d.deinit(allocator);
+        self.latest.deinit(allocator);
+        self.tail_d.deinit(allocator);
+    }
+
+    fn fill(self: *RouteLabels, allocator: std.mem.Allocator, inst: PdpInstance, it: []const usize) !void {
+        const L = it.len;
+        try self.depart.resize(allocator, L + 1);
+        try self.load.resize(allocator, L + 1);
+        try self.pre_d.resize(allocator, L + 1);
+        try self.latest.resize(allocator, L + 1);
+        try self.tail_d.resize(allocator, L + 1);
+        self.depart.items[0] = 0;
+        self.load.items[0] = 0;
+        self.pre_d.items[0] = 0;
+        var prev: usize = 0;
+        for (it, 0..) |c, k| {
+            const arc: i64 = @intCast(inst.d(prev, c));
+            const start = @max(self.depart.items[k] + arc, @as(i64, @intCast(inst.ready[c])));
+            self.depart.items[k + 1] = start + @as(i64, @intCast(inst.service[c]));
+            self.load.items[k + 1] = self.load.items[k] + inst.demand_signed[c];
+            self.pre_d.items[k + 1] = self.pre_d.items[k] + inst.d(prev, c);
+            prev = c;
+        }
+        self.latest.items[L] = @intCast(inst.due[0]);
+        self.tail_d.items[L] = 0;
+        var k = L;
+        while (k > 0) {
+            k -= 1;
+            const c = it[k];
+            const nxt: usize = if (k + 1 == L) 0 else it[k + 1];
+            const arc: i64 = @intCast(inst.d(c, nxt));
+            const x = @min(@as(i64, @intCast(inst.due[c])), self.latest.items[k + 1] - @as(i64, @intCast(inst.service[c])) - arc);
+            self.latest.items[k] = if (x < @as(i64, @intCast(inst.ready[c]))) NO_ARRIVAL else x;
+            self.tail_d.items[k] = inst.d(c, nxt) + self.tail_d.items[k + 1];
+        }
+    }
+};
+
 // pub for pdptw_sisr.zig (seed solution); not part of the stable API.
 pub fn construct(allocator: std.mem.Allocator, inst: PdpInstance, order: []const usize, pos: []usize) !Sol {
     var sol: Sol = .empty;
     errdefer freeSol(allocator, &sol);
 
-    var cand: std.ArrayList(usize) = .empty;
-    defer cand.deinit(allocator);
+    var labels: RouteLabels = .{};
+    defer labels.deinit(allocator);
 
     for (order) |p| {
         const q = inst.pair_of[p];
+        const p_dem = inst.demand_signed[p];
+        const p_ready: i64 = @intCast(inst.ready[p]);
+        const p_due: i64 = @intCast(inst.due[p]);
+        const p_service: i64 = @intCast(inst.service[p]);
+        const q_ready: i64 = @intCast(inst.ready[q]);
+        const q_due: i64 = @intCast(inst.due[q]);
+        const q_service: i64 = @intCast(inst.service[q]);
 
         var best_delta: i64 = 0;
         var best_ri: ?usize = null;
@@ -730,21 +788,53 @@ pub fn construct(allocator: std.mem.Allocator, inst: PdpInstance, order: []const
         var have_best = false;
 
         for (sol.items, 0..) |route, ri| {
-            const c_old = routeCost(inst, route.items, pos) orelse unreachable;
-            const len = route.items.len;
-            var i: usize = 0;
-            while (i <= len) : (i += 1) {
-                var j: usize = i + 1;
-                while (j <= len + 1) : (j += 1) {
-                    try buildInsertion(allocator, &cand, route.items, p, q, i, j);
-                    const c_new = routeCost(inst, cand.items, pos) orelse continue;
-                    const delta = @as(i64, @intCast(c_new)) - @as(i64, @intCast(c_old));
-                    if (!have_best or delta < best_delta) {
-                        have_best = true;
-                        best_delta = delta;
-                        best_ri = ri;
-                        best_i = i;
-                        best_j = j;
+            const it = route.items;
+            const L = it.len;
+            try labels.fill(allocator, inst, it);
+            const depart_at = labels.depart.items;
+            const load_at = labels.load.items;
+            const pre_d = labels.pre_d.items;
+            const latest = labels.latest.items;
+            const tail_d = labels.tail_d.items;
+            const base_dist: i64 = @intCast(inst.d(0, it[0]) + tail_d[0]);
+
+            for (0..L + 1) |a| {
+                const prev_a: usize = if (a == 0) 0 else it[a - 1];
+                const p_start = @max(depart_at[a] + @as(i64, @intCast(inst.d(prev_a, p))), p_ready);
+                if (p_start > p_due) continue;
+                var depart = p_start + p_service;
+                var load = load_at[a] + p_dem;
+                if (load < 0 or load > inst.capacity) continue;
+                var mid_d: u64 = pre_d[a] + inst.d(prev_a, p);
+                var last = p;
+
+                var b = a;
+                while (b <= L) : (b += 1) {
+                    const nxt: usize = if (b == L) 0 else it[b];
+                    const q_start = @max(depart + @as(i64, @intCast(inst.d(last, q))), q_ready);
+                    if (q_start <= q_due) {
+                        const nxt_arrival = q_start + q_service + @as(i64, @intCast(inst.d(q, nxt)));
+                        if (nxt_arrival <= latest[b]) {
+                            const new_dist: i64 = @intCast(mid_d + inst.d(last, q) + inst.d(q, nxt) + tail_d[b]);
+                            const delta = new_dist - base_dist;
+                            if (!have_best or delta < best_delta) {
+                                have_best = true;
+                                best_delta = delta;
+                                best_ri = ri;
+                                best_i = a;
+                                best_j = b + 1;
+                            }
+                        }
+                    }
+                    if (b < L) {
+                        const c = it[b];
+                        const start = @max(depart + @as(i64, @intCast(inst.d(last, c))), @as(i64, @intCast(inst.ready[c])));
+                        if (start > inst.due[c]) break;
+                        depart = start + @as(i64, @intCast(inst.service[c]));
+                        load += inst.demand_signed[c];
+                        if (load < 0 or load > inst.capacity) break;
+                        mid_d += inst.d(last, c);
+                        last = c;
                     }
                 }
             }
@@ -770,6 +860,91 @@ pub fn construct(allocator: std.mem.Allocator, inst: PdpInstance, order: []const
     }
 
     return sol;
+}
+
+fn referenceConstruct(allocator: std.mem.Allocator, inst: PdpInstance, order: []const usize, pos: []usize) !Sol {
+    var sol: Sol = .empty;
+    errdefer freeSol(allocator, &sol);
+    var cand: std.ArrayList(usize) = .empty;
+    defer cand.deinit(allocator);
+    for (order) |p| {
+        const q = inst.pair_of[p];
+        var best_delta: i64 = 0;
+        var best_ri: ?usize = null;
+        var best_i: usize = 0;
+        var best_j: usize = 0;
+        var have_best = false;
+        for (sol.items, 0..) |route, ri| {
+            const c_old = routeCost(inst, route.items, pos) orelse unreachable;
+            const len = route.items.len;
+            var i: usize = 0;
+            while (i <= len) : (i += 1) {
+                var j: usize = i + 1;
+                while (j <= len + 1) : (j += 1) {
+                    try buildInsertion(allocator, &cand, route.items, p, q, i, j);
+                    const c_new = routeCost(inst, cand.items, pos) orelse continue;
+                    const delta = @as(i64, @intCast(c_new)) - @as(i64, @intCast(c_old));
+                    if (!have_best or delta < best_delta) {
+                        have_best = true;
+                        best_delta = delta;
+                        best_ri = ri;
+                        best_i = i;
+                        best_j = j;
+                    }
+                }
+            }
+        }
+        if (have_best) {
+            const ri = best_ri.?;
+            const route = &sol.items[ri];
+            var newr: std.ArrayList(usize) = .empty;
+            errdefer newr.deinit(allocator);
+            try buildInsertion(allocator, &newr, route.items, p, q, best_i, best_j);
+            route.deinit(allocator);
+            route.* = newr;
+        } else {
+            const pair = [_]usize{ p, q };
+            if (routeCost(inst, pair[0..], pos) == null) return error.InfeasibleInstance;
+            var newr: std.ArrayList(usize) = .empty;
+            errdefer newr.deinit(allocator);
+            try newr.append(allocator, p);
+            try newr.append(allocator, q);
+            try sol.append(allocator, newr);
+        }
+    }
+    return sol;
+}
+
+fn expectSameSol(a: *const Sol, b: *const Sol) !void {
+    try std.testing.expectEqual(a.items.len, b.items.len);
+    for (a.items, b.items) |ra, rb| try std.testing.expectEqualSlices(usize, ra.items, rb.items);
+}
+
+test "PDPTW construct: route-for-route identical to the reference routeCost construction" {
+    const allocator = std.testing.allocator;
+    var checked: usize = 0;
+    var seed: u64 = 1;
+    while (seed <= 40) : (seed += 1) {
+        for ([_]bool{ false, true }) |clocked| {
+            var ri = if (clocked) try randomInstanceClocked(allocator, 8, seed) else try randomInstance(allocator, 8, seed, seed % 2 == 0);
+            defer ri.deinit(allocator);
+            const inst = ri.inst();
+            const pos = try allocator.alloc(usize, inst.dim());
+            defer allocator.free(pos);
+            @memset(pos, 0);
+            const pickups = try collectPickups(allocator, inst);
+            defer allocator.free(pickups);
+            var prng = std.Random.DefaultPrng.init(seed);
+            prng.random().shuffle(usize, pickups);
+            var fast = try construct(allocator, inst, pickups, pos);
+            defer freeSol(allocator, &fast);
+            var ref = try referenceConstruct(allocator, inst, pickups, pos);
+            defer freeSol(allocator, &ref);
+            try expectSameSol(&fast, &ref);
+            checked += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 80), checked);
 }
 
 test "PDPTW construct: output passes validate on the hand fixture" {
