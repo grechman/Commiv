@@ -1,12 +1,18 @@
 # Commiv benchmark status
 
-Bench SHA: 80858dc · updated 2026-08-18 · windows-server-wsl2
+Bench SHA: 8dc885d · updated 2026-09-01 · auregat
+
+The Windows/WSL2 machine that produced every number before 2026-09-01 is gone.
+The frozen baseline was re-measured on auregat (Debian 13, Ryzen 5 2600X, Zig
+0.16.0, `taskset -c 2`) at `887e520`: 2388 / 2383 ms. Rows dated earlier keep
+their WSL2 numbers and are not comparable to auregat times.
 
 ## Current best primary result
 
 | workload | frozen baseline | candidate | result identity | delta |
 |---|---:|---:|---|---:|
-| Li & Lim `lr2_10_1`, 20k PDPTW iterations, seed 1, one thread | 3682 / 3716 ms (`1450221`, 5 runs each) | 2913 / 2872 ms (5 runs each) | exact objective/fleet/duration/wait and byte-identical HTTP response | **20.9% / 22.7% less time** |
+| Li & Lim `lr2_10_1`, 20k PDPTW iterations, seed 1, one thread | 2388 / 2383 ms (`887e520` on auregat, 5 runs each) | 1480 / 1480 ms (`8dc885d`, 5 runs each) | exact objective/fleet/duration/wait (25 veh, 46264.058, 153079.687, 96815.629) | **38.0% / 37.9% less time** |
+| same, previous machine (WSL2) | 3682 / 3716 ms (`1450221`) | 2913 / 2872 ms (`ffa3d5e`) | exact objective/fleet/duration/wait and byte-identical HTTP response | 20.9% / 22.7% less time |
 
 Reproduce the maintained primary harness:
 
@@ -30,6 +36,7 @@ The command emits raw runs to stderr and one JSON object to stdout. See
 | Large native ATSP bounded top-k | 2.12x, exact unique-key result | `003597b` |
 | Fleet-capped Split route bound | 4.86x, peak RSS -71.8%, exact result | `c272171` |
 | Parallel VRPTW freeing workspaces | peak RSS -80.2%, exact result | `95d22a2` |
+| Quadratic PDPTW seed construction (auregat) | 38.0% / 37.9% less time, exact result | `8dc885d` |
 
 ## Dead/reverted
 
