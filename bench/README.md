@@ -1,6 +1,6 @@
 # Commiv benchmark status
 
-Bench SHA: 8dc885d · updated 2026-09-01 · auregat
+Bench SHA: 3f556d7 · updated 2026-09-01 · auregat
 
 The Windows/WSL2 machine that produced every number before 2026-09-01 is gone.
 The frozen baseline was re-measured on auregat (Debian 13, Ryzen 5 2600X, Zig
@@ -11,7 +11,7 @@ their WSL2 numbers and are not comparable to auregat times.
 
 | workload | frozen baseline | candidate | result identity | delta |
 |---|---:|---:|---|---:|
-| Li & Lim `lr2_10_1`, 20k PDPTW iterations, seed 1, one thread | 2388 / 2383 ms (`887e520` on auregat, 5 runs each) | 1480 / 1480 ms (`8dc885d`, 5 runs each) | exact objective/fleet/duration/wait (25 veh, 46264.058, 153079.687, 96815.629) | **38.0% / 37.9% less time** |
+| Li & Lim `lr2_10_1`, 20k PDPTW iterations, seed 1, one thread | 2388 / 2383 ms (`887e520` on auregat, 5 runs each) | 1187 / 1206 ms (`3f556d7`, 5 runs each) | exact objective/fleet/duration/wait (25 veh, 46264.058, 153079.687, 96815.629) and byte-identical responses on a 52-case REST corpus | **50.3% / 49.4% less time** |
 | same, previous machine (WSL2) | 3682 / 3716 ms (`1450221`) | 2913 / 2872 ms (`ffa3d5e`) | exact objective/fleet/duration/wait and byte-identical HTTP response | 20.9% / 22.7% less time |
 
 Reproduce the maintained primary harness:
@@ -37,6 +37,7 @@ The command emits raw runs to stderr and one JSON object to stdout. See
 | Fleet-capped Split route bound | 4.86x, peak RSS -71.8%, exact result | `c272171` |
 | Parallel VRPTW freeing workspaces | peak RSS -80.2%, exact result | `95d22a2` |
 | Quadratic PDPTW seed construction (auregat) | 38.0% / 37.9% less time, exact result | `8dc885d` |
+| Direct Xoshiro blink draw (auregat) | 20.0% / 17.5% / 17.4% less time vs `8dc885d`, exact result | `5b6ffe0` |
 
 ## Dead/reverted
 
@@ -70,11 +71,14 @@ rejected experiment 13. See `bench/EXPERIMENTS.md` for the measurement.
 
 | priority | lever | required gate |
 |---:|---|---|
+| 0 | PDPTW `freshen` rebuilds six prefix/suffix arrays per touched route (7% of the frozen run); the fast path never reads `suf_l` | exact signature on the frozen harness, above the 3% margin |
 | 1 | Replace quadratic all-roots MST bottleneck candidate traversal | exact candidate sets/tours, large sparse and dense regimes |
 | 2 | Make geometric nearest-candidate construction use its spatial grid | cached and on-the-fly TSP regimes, no quality loss |
 | 3 | Reduce break-aware PDPTW insertion's cubic confirmation work | differential break feasibility and route hashes |
 
 ## Known constraints
+
+- Debug `zig build test` skips the two 1M-iteration marathon tests (`error.SkipZigTest`); the ReleaseFast CI job still runs them. Debug suite 6:03 -> 2:44 on auregat, ReleaseFast 1:50 either way.
 
 - Native Windows benchmark binaries currently depend on Linux clocks; run under WSL2.
 - Do not time while the server is running a game or another heavy unit.
