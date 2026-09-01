@@ -5,7 +5,7 @@
     "direction": "lower",
     "extract": "json:.median_ms"
   },
-  "baseline_ref": "1450221",
+  "baseline_ref": "887e520",
   "margin_pct": 3.0,
   "runs_per_measurement": 2,
   "stochastic": false,
@@ -17,7 +17,7 @@
     "seed": 1,
     "iters": 20000,
     "instance": "lr2_10_1",
-    "machine": "windows-server-wsl2",
+    "machine": "auregat",
     "cpu_affinity": 2
   }
 }

@@ -11,7 +11,7 @@ their WSL2 numbers and are not comparable to auregat times.
 
 | workload | frozen baseline | candidate | result identity | delta |
 |---|---:|---:|---|---:|
-| Li & Lim `lr2_10_1`, 20k PDPTW iterations, seed 1, one thread | 2388 / 2383 ms (`887e520` on auregat, 5 runs each) | 1187 / 1206 ms (`3f556d7`, 5 runs each) | exact objective/fleet/duration/wait (25 veh, 46264.058, 153079.687, 96815.629) and byte-identical responses on a 52-case REST corpus | **50.3% / 49.4% less time** |
+| Li & Lim `lr2_10_1`, 20k PDPTW iterations, seed 1, one thread | 2388 / 2383 ms (`887e520` on auregat, 5 runs each) | 1187 / 1206 ms (`3f556d7`, 5 runs each) | exact objective/fleet/duration/wait (25 veh, 46264.058, 153079.687, 96815.629) and byte-identical responses on the 52-case `tools/rest_corpus.py` set | **50.3% / 49.4% less time** |
 | same, previous machine (WSL2) | 3682 / 3716 ms (`1450221`) | 2913 / 2872 ms (`ffa3d5e`) | exact objective/fleet/duration/wait and byte-identical HTTP response | 20.9% / 22.7% less time |
 
 Reproduce the maintained primary harness:
@@ -78,7 +78,8 @@ rejected experiment 13. See `bench/EXPERIMENTS.md` for the measurement.
 
 ## Known constraints
 
-- Debug `zig build test` skips the two 1M-iteration marathon tests (`error.SkipZigTest`); the ReleaseFast CI job still runs them. Debug suite 6:03 -> 2:44 on auregat, ReleaseFast 1:50 either way.
+- Debug `zig build test` skips the two 1M-iteration marathon tests (`error.SkipZigTest`); the ReleaseFast CI job still runs them. Those two tests were 198 s of a 6:03 cold Debug run (compile + run) on auregat; the warm-cache Debug run is now 2:44, ReleaseFast 1:50 either way.
+- REST identity gate: `uv run --no-project python tools/rest_corpus.py <tree> <port> <out.json>` starts that tree's `zig-out/bin/commiv-serve` and hashes 52 responses (18 solves, 34 error paths); diff the JSON of two trees.
 
 - Native Windows benchmark binaries currently depend on Linux clocks; run under WSL2.
 - Do not time while the server is running a game or another heavy unit.
