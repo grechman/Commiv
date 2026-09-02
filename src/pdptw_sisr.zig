@@ -270,6 +270,7 @@ const S = struct {
     time_penalty: u64,
     max_route_dur: u64, // shift-length cap; 0 = off (see PdpSisrParams.max_route_dur)
     windows_well_formed: bool, // all ready <= due; malformed inputs use historical Tws path
+    fast_all: bool,
     // Heterogeneous fleet ledger (empty veh_types = uniform, everything below
     // inert). rtype[ri] is route ri's type index, meaningful while nonempty
     // and overwritten at the next opening; type_used counts nonempty routes
@@ -321,6 +322,15 @@ const S = struct {
                 break;
             }
         }
+        var pairs_simple = true;
+        for (1..dim) |c| {
+            if (!inst.is_pickup[c]) continue;
+            const dem = inst.demand_signed[c];
+            if (dem < 0 or inst.demand_signed[inst.pair_of[c]] != -dem) {
+                pairs_simple = false;
+                break;
+            }
+        }
         const s = S{
             .allocator = allocator,
             .inst = inst,
@@ -328,6 +338,7 @@ const S = struct {
             .time_penalty = time_penalty,
             .max_route_dur = max_route_dur,
             .windows_well_formed = windows_well_formed,
+            .fast_all = windows_well_formed and time_penalty == 0 and max_route_dur == 0 and brk == null and pairs_simple,
             .veh_types = veh_types,
             .brk = brk,
             .gran = gran,
@@ -539,7 +550,7 @@ const S = struct {
         try r.pre_t.resize(s.allocator, L + 1);
         try r.suf_t.resize(s.allocator, L + 1);
         try r.pre_l.resize(s.allocator, L + 1);
-        try r.suf_l.resize(s.allocator, L + 1);
+        if (!s.fast_all) try r.suf_l.resize(s.allocator, L + 1);
         try r.pre_d.resize(s.allocator, L + 1);
         try r.tail_d.resize(s.allocator, L + 1);
         r.pre_t.items[0] = Tws.depotNode(s.inst);
@@ -553,15 +564,21 @@ const S = struct {
             prev = c;
         }
         r.suf_t.items[L] = Tws.depotNode(s.inst);
-        r.suf_l.items[L] = pdp.Lseg.empty();
         r.tail_d.items[L] = 0;
         var i = L;
         while (i > 0) {
             i -= 1;
             const nxt: usize = if (i + 1 == L) 0 else it[i + 1];
             r.suf_t.items[i] = Tws.merge(Tws.client(s.inst, it[i]), @intCast(s.inst.d(it[i], nxt)), r.suf_t.items[i + 1]);
-            r.suf_l.items[i] = pdp.Lseg.merge(pdp.Lseg.node(s.inst, it[i]), r.suf_l.items[i + 1]);
             r.tail_d.items[i] = s.inst.d(it[i], nxt) + r.tail_d.items[i + 1];
+        }
+        if (!s.fast_all) {
+            r.suf_l.items[L] = pdp.Lseg.empty();
+            i = L;
+            while (i > 0) {
+                i -= 1;
+                r.suf_l.items[i] = pdp.Lseg.merge(pdp.Lseg.node(s.inst, it[i]), r.suf_l.items[i + 1]);
+            }
         }
         r.dirty = false;
     }
