@@ -249,6 +249,22 @@ const Route = struct {
 
 const Snap = struct { ri: usize, start: usize, len: usize, dist: u64, dur: u64, rtype: u8, brk_ok: bool };
 
+fn transposedMatrix(allocator: std.mem.Allocator, inst: pdp.PdpInstance) ![]u32 {
+    const dim = inst.dim();
+    const dt = try allocator.alloc(u32, dim * dim);
+    const tile: usize = 64;
+    var a0: usize = 0;
+    while (a0 < dim) : (a0 += tile) {
+        var b0: usize = 0;
+        while (b0 < dim) : (b0 += tile) {
+            for (a0..@min(a0 + tile, dim)) |a| {
+                for (b0..@min(b0 + tile, dim)) |b| dt[b * dim + a] = inst.matrix[a * dim + b];
+            }
+        }
+    }
+    return dt;
+}
+
 const S = struct {
     allocator: std.mem.Allocator,
     inst: pdp.PdpInstance,
@@ -274,7 +290,7 @@ const S = struct {
     brk: ?Break,
     brk_scratch: []usize, // preallocated (dim + 2): candidate sequences for break-aware eval
     prng: *std.Random.DefaultPrng,
-    dt: []u32,
+    dt: []const u32,
     gran: []const usize,
     gk: usize,
     loc_route: []usize, // node -> route index (NO_ROUTE when removed)
@@ -304,7 +320,7 @@ const S = struct {
     // Granular pruning is safe there (see the gran gate in evalPairInsert).
     iter_start_complete: bool = false,
 
-    fn init(allocator: std.mem.Allocator, inst: pdp.PdpInstance, veh_penalty: u64, time_penalty: u64, max_route_dur: u64, veh_types: []const VehType, brk: ?Break, gran: []const usize, gk: usize, prng: *std.Random.DefaultPrng) !S {
+    fn init(allocator: std.mem.Allocator, inst: pdp.PdpInstance, veh_penalty: u64, time_penalty: u64, max_route_dur: u64, veh_types: []const VehType, brk: ?Break, gran: []const usize, gk: usize, prng: *std.Random.DefaultPrng, dt: []const u32) !S {
         const dim = inst.dim();
         var windows_well_formed = true;
         for (inst.ready, inst.due) |ready, due| {
@@ -335,7 +351,7 @@ const S = struct {
             .gran = gran,
             .gk = gk,
             .prng = prng,
-            .dt = try allocator.alloc(u32, dim * dim),
+            .dt = dt,
             .loc_route = try allocator.alloc(usize, dim),
             .loc_pos = try allocator.alloc(usize, dim),
             .brk_scratch = try allocator.alloc(usize, dim + 2),
@@ -344,16 +360,6 @@ const S = struct {
             .nbr_mark_q = try allocator.alloc(u64, dim),
             .eject_pen = try allocator.alloc(u32, dim),
         };
-        const tile: usize = 64;
-        var a0: usize = 0;
-        while (a0 < dim) : (a0 += tile) {
-            var b0: usize = 0;
-            while (b0 < dim) : (b0 += tile) {
-                for (a0..@min(a0 + tile, dim)) |a| {
-                    for (b0..@min(b0 + tile, dim)) |b| s.dt[b * dim + a] = inst.matrix[a * dim + b];
-                }
-            }
-        }
         @memset(s.loc_route, NO_ROUTE);
         @memset(s.loc_pos, 0);
         @memset(s.drop_buf, false);
@@ -369,7 +375,6 @@ const S = struct {
         s.lock.deinit(s.allocator);
         s.rtype.deinit(s.allocator);
         s.allocator.free(s.brk_scratch);
-        s.allocator.free(s.dt);
         s.allocator.free(s.loc_route);
         s.allocator.free(s.loc_pos);
         s.allocator.free(s.drop_buf);
@@ -1387,12 +1392,16 @@ pub fn solvePdptwSisr(allocator: std.mem.Allocator, inst: pdp.PdpInstance, param
 /// packing instead of restarting cold). `warm` must be a feasible solution;
 /// pass empty for the normal cold start.
 pub fn solvePdptwSisrFrom(allocator: std.mem.Allocator, inst: pdp.PdpInstance, params: PdpSisrParams, warm: []const []const usize) !pdp.PdpResult {
-    return solvePdptwSisrFromLocked(allocator, inst, params, warm, &.{}, false);
+    return solvePdptwSisrFromLocked(allocator, inst, params, warm, &.{}, false, null);
+}
+
+fn solvePdptwSisrFromShared(allocator: std.mem.Allocator, inst: pdp.PdpInstance, params: PdpSisrParams, warm: []const []const usize, dt: []const u32) !pdp.PdpResult {
+    return solvePdptwSisrFromLocked(allocator, inst, params, warm, &.{}, false, dt);
 }
 
 /// Seeded runner with dispatch locks: `locks[i]` pins the first locks[i]
 /// stops of warm[i] (empty = no locking, the plain warm path).
-fn solvePdptwSisrFromLocked(allocator: std.mem.Allocator, inst: pdp.PdpInstance, params: PdpSisrParams, warm: []const []const usize, locks: []const usize, partial_ok: bool) !pdp.PdpResult {
+fn solvePdptwSisrFromLocked(allocator: std.mem.Allocator, inst: pdp.PdpInstance, params: PdpSisrParams, warm: []const []const usize, locks: []const usize, partial_ok: bool, shared_dt: ?[]const u32) !pdp.PdpResult {
     const n_nodes = 2 * inst.n_pairs;
     if (inst.n_pairs == 0) return error.InvalidInstance;
     if (params.veh_types.len > MAX_VEH_TYPES) return error.InvalidInstance;
@@ -1442,7 +1451,9 @@ fn solvePdptwSisrFromLocked(allocator: std.mem.Allocator, inst: pdp.PdpInstance,
 
     var prng = std.Random.DefaultPrng.init(params.seed ^ 0x50_44_50_7457);
     const rng = prng.random();
-    var s = try S.init(allocator, inst, params.veh_penalty, params.time_penalty, params.max_route_dur, params.veh_types, params.brk, gran, gk, &prng);
+    const own_dt: ?[]u32 = if (shared_dt == null) try transposedMatrix(allocator, inst) else null;
+    defer if (own_dt) |o| allocator.free(o);
+    var s = try S.init(allocator, inst, params.veh_penalty, params.time_penalty, params.max_route_dur, params.veh_types, params.brk, gran, gk, &prng, shared_dt orelse own_dt.?);
     defer s.deinit();
 
     for (seed_sol.items, 0..) |r, wi| {
@@ -1588,6 +1599,8 @@ fn solvePdptwSisrFromLocked(allocator: std.mem.Allocator, inst: pdp.PdpInstance,
 /// the first failed cap stops the descent. total_time_ms is split: half for
 /// the uncapped run, the rest per descent attempt.
 pub fn solvePdptwSisrFleetMin(allocator: std.mem.Allocator, inst: pdp.PdpInstance, params: PdpSisrParams, total_time_ms: u64) !pdp.PdpResult {
+    const dt = try transposedMatrix(allocator, inst);
+    defer allocator.free(dt);
     var p0 = params;
     const p0_pct: u64 = @min(@as(u64, params.fleet_p0_pct), 90);
     p0.time_ms = @max(total_time_ms * p0_pct / 100, 1);
@@ -1619,7 +1632,7 @@ pub fn solvePdptwSisrFleetMin(allocator: std.mem.Allocator, inst: pdp.PdpInstanc
         // in its basin (a tight K+1 solution leaves no slack for the banked
         // pairs); a cold construct starts looser. Try warm, then cold.
         pk.time_ms = @max(pk.time_ms / 2, 250);
-        var res = solvePdptwSisrFrom(allocator, inst, pk, warm) catch |err| switch (err) {
+        var res = solvePdptwSisrFromShared(allocator, inst, pk, warm, dt) catch |err| switch (err) {
             error.NoCompleteSolution => blk: {
                 break :blk solvePdptwSisr(allocator, inst, pk) catch |err2| switch (err2) {
                     error.NoCompleteSolution => break :descent,
@@ -1648,7 +1661,7 @@ pub fn solvePdptwSisrFleetMin(allocator: std.mem.Allocator, inst: pdp.PdpInstanc
         const warm = try allocator.alloc([]const usize, best.routes.len);
         defer allocator.free(warm);
         for (best.routes, 0..) |r, i| warm[i] = r;
-        var res = solvePdptwSisrFrom(allocator, inst, pp, warm) catch |err| switch (err) {
+        var res = solvePdptwSisrFromShared(allocator, inst, pp, warm, dt) catch |err| switch (err) {
             error.NoCompleteSolution => return best,
             else => return err,
         };
@@ -1718,7 +1731,7 @@ pub fn solvePdptwSisrDispatch(allocator: std.mem.Allocator, inst: pdp.PdpInstanc
             }
         }
     }
-    return solvePdptwSisrFromLocked(allocator, inst, params, current, locked, true);
+    return solvePdptwSisrFromLocked(allocator, inst, params, current, locked, true, null);
 }
 
 /// Enterprise pinned-fleet driver: find the best solution using at most
@@ -1731,6 +1744,8 @@ pub fn solvePdptwSisrDispatch(allocator: std.mem.Allocator, inst: pdp.PdpInstanc
 /// were never reached within the budget.
 pub fn solvePdptwSisrPinned(allocator: std.mem.Allocator, inst: pdp.PdpInstance, params: PdpSisrParams, total_time_ms: u64, pin: usize) !pdp.PdpResult {
     const t_start = nanos();
+    const dt = try transposedMatrix(allocator, inst);
+    defer allocator.free(dt);
     var p0 = params;
     p0.time_ms = @max(total_time_ms * 25 / 100, 1);
     p0.max_vehicles = 0;
@@ -1760,7 +1775,7 @@ pub fn solvePdptwSisrPinned(allocator: std.mem.Allocator, inst: pdp.PdpInstance,
         const warm = try allocator.alloc([]const usize, best.routes.len);
         defer allocator.free(warm);
         for (best.routes, 0..) |r, i| warm[i] = r;
-        var res = solvePdptwSisrFrom(allocator, inst, pk, warm) catch |err| switch (err) {
+        var res = solvePdptwSisrFromShared(allocator, inst, pk, warm, dt) catch |err| switch (err) {
             error.NoCompleteSolution => solvePdptwSisr(allocator, inst, pk) catch |err2| switch (err2) {
                 error.NoCompleteSolution => {
                     seed +%= 0x9E3779B97F4A7C15;
@@ -1792,7 +1807,7 @@ pub fn solvePdptwSisrPinned(allocator: std.mem.Allocator, inst: pdp.PdpInstance,
         const warm = try allocator.alloc([]const usize, best.routes.len);
         defer allocator.free(warm);
         for (best.routes, 0..) |r, i| warm[i] = r;
-        var res = solvePdptwSisrFrom(allocator, inst, pp, warm) catch |err| switch (err) {
+        var res = solvePdptwSisrFromShared(allocator, inst, pp, warm, dt) catch |err| switch (err) {
             error.NoCompleteSolution => return best,
             else => return err,
         };
@@ -1813,6 +1828,7 @@ const FmTask = struct {
     inst: pdp.PdpInstance,
     params: PdpSisrParams,
     warm: []const []const usize = &.{},
+    dt: []const u32,
     order: []usize, // parent-owned, flat route nodes
     ends: []usize, // parent-owned, route end offsets
     nroutes: usize = 0,
@@ -1825,7 +1841,7 @@ fn fmWorker(t: *FmTask) void {
     // Not an arena: the engine's per-iteration churn (route snapshots, squeeze
     // undo copies) is alloc/free-balanced, and an arena retains all of it —
     // measured 2.8 GB RSS in 5 minutes at hour-long walls.
-    var res = solvePdptwSisrFrom(std.heap.smp_allocator, t.inst, t.params, t.warm) catch {
+    var res = solvePdptwSisrFromShared(std.heap.smp_allocator, t.inst, t.params, t.warm, t.dt) catch {
         t.ok = false;
         return;
     };
@@ -1880,6 +1896,8 @@ pub fn solvePdptwSisrFleetMinParallel(allocator: std.mem.Allocator, inst: pdp.Pd
     const cpus = std.Thread.getCpuCount() catch 1;
     const k = if (threads == 0) @max(@as(usize, 1), cpus -| 1) else threads;
     if (k <= 1 or inst.n_pairs == 0) return solvePdptwSisrFleetMin(allocator, inst, params, total_time_ms);
+    const dt = try transposedMatrix(allocator, inst);
+    defer allocator.free(dt);
     const n2 = 2 * inst.n_pairs;
     const SEED_STRIDE: u64 = 0x9E3779B97F4A7C15;
 
@@ -1893,6 +1911,7 @@ pub fn solvePdptwSisrFleetMinParallel(allocator: std.mem.Allocator, inst: pdp.Pd
     for (tasks) |*t| {
         t.* = .{
             .inst = inst,
+            .dt = dt,
             .params = params,
             .order = try allocator.alloc(usize, n2),
             .ends = try allocator.alloc(usize, inst.n_pairs),
