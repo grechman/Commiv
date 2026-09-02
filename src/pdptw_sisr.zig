@@ -2767,3 +2767,38 @@ test "PDPTW SISR: incremental freshen matches a full rebuild" {
         }
     }
 }
+
+test "Tws and Lseg merges are associative bit for bit" {
+    const allocator = std.testing.allocator;
+    var rinst = try pdp.randomInstance(allocator, 12, 5, true);
+    defer rinst.deinit(allocator);
+    const inst = rinst.inst();
+    const dim = inst.dim();
+    var prng = std.Random.DefaultPrng.init(0xA550C);
+    const rng = prng.random();
+    var buf: [8]usize = undefined;
+    for (0..200_000) |_| {
+        var segs: [3]Tws = undefined;
+        var lsegs: [3]pdp.Lseg = undefined;
+        for (0..3) |k| {
+            const len = 1 + rng.uintLessThan(usize, 4);
+            for (buf[0..len]) |*c| c.* = 1 + rng.uintLessThan(usize, dim - 1);
+            var t = Tws.client(inst, buf[0]);
+            var l = pdp.Lseg.node(inst, buf[0]);
+            for (buf[1..len]) |c| {
+                t = Tws.merge(t, @intCast(inst.d(buf[0], c)), Tws.client(inst, c));
+                l = pdp.Lseg.merge(l, pdp.Lseg.node(inst, c));
+            }
+            segs[k] = t;
+            lsegs[k] = l;
+        }
+        const e1: i64 = rng.uintLessThan(i64, 200);
+        const e2: i64 = rng.uintLessThan(i64, 200);
+        const left = Tws.merge(Tws.merge(segs[0], e1, segs[1]), e2, segs[2]);
+        const right = Tws.merge(segs[0], e1, Tws.merge(segs[1], e2, segs[2]));
+        try std.testing.expectEqual(left, right);
+        const ll = pdp.Lseg.merge(pdp.Lseg.merge(lsegs[0], lsegs[1]), lsegs[2]);
+        const lr = pdp.Lseg.merge(lsegs[0], pdp.Lseg.merge(lsegs[1], lsegs[2]));
+        try std.testing.expectEqual(ll, lr);
+    }
+}
