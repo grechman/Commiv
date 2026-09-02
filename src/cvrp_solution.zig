@@ -1,4 +1,5 @@
 const std = @import("std");
+const blinkDraw = @import("core/blink.zig").draw;
 const asymmetric = @import("asymmetric.zig");
 const solver = @import("solver.zig");
 const cvrp_types = @import("cvrp_types.zig");
@@ -223,6 +224,7 @@ pub const SisrCtx = struct {
     split_alpha: f64,
     force_split: i8 = -1, // bandit override per iteration: -1 = use split_rate, 0/1 = off/on
     regret_rate: f64 = 0, // resolved recreate strategy: P(use regret-2 this recreate)
+    prng: *std.Random.DefaultPrng,
 };
 
 // Don't-look queue: a FIFO ring of customers awaiting (re-)examination, with an
@@ -1831,7 +1833,7 @@ pub const Solution = struct {
     /// SISR recreate: greedy cheapest-insertion with blinks, granular candidate
     /// set (gaps adjacent to each removed customer's present k-nearest), full-scan
     /// fallback, new route as last resort. Hard-to-place (high demand) first.
-    pub fn sisrRecreate(self: *Solution, ctx: *SisrCtx, rng: std.Random) void {
+    pub fn sisrRecreate(self: *Solution, ctx: *SisrCtx) void {
         const cap = self.inst.capacity;
         // Insert in demand-desc order (hard-to-place first), but keep ctx.removed in
         // removal order (aligned with rprev/rroute for undo) — sort a separate copy.
@@ -1869,7 +1871,7 @@ pub const Solution = struct {
                     ar = r;
                     anyf = true;
                 }
-                if (rng.float(f64) >= ctx.blink and d1 < best) {
+                if (blinkDraw(ctx.prng) >= ctx.blink and d1 < best) {
                     best = d1;
                     ba = p;
                     bb = m;
@@ -1883,7 +1885,7 @@ pub const Solution = struct {
                     ar = r;
                     anyf = true;
                 }
-                if (rng.float(f64) >= ctx.blink and d2 < best) {
+                if (blinkDraw(ctx.prng) >= ctx.blink and d2 < best) {
                     best = d2;
                     ba = m;
                     bb = nx;

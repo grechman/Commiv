@@ -178,9 +178,9 @@ pub fn solveCvrpSisr(allocator: std.mem.Allocator, inst: CvrpInstance, options: 
     const eff_lmax: usize = if (marathon_on) 13 else params.l_max;
     const eff_blink: f64 = if (marathon_on) 0.02 else params.blink;
     const eff_tf_factor: f64 = if (marathon_on) 0.001 else params.tf_factor;
-    var ctx = SisrCtx{ .present = present, .removed = removed, .rprev = rprev, .rroute = rroute, .ins = ins, .touched = touched, .rmark = rmark, .blink = eff_blink, .l_max = eff_lmax, .cbar = eff_cbar, .split_rate = eff_split, .split_alpha = params.split_alpha, .regret_rate = eff_regret };
-
     var prng = std.Random.DefaultPrng.init(options.seed);
+    var ctx = SisrCtx{ .present = present, .removed = removed, .rprev = rprev, .rroute = rroute, .ins = ins, .touched = touched, .rmark = rmark, .blink = eff_blink, .l_max = eff_lmax, .cbar = eff_cbar, .split_rate = eff_split, .split_alpha = params.split_alpha, .regret_rate = eff_regret, .prng = &prng };
+
     const rng = prng.random();
 
     const unit = @as(f64, @floatFromInt(cur.distance)) / @as(f64, @floatFromInt(n));
@@ -224,7 +224,7 @@ pub fn solveCvrpSisr(allocator: std.mem.Allocator, inst: CvrpInstance, options: 
             }
             cur.sisrRuin(&ctx, rng);
             const use_regret = ctx.regret_rate >= 1.0 or (ctx.regret_rate > 0 and rng.float(f64) < ctx.regret_rate);
-            if (use_regret) cur.sisrRecreateRegret(&ctx) else cur.sisrRecreate(&ctx, rng);
+            if (use_regret) cur.sisrRecreateRegret(&ctx) else cur.sisrRecreate(&ctx);
             const dt = @as(i64, @intCast(cur.distance)) - @as(i64, @intCast(saved_dist));
             if (params.bandit) {
                 const reward: f64 = if (dt < 0) 1 else 0;
@@ -538,15 +538,15 @@ fn refineBest(allocator: std.mem.Allocator, best: *Solution, options: solver.Sol
         const rmark = try allocator.alloc(bool, kn);
         defer allocator.free(rmark);
         @memset(rmark, false);
-        var ctx = SisrCtx{ .present = present, .removed = removed, .rprev = rprev, .rroute = rroute, .ins = ins, .touched = touched, .rmark = rmark, .blink = params.blink, .l_max = params.l_max, .cbar = params.cbar, .split_rate = 0, .split_alpha = params.split_alpha, .regret_rate = 0 };
         var prng = std.Random.DefaultPrng.init(options.seed ^ 0x6B1C6B1C);
+        var ctx = SisrCtx{ .present = present, .removed = removed, .rprev = rprev, .rroute = rroute, .ins = ins, .touched = touched, .rmark = rmark, .blink = params.blink, .l_max = params.l_max, .cbar = params.cbar, .split_rate = 0, .split_alpha = params.split_alpha, .regret_rate = 0, .prng = &prng };
         const rng = prng.random();
         var work = try best.clone();
         defer work.deinit();
         for (0..params.kicks) |_| {
             work.copyLiveFrom(best);
             work.sisrRuin(&ctx, rng);
-            work.sisrRecreate(&ctx, rng);
+            work.sisrRecreate(&ctx);
             work.flushLinks();
             var prev_dist = work.distance;
             while (true) {
