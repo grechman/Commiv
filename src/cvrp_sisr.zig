@@ -195,9 +195,9 @@ pub fn solveCvrpSisr(allocator: std.mem.Allocator, inst: CvrpInstance, options: 
     const eff_blink: f64 = if (marathon_on) 0.02 else params.blink;
     const eff_tf_factor: f64 = if (marathon_on) 0.001 else params.tf_factor;
     var prng = std.Random.DefaultPrng.init(options.seed);
-    const dt = try transposedMatrix(allocator, inst);
-    defer allocator.free(dt);
-    var ctx = SisrCtx{ .present = present, .removed = removed, .rprev = rprev, .rroute = rroute, .ins = ins, .touched = touched, .rmark = rmark, .blink = eff_blink, .l_max = eff_lmax, .cbar = eff_cbar, .split_rate = eff_split, .split_alpha = params.split_alpha, .regret_rate = eff_regret, .prng = &prng, .dt = dt };
+    const dtm = try transposedMatrix(allocator, inst);
+    defer allocator.free(dtm);
+    var ctx = SisrCtx{ .present = present, .removed = removed, .rprev = rprev, .rroute = rroute, .ins = ins, .touched = touched, .rmark = rmark, .blink = eff_blink, .l_max = eff_lmax, .cbar = eff_cbar, .split_rate = eff_split, .split_alpha = params.split_alpha, .regret_rate = eff_regret, .prng = &prng, .dt = dtm };
 
     const rng = prng.random();
 
@@ -557,9 +557,9 @@ fn refineBest(allocator: std.mem.Allocator, best: *Solution, options: solver.Sol
         defer allocator.free(rmark);
         @memset(rmark, false);
         var prng = std.Random.DefaultPrng.init(options.seed ^ 0x6B1C6B1C);
-        const dt = try transposedMatrix(allocator, inst);
-        defer allocator.free(dt);
-        var ctx = SisrCtx{ .present = present, .removed = removed, .rprev = rprev, .rroute = rroute, .ins = ins, .touched = touched, .rmark = rmark, .blink = params.blink, .l_max = params.l_max, .cbar = params.cbar, .split_rate = 0, .split_alpha = params.split_alpha, .regret_rate = 0, .prng = &prng, .dt = dt };
+        const dtm = try transposedMatrix(allocator, best.inst);
+        defer allocator.free(dtm);
+        var ctx = SisrCtx{ .present = present, .removed = removed, .rprev = rprev, .rroute = rroute, .ins = ins, .touched = touched, .rmark = rmark, .blink = params.blink, .l_max = params.l_max, .cbar = params.cbar, .split_rate = 0, .split_alpha = params.split_alpha, .regret_rate = 0, .prng = &prng, .dt = dtm };
         const rng = prng.random();
         var work = try best.clone();
         defer work.deinit();
