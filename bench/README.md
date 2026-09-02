@@ -1,6 +1,6 @@
 # Commiv benchmark status
 
-Bench SHA: 8c32bf3 · updated 2026-09-02 · auregat
+Bench SHA: f7bca03 · updated 2026-09-02 · auregat
 
 The Windows/WSL2 machine that produced every number before 2026-09-01 is gone.
 The frozen baseline was re-measured on auregat (Debian 13, Ryzen 5 2600X, Zig
@@ -46,7 +46,7 @@ The command emits raw runs to stderr and one JSON object to stdout. See
 | Quadratic PDPTW seed construction (auregat) | 38.0% / 37.9% less time, exact result | `8dc885d` |
 | Direct Xoshiro blink draw (auregat) | 20.0% / 17.5% / 17.4% less time vs `8dc885d`, exact result | `5b6ffe0` |
 | Incremental PDPTW `freshen` (auregat) | 3.7% / 4.1% less time in ordinary mode, none in money, exact result | `f6ccf00`, `885695d` |
-| Prefix-distance route arcs plus transposed rows for fixed-target lookups (auregat) | money 7.4-9.5% less time on top of the arcs, ordinary 0.6-2.4%; exact result | `edf23fc`, `8c32bf3` |
+| Prefix-distance route arcs plus transposed rows for fixed-target lookups (auregat) | money 7.4-9.5% less time on top of the arcs, ordinary 0.6-2.4%; exact result; one shared copy per solve | `edf23fc`, `8c32bf3`, `f7bca03` |
 | VRPTW direct blink draw (auregat) | 12.5% / 12.9% / 13.1% less time, exact result | `b233107` |
 | CVRP direct blink draw (auregat) | 17.6% / 18.1% / 17.5% less time, exact result | `9be2099` |
 
