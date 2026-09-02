@@ -1839,11 +1839,28 @@ pub const Solution = struct {
         // removal order (aligned with rprev/rroute for undo) — sort a separate copy.
         const rem = ctx.ins[0..ctx.nrem];
         @memcpy(rem, ctx.removed[0..ctx.nrem]);
-        std.sort.pdq(usize, rem, self.inst, struct {
-            fn lt(inst: CvrpInstance, a: usize, b: usize) bool {
-                return inst.demand[a] > inst.demand[b] or (inst.demand[a] == inst.demand[b] and a < b);
+        if (rem.len <= 48) {
+            const demand = self.inst.demand;
+            var i: usize = 1;
+            while (i < rem.len) : (i += 1) {
+                const c = rem[i];
+                const dc = demand[c];
+                var j = i;
+                while (j > 0) : (j -= 1) {
+                    const b = rem[j - 1];
+                    const db = demand[b];
+                    if (db > dc or (db == dc and b < c)) break;
+                    rem[j] = b;
+                }
+                rem[j] = c;
             }
-        }.lt);
+        } else {
+            std.sort.pdq(usize, rem, self.inst, struct {
+                fn lt(inst: CvrpInstance, a: usize, b: usize) bool {
+                    return inst.demand[a] > inst.demand[b] or (inst.demand[a] == inst.demand[b] and a < b);
+                }
+            }.lt);
+        }
         for (rem) |c| {
             const dem = self.inst.demand[c];
             var best: i64 = std.math.maxInt(i64); // blinked choice
