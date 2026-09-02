@@ -303,6 +303,9 @@ const S = struct {
     brk: ?Break,
     brk_scratch: []usize, // preallocated (dim + 2): candidate sequences for break-aware eval
     prng: *std.Random.DefaultPrng,
+    qsuf_t: []Tws,
+    qsuf_l: []pdp.Lseg,
+    qsuf_d: []u64,
     gran: []const usize,
     gk: usize,
     loc_route: []usize, // node -> route index (NO_ROUTE when removed)
@@ -363,6 +366,9 @@ const S = struct {
             .gran = gran,
             .gk = gk,
             .prng = prng,
+            .qsuf_t = try allocator.alloc(Tws, dim + 2),
+            .qsuf_l = try allocator.alloc(pdp.Lseg, dim + 2),
+            .qsuf_d = try allocator.alloc(u64, dim + 2),
             .loc_route = try allocator.alloc(usize, dim),
             .loc_pos = try allocator.alloc(usize, dim),
             .brk_scratch = try allocator.alloc(usize, dim + 2),
@@ -386,6 +392,9 @@ const S = struct {
         s.lock.deinit(s.allocator);
         s.rtype.deinit(s.allocator);
         s.allocator.free(s.brk_scratch);
+        s.allocator.free(s.qsuf_t);
+        s.allocator.free(s.qsuf_l);
+        s.allocator.free(s.qsuf_d);
         s.allocator.free(s.loc_route);
         s.allocator.free(s.loc_pos);
         s.allocator.free(s.drop_buf);
@@ -731,6 +740,12 @@ const S = struct {
         var best: ?Ins = null;
         const q_t = Tws.client(inst, q);
         const q_l = pdp.Lseg.node(inst, q);
+        for (0..L + 1) |b| {
+            const nxt: usize = if (b == L) 0 else it[b];
+            s.qsuf_t[b] = Tws.merge(q_t, @intCast(inst.d(q, nxt)), r.suf_t.items[b]);
+            s.qsuf_l[b] = pdp.Lseg.merge(q_l, r.suf_l.items[b]);
+            s.qsuf_d[b] = inst.d(q, nxt) + r.tail_d.items[b];
+        }
 
         // Granular gap pruning is shared with the fast feasibility-only path.
         const gate = s.pairGranGate(it, p, q, params);
@@ -753,19 +768,17 @@ const S = struct {
             while (b <= L) : (b += 1) {
                 blk: {
                     if (blinkDraw(s.prng) < blink) break :blk;
-                    const nxt: usize = if (b == L) 0 else it[b];
                     if (granular and (params.gran_gaps & 2) != 0 and b != a and b != L and
-                        s.nbr_mark_p[last] != genp and s.nbr_mark_p[nxt] != genp) break :blk;
-                    const f1 = Tws.merge(m_t, @intCast(inst.d(last, q)), q_t);
-                    const f2 = Tws.merge(f1, @intCast(inst.d(q, nxt)), r.suf_t.items[b]);
+                        s.nbr_mark_p[last] != genp and s.nbr_mark_p[if (b == L) 0 else it[b]] != genp) break :blk;
+                    const f2 = Tws.merge(m_t, @intCast(inst.d(last, q)), s.qsuf_t[b]);
                     if (f2.tw != 0) break :blk;
-                    const f_l = pdp.Lseg.merge(pdp.Lseg.merge(m_l, q_l), r.suf_l.items[b]);
+                    const f_l = pdp.Lseg.merge(m_l, s.qsuf_l[b]);
                     if (!(f_l.lo >= 0 and f_l.hi <= rcap)) break :blk;
                     // Shift-length cap: reject if the resulting route duration
                     // exceeds it. Duration is not monotone in b, so this only
                     // skips THIS (a,b) candidate (break :blk), never the loop.
                     if (s.max_route_dur > 0 and f2.dur > @as(i64, @intCast(s.max_route_dur))) break :blk;
-                    const new_dist = m_d + inst.d(last, q) + inst.d(q, nxt) + r.tail_d.items[b];
+                    const new_dist = m_d + inst.d(last, q) + s.qsuf_d[b];
                     var delta = @as(i64, @intCast(new_dist)) - @as(i64, @intCast(r.dist));
                     if (s.time_penalty > 0)
                         delta += @as(i64, @intCast(s.time_penalty)) * (f2.dur - @as(i64, @intCast(r.dur)));
