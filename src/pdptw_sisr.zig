@@ -578,9 +578,9 @@ const S = struct {
         var i = L - suf_keep;
         while (i > 0) {
             i -= 1;
-            const arc: u64 = if (i + 1 == L) s.inst.d(it[i], 0) else r.pre_d.items[i + 2] - r.pre_d.items[i + 1];
-            r.suf_t.items[i] = Tws.merge(Tws.client(s.inst, it[i]), @intCast(arc), r.suf_t.items[i + 1]);
-            r.tail_d.items[i] = arc + r.tail_d.items[i + 1];
+            const nxt: usize = if (i + 1 == L) 0 else it[i + 1];
+            r.suf_t.items[i] = Tws.merge(Tws.client(s.inst, it[i]), @intCast(s.inst.d(it[i], nxt)), r.suf_t.items[i + 1]);
+            r.tail_d.items[i] = s.inst.d(it[i], nxt) + r.tail_d.items[i + 1];
         }
         if (!s.fast_all) {
             if (suf_keep == 0) r.suf_l.items[L] = pdp.Lseg.empty();
