@@ -1,4 +1,20 @@
 const std = @import("std");
+
+fn transposedMatrix(allocator: std.mem.Allocator, inst: CvrpInstance) ![]u32 {
+    const dim = inst.dim();
+    const dt = try allocator.alloc(u32, dim * dim);
+    const tile: usize = 64;
+    var a0: usize = 0;
+    while (a0 < dim) : (a0 += tile) {
+        var b0: usize = 0;
+        while (b0 < dim) : (b0 += tile) {
+            for (a0..@min(a0 + tile, dim)) |a| {
+                for (b0..@min(b0 + tile, dim)) |b| dt[b * dim + a] = inst.matrix[a * dim + b];
+            }
+        }
+    }
+    return dt;
+}
 const core_anneal = @import("core/anneal.zig");
 const builtin = @import("builtin");
 const asymmetric = @import("asymmetric.zig");
@@ -179,7 +195,9 @@ pub fn solveCvrpSisr(allocator: std.mem.Allocator, inst: CvrpInstance, options: 
     const eff_blink: f64 = if (marathon_on) 0.02 else params.blink;
     const eff_tf_factor: f64 = if (marathon_on) 0.001 else params.tf_factor;
     var prng = std.Random.DefaultPrng.init(options.seed);
-    var ctx = SisrCtx{ .present = present, .removed = removed, .rprev = rprev, .rroute = rroute, .ins = ins, .touched = touched, .rmark = rmark, .blink = eff_blink, .l_max = eff_lmax, .cbar = eff_cbar, .split_rate = eff_split, .split_alpha = params.split_alpha, .regret_rate = eff_regret, .prng = &prng };
+    const dt = try transposedMatrix(allocator, inst);
+    defer allocator.free(dt);
+    var ctx = SisrCtx{ .present = present, .removed = removed, .rprev = rprev, .rroute = rroute, .ins = ins, .touched = touched, .rmark = rmark, .blink = eff_blink, .l_max = eff_lmax, .cbar = eff_cbar, .split_rate = eff_split, .split_alpha = params.split_alpha, .regret_rate = eff_regret, .prng = &prng, .dt = dt };
 
     const rng = prng.random();
 
@@ -539,7 +557,9 @@ fn refineBest(allocator: std.mem.Allocator, best: *Solution, options: solver.Sol
         defer allocator.free(rmark);
         @memset(rmark, false);
         var prng = std.Random.DefaultPrng.init(options.seed ^ 0x6B1C6B1C);
-        var ctx = SisrCtx{ .present = present, .removed = removed, .rprev = rprev, .rroute = rroute, .ins = ins, .touched = touched, .rmark = rmark, .blink = params.blink, .l_max = params.l_max, .cbar = params.cbar, .split_rate = 0, .split_alpha = params.split_alpha, .regret_rate = 0, .prng = &prng };
+        const dt = try transposedMatrix(allocator, inst);
+        defer allocator.free(dt);
+        var ctx = SisrCtx{ .present = present, .removed = removed, .rprev = rprev, .rroute = rroute, .ins = ins, .touched = touched, .rmark = rmark, .blink = params.blink, .l_max = params.l_max, .cbar = params.cbar, .split_rate = 0, .split_alpha = params.split_alpha, .regret_rate = 0, .prng = &prng, .dt = dt };
         const rng = prng.random();
         var work = try best.clone();
         defer work.deinit();

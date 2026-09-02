@@ -225,6 +225,7 @@ pub const SisrCtx = struct {
     force_split: i8 = -1, // bandit override per iteration: -1 = use split_rate, 0/1 = off/on
     regret_rate: f64 = 0, // resolved recreate strategy: P(use regret-2 this recreate)
     prng: *std.Random.DefaultPrng,
+    dt: []const u32,
 };
 
 // Don't-look queue: a FIFO ring of customers awaiting (re-)examination, with an
@@ -1844,8 +1845,10 @@ pub const Solution = struct {
                 return inst.demand[a] > inst.demand[b] or (inst.demand[a] == inst.demand[b] and a < b);
             }
         }.lt);
+        const dim = self.inst.dim();
         for (rem) |c| {
             const dem = self.inst.demand[c];
+            const dt_c = ctx.dt[c * dim ..][0..dim];
             var best: i64 = std.math.maxInt(i64); // blinked choice
             var ba: usize = 0;
             var bb: usize = 0;
@@ -1862,8 +1865,8 @@ pub const Solution = struct {
                 if (self.load[r] + dem > cap) continue;
                 const p = self.prev[m];
                 const nx = self.next[m];
-                const d1 = self.dd(p, c) + self.dd(c, m) - self.dd(p, m);
-                const d2 = self.dd(m, c) + self.dd(c, nx) - self.dd(m, nx);
+                const d1 = @as(i64, @intCast(dt_c[p])) + self.dd(c, m) - self.dd(p, m);
+                const d2 = @as(i64, @intCast(dt_c[m])) + self.dd(c, nx) - self.dd(m, nx);
                 if (d1 < bany) {
                     bany = d1;
                     aa = p;
