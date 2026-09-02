@@ -2792,8 +2792,8 @@ test "Tws and Lseg merges are associative bit for bit" {
             segs[k] = t;
             lsegs[k] = l;
         }
-        const e1: i64 = rng.uintLessThan(i64, 200);
-        const e2: i64 = rng.uintLessThan(i64, 200);
+        const e1: i64 = rng.uintLessThan(u32, 200);
+        const e2: i64 = rng.uintLessThan(u32, 200);
         const left = Tws.merge(Tws.merge(segs[0], e1, segs[1]), e2, segs[2]);
         const right = Tws.merge(segs[0], e1, Tws.merge(segs[1], e2, segs[2]));
         try std.testing.expectEqual(left, right);
