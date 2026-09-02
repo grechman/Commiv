@@ -593,6 +593,20 @@ const S = struct {
         r.dirty = false;
     }
 
+    fn ensureSufL(s: *S, ri: usize) !void {
+        if (!s.fast_all) return;
+        const r = &s.routes.items[ri];
+        const it = r.items.items;
+        const L = it.len;
+        try r.suf_l.resize(s.allocator, L + 1);
+        r.suf_l.items[L] = pdp.Lseg.empty();
+        var i = L;
+        while (i > 0) {
+            i -= 1;
+            r.suf_l.items[i] = pdp.Lseg.merge(pdp.Lseg.node(s.inst, it[i]), r.suf_l.items[i + 1]);
+        }
+    }
+
     /// Whole-sequence TW feasibility (depot -> nodes -> depot).
     fn seqFeasible(s: *S, nodes: []const usize) bool {
         var acc = Tws.depotNode(s.inst);
@@ -1003,6 +1017,7 @@ const S = struct {
                 if (s.cand_mark.items[ri] == s.generation) continue;
                 s.cand_mark.items[ri] = s.generation;
                 try s.freshen(ri);
+                try s.ensureSufL(ri);
                 const ins = s.evalPairInsertViol(ri, p, q) orelse continue;
                 if (best_ri == NO_ROUTE or ins.viol < best_ins.viol or
                     (ins.viol == best_ins.viol and ins.delta < best_ins.delta))
