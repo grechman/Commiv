@@ -77,6 +77,28 @@ numbers are not comparable with the 2026-08-19 10-thread grid): 464 cells, new
 W/T/L 96/328/40, 9642 -> 9639 vehicles, distance 5,090,509.0 -> 5,088,620.5
 (-0.037%), rows in `bench/equal-wall-pdptw.jsonl`.
 
+## Hash blink and dominance pruning (2026-09-02)
+
+The O(L^2) pair scan in `pdptw_sisr.zig` could not be pruned exactly because every
+visited gap consumed one blink draw from the shared PRNG (row 31). `core/blink.zig
+hash` now derives the blink from `(seed, generation, route, pickup, a, b)`, so a gap's
+blink no longer depends on which gaps were visited before it. That is a one-time
+trajectory change (row 33, same distribution over trajectories, different sample
+path); on top of it the Campbell & Savelsbergh style dominance breaks and
+blink-after-feasibility are exact (row 34).
+
+| workload | `69dcc23` | hash blink `a7255ba` | + pruning `89d92a5` | vs `69dcc23` |
+|---|---:|---:|---:|---:|
+| `lr2_10_1` ordinary, 20k iters | 1151 / 1132 ms | 1229 / 1228 ms | 878 / 875 ms | **-23.7% / -22.7%** |
+| `lr2_10_1` money | 1651 / 1675 ms | 1740 / 1744 ms | 1199 / 1206 ms | **-27.4% / -28.0%** |
+| `lc1_10_1` / `lr1_10_1` / `lrc1_10_1` / `lc2_10_1` / `lrc2_10_1` | - | 238 / 431 / 401 / 336 / 1058 ms | 219 / 352 / 338 / 285 / 764 ms | -8% / -18% / -16% / -15% / -28% vs hash blink |
+
+Signatures are identical between `a7255ba` and `89d92a5` on every instance, and the
+52-case REST corpus is byte-identical to `69dcc23`. The frozen signature of the
+primary harness changed deliberately at `a7255ba` (ordinary 23 veh / 45943.646 /
+142318.993 / 86375.347; money 22 veh / 61113.307 / 119996.641 / 48883.334); the
+equal-wall grids in row 35 are the quality evidence for that switch.
+
 ## Final quality audit
 
 The completed post-fix campaign is documented in
