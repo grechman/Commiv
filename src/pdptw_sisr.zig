@@ -2714,7 +2714,9 @@ test "PDPTW SISR: incremental freshen matches a full rebuild" {
         for (0..400) |_| {
             switch (rng.uintLessThan(u8, 4)) {
                 0 => try seq.insert(allocator, rng.uintAtMost(usize, seq.items.len), 1 + rng.uintLessThan(usize, dim - 1)),
-                1 => if (seq.items.len > 0) _ = seq.orderedRemove(rng.uintLessThan(usize, seq.items.len)),
+                1 => if (seq.items.len > 0) {
+                    _ = seq.orderedRemove(rng.uintLessThan(usize, seq.items.len));
+                },
                 2 => {
                     const a = rng.uintAtMost(usize, seq.items.len);
                     const b = a + rng.uintAtMost(usize, seq.items.len - a);
