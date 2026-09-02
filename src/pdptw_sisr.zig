@@ -408,8 +408,9 @@ const S = struct {
         s.* = undefined;
     }
 
-    inline fn dTo(s: *const S, a: usize, b: usize) u64 {
-        return s.dt[b * s.inst.dim() + a];
+    fn rowTo(s: *const S, b: usize) []const u32 {
+        const dim = s.inst.dim();
+        return s.dt[b * dim ..][0..dim];
     }
 
     fn arcSum(inst: pdp.PdpInstance, items: []const usize) u64 {
@@ -734,6 +735,8 @@ const S = struct {
             return s.evalPairInsertFast(ri, p, q, params);
         const blink = params.blink;
         const inst = s.inst;
+        const dt_p = s.rowTo(p);
+        const dt_q = s.rowTo(q);
         const rcap: i64 = s.routeCap(ri);
         const r = &s.routes.items[ri];
         const it = r.items.items;
@@ -752,11 +755,11 @@ const S = struct {
                 s.nbr_mark_p[it[a - 1]] != genp and s.nbr_mark_p[it[a]] != genp) continue;
             const prev_a: usize = if (a == 0) 0 else it[a - 1];
             // middle segment: pre[a] + p, extended one node per b step
-            var m_t = Tws.merge(r.pre_t.items[a], @intCast(s.dTo(prev_a, p)), Tws.client(inst, p));
+            var m_t = Tws.merge(r.pre_t.items[a], @intCast(dt_p[prev_a]), Tws.client(inst, p));
             if (m_t.tw != 0) continue; // deeper a only arrives later, but other a gaps may differ
             var m_l = pdp.Lseg.merge(r.pre_l.items[a], pdp.Lseg.node(inst, p));
             if (m_l.lo < 0 or m_l.hi > rcap) continue;
-            var m_d: u64 = r.pre_d.items[a] + s.dTo(prev_a, p);
+            var m_d: u64 = r.pre_d.items[a] + dt_p[prev_a];
             var last = p;
 
             var b = a;
@@ -766,7 +769,7 @@ const S = struct {
                     const nxt: usize = if (b == L) 0 else it[b];
                     if (granular and (params.gran_gaps & 2) != 0 and b != a and b != L and
                         s.nbr_mark_p[last] != genp and s.nbr_mark_p[nxt] != genp) break :blk;
-                    const f1 = Tws.merge(m_t, @intCast(s.dTo(last, q)), q_t);
+                    const f1 = Tws.merge(m_t, @intCast(dt_q[last]), q_t);
                     const f2 = Tws.merge(f1, @intCast(inst.d(q, nxt)), r.suf_t.items[b]);
                     if (f2.tw != 0) break :blk;
                     const f_l = pdp.Lseg.merge(pdp.Lseg.merge(m_l, q_l), r.suf_l.items[b]);
@@ -775,7 +778,7 @@ const S = struct {
                     // exceeds it. Duration is not monotone in b, so this only
                     // skips THIS (a,b) candidate (break :blk), never the loop.
                     if (s.max_route_dur > 0 and f2.dur > @as(i64, @intCast(s.max_route_dur))) break :blk;
-                    const new_dist = m_d + s.dTo(last, q) + inst.d(q, nxt) + r.tail_d.items[b];
+                    const new_dist = m_d + dt_q[last] + inst.d(q, nxt) + r.tail_d.items[b];
                     var delta = @as(i64, @intCast(new_dist)) - @as(i64, @intCast(r.dist));
                     if (s.time_penalty > 0)
                         delta += @as(i64, @intCast(s.time_penalty)) * (f2.dur - @as(i64, @intCast(r.dur)));
@@ -804,6 +807,8 @@ const S = struct {
     fn evalPairInsertFast(s: *S, ri: usize, p: usize, q: usize, params: PdpSisrParams) ?Ins {
         const blink = params.blink;
         const inst = s.inst;
+        const dt_p = s.rowTo(p);
+        const dt_q = s.rowTo(q);
         const rcap = s.routeCap(ri);
         const r = &s.routes.items[ri];
         const it = r.items.items;
@@ -822,7 +827,7 @@ const S = struct {
             const pre = r.pre_t.items[a];
             if (pre.tw != 0 or pre.early > pre.late) continue;
             const p_start = @max(
-                pre.early + pre.dur + @as(i64, @intCast(s.dTo(prev_a, p))),
+                pre.early + pre.dur + @as(i64, @intCast(dt_p[prev_a])),
                 @as(i64, @intCast(inst.ready[p])),
             );
             if (p_start > @as(i64, @intCast(inst.due[p]))) continue;
@@ -835,7 +840,7 @@ const S = struct {
             var peak = @max(r.pre_l.items[a].hi, load);
             if (r.pre_l.items[a].lo < 0 or load < 0 or peak > rcap) continue;
 
-            var middle_dist: u64 = r.pre_d.items[a] + s.dTo(prev_a, p);
+            var middle_dist: u64 = r.pre_d.items[a] + dt_p[prev_a];
             var last = p;
             var b = a;
             while (b <= L) : (b += 1) {
@@ -846,7 +851,7 @@ const S = struct {
                         s.nbr_mark_p[last] != genp and s.nbr_mark_p[nxt] != genp) break :blk;
 
                     const q_start = @max(
-                        depart + @as(i64, @intCast(s.dTo(last, q))),
+                        depart + @as(i64, @intCast(dt_q[last])),
                         @as(i64, @intCast(inst.ready[q])),
                     );
                     const suffix = r.suf_t.items[b];
@@ -854,7 +859,7 @@ const S = struct {
                     const suffix_arrival = q_start + @as(i64, @intCast(inst.service[q])) + @as(i64, @intCast(inst.d(q, nxt)));
                     if (suffix_arrival > suffix.late) break :blk;
 
-                    const new_dist = middle_dist + s.dTo(last, q) + inst.d(q, nxt) + r.tail_d.items[b];
+                    const new_dist = middle_dist + dt_q[last] + inst.d(q, nxt) + r.tail_d.items[b];
                     const delta = @as(i64, @intCast(new_dist)) - @as(i64, @intCast(r.dist));
                     if (best == null or delta < best.?.delta) best = .{ .a = a, .b = b, .delta = delta };
                 }
@@ -886,6 +891,8 @@ const S = struct {
     fn evalPairInsertBrk(s: *S, ri: usize, p: usize, q: usize, params: PdpSisrParams) ?Ins {
         const blink = params.blink;
         const inst = s.inst;
+        const dt_p = s.rowTo(p);
+        const dt_q = s.rowTo(q);
         const rcap: i64 = s.routeCap(ri);
         const bk = s.brk.?;
         const r = &s.routes.items[ri];
@@ -897,11 +904,11 @@ const S = struct {
 
         for (s.lockOf(ri)..L + 1) |a| {
             const prev_a: usize = if (a == 0) 0 else it[a - 1];
-            var m_t = Tws.merge(r.pre_t.items[a], @intCast(s.dTo(prev_a, p)), Tws.client(inst, p));
+            var m_t = Tws.merge(r.pre_t.items[a], @intCast(dt_p[prev_a]), Tws.client(inst, p));
             if (m_t.tw != 0) continue;
             var m_l = pdp.Lseg.merge(r.pre_l.items[a], pdp.Lseg.node(inst, p));
             if (m_l.lo < 0 or m_l.hi > rcap) continue;
-            var m_d: u64 = r.pre_d.items[a] + s.dTo(prev_a, p);
+            var m_d: u64 = r.pre_d.items[a] + dt_p[prev_a];
             var last = p;
 
             var b = a;
@@ -909,7 +916,7 @@ const S = struct {
                 blk: {
                     if (blinkDraw(s.prng) < blink) break :blk;
                     const nxt: usize = if (b == L) 0 else it[b];
-                    const f1 = Tws.merge(m_t, @intCast(s.dTo(last, q)), q_t);
+                    const f1 = Tws.merge(m_t, @intCast(dt_q[last]), q_t);
                     const f2 = Tws.merge(f1, @intCast(inst.d(q, nxt)), r.suf_t.items[b]);
                     if (f2.tw != 0) break :blk;
                     const f_l = pdp.Lseg.merge(pdp.Lseg.merge(m_l, q_l), r.suf_l.items[b]);
@@ -925,7 +932,7 @@ const S = struct {
                     const w = walkWithBreak(inst, cand, bk);
                     if (!w.ok) break :blk;
                     if (s.max_route_dur > 0 and w.dur > s.max_route_dur) break :blk;
-                    const new_dist = m_d + s.dTo(last, q) + inst.d(q, nxt) + r.tail_d.items[b];
+                    const new_dist = m_d + dt_q[last] + inst.d(q, nxt) + r.tail_d.items[b];
                     var delta = @as(i64, @intCast(new_dist)) - @as(i64, @intCast(r.dist));
                     if (s.time_penalty > 0)
                         delta += @as(i64, @intCast(s.time_penalty)) * (@as(i64, @intCast(w.dur)) - @as(i64, @intCast(r.dur)));
@@ -953,6 +960,8 @@ const S = struct {
     /// granular gating. Route must be freshened.
     fn evalPairInsertViol(s: *S, ri: usize, p: usize, q: usize) ?InsV {
         const inst = s.inst;
+        const dt_p = s.rowTo(p);
+        const dt_q = s.rowTo(q);
         const rcap: i64 = s.routeCap(ri);
         const r = &s.routes.items[ri];
         const it = r.items.items;
@@ -963,20 +972,20 @@ const S = struct {
 
         for (s.lockOf(ri)..L + 1) |a| {
             const prev_a: usize = if (a == 0) 0 else it[a - 1];
-            var m_t = Tws.merge(r.pre_t.items[a], @intCast(s.dTo(prev_a, p)), Tws.client(inst, p));
+            var m_t = Tws.merge(r.pre_t.items[a], @intCast(dt_p[prev_a]), Tws.client(inst, p));
             var m_l = pdp.Lseg.merge(r.pre_l.items[a], pdp.Lseg.node(inst, p));
-            var m_d: u64 = r.pre_d.items[a] + s.dTo(prev_a, p);
+            var m_d: u64 = r.pre_d.items[a] + dt_p[prev_a];
             var last = p;
 
             var b = a;
             while (b <= L) : (b += 1) {
                 const nxt: usize = if (b == L) 0 else it[b];
-                const f1 = Tws.merge(m_t, @intCast(s.dTo(last, q)), q_t);
+                const f1 = Tws.merge(m_t, @intCast(dt_q[last]), q_t);
                 const f2 = Tws.merge(f1, @intCast(inst.d(q, nxt)), r.suf_t.items[b]);
                 const f_l = pdp.Lseg.merge(pdp.Lseg.merge(m_l, q_l), r.suf_l.items[b]);
                 const load_ex: i64 = @max(f_l.hi - rcap, 0);
                 const viol: i64 = f2.tw + 10 * load_ex;
-                const new_dist = m_d + s.dTo(last, q) + inst.d(q, nxt) + r.tail_d.items[b];
+                const new_dist = m_d + dt_q[last] + inst.d(q, nxt) + r.tail_d.items[b];
                 const delta = @as(i64, @intCast(new_dist)) - @as(i64, @intCast(r.dist));
                 if (best == null or viol < best.?.viol or (viol == best.?.viol and delta < best.?.delta)) {
                     best = .{ .a = a, .b = b, .viol = viol, .delta = delta };
