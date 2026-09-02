@@ -97,7 +97,17 @@ Signatures are identical between `a7255ba` and `89d92a5` on every instance, and 
 52-case REST corpus is byte-identical to `69dcc23`. The frozen signature of the
 primary harness changed deliberately at `a7255ba` (ordinary 23 veh / 45943.646 /
 142318.993 / 86375.347; money 22 veh / 61113.307 / 119996.641 / 48883.334); the
-equal-wall grids in row 35 are the quality evidence for that switch.
+equal-wall grids in row 35 are the quality evidence for that switch, and they are a
+wash: at equal wall the new trajectory is indistinguishable from the old one.
+
+| grid | cells | new W/T/L | old | new | delta |
+|---|---:|---|---:|---:|---:|
+| money, 1 thread | 352 | 157/73/122 | $10,966,778.03 | $10,967,825.03 | +0.010% |
+| ordinary, fleet-min | 464 | 136/214/114 | 9639 veh, 5,081,140.9 | 9640 veh, 5,067,328.2 | +1 veh, -0.272% dist |
+
+Rows in `bench/equal-wall-hash-{money,pdptw}.jsonl`, scorer `bench/equal_wall_score.py`.
+The frozen harness (`bench/config.json`) is refrozen at `89d92a5`; its signature is the
+hash-blink one above and the old 25-vehicle signature no longer applies.
 
 ## Final quality audit
 
