@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-"""Score paired equal-wall rows from bench/equal_wall_runner.py.
-
-usage: equal_wall_score.py money|pdptw RESULTS_JSONL
-
-money: $ = 140 * veh + 0.5 * dist + 0.5 * dur; lower wins.
-pdptw: fewer vehicles wins, then lower distance; rows without a parsed
-result count as incomplete and lose to any complete row.
-"""
 
 from __future__ import annotations
 

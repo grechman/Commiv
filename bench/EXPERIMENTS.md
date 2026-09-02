@@ -10,6 +10,8 @@ counts, and CPU affinity. Times are seconds unless marked milliseconds.
 |---|---|---|---|---|---|
 | 2026-08-18 | `80858dc` | PASS: baseline medians 3682 / 3716 ms (0.92%) and candidate 2913 / 2872 ms (1.42%), both inside the 1.5% half-margin | PASS: doubled work produced 4750 / 4753 ms versus 2872-2913 ms normally | PASS: harness creates no output files | PASS: 20k solver-owned iterations, wall 2.87-3.74 s |
 | 2026-09-01 | `887e520` (auregat, Debian 13, Ryzen 5 2600X, Zig 0.16.0, `taskset -c 2`) | PASS: baseline medians 2388 / 2383 ms (0.21%), signature 25 veh / 46264.058 / 153079.687 / 96815.629 on every run | PASS: `--iters 40000` produced 3857 / 3855 ms versus 2383-2388 ms | PASS: harness creates no output files | PASS: 20k solver-owned iterations, wall 2.37-2.55 s |
+| 2026-09-02 | `f6be7bb` VRPTW harness `bench/run_fixed.py vrptw` (GH `c1_10_1`, 300k SISR iterations, seed 1, `taskset -c 2`) | PASS: `4312d28` medians 2427 / 2426 / 2423 ms, signature `100 veh / 42504.61` on every run | PASS: `--iters 600000` (at 100k/200k: 1613 vs 952 ms) changes the result and the time | PASS: no output files | PASS: solver-owned iterations, wall 2.4 s |
+| 2026-09-02 | `f6be7bb` CVRP harness `bench/run_fixed.py cvrp` (Uchoa `X-n1001-k43`, 600k SISR iterations, one thread, seed 1, `taskset -c 2`) | PASS: `4312d28` medians 2486 / 2487 / 2481 ms, signature `74102 / 43 routes` on every run | PASS: `--iters 400000` at 200k gave 1585 vs 1051 ms and cost 73725 vs 74465 | PASS: no output files | PASS: solver-owned iterations, wall 2.5 s |
 
 Primary harness: `taskset -c 2 python3 bench/run.py --build --runs 5 --iters 20000 --seed 1`.
 It rejects any fixed-seed result-signature disagreement before emitting JSON.
@@ -34,9 +36,22 @@ It rejects any fixed-seed result-signature disagreement before emitting JSON.
 | 14 | Quadratic PDPTW seed construction | The due-sorted cheapest-pair-insertion seed rebuilt an O(L) `routeCost` per candidate gap pair (26% of the frozen run in `perf`); prefix departure/load labels plus a latest-arrival suffix label evaluate each (a, b) in O(1) with the same feasibility verdicts, deltas, and first-strict-minimum tie-break | `8dc885d` | `887e520` (auregat) | old 2371 / 2398 / 2382 / 2548 / 2388 and 2451 / 2382 / 2383 / 2381 / 2415 ms; new 1486 / 1511 / 1458 / 1468 / 1480 and 1515 / 1471 / 1496 / 1466 / 1480 ms | -38.0% / -37.9% (medians 2388 / 2383 -> 1480 / 1480) | WIN | Signature identical on all 20 runs (25 veh, 46264.058, 153079.687, 96815.629). Route-for-route differential test against the retained reference construction on 80 random/clocked instances. Reproduce: `taskset -c 2 python3 bench/run.py --build --runs 5 --iters 20000 --seed 1` |
 | 15 | Direct Xoshiro blink draw | `rng.float(f64)` per candidate gap pair went through the `std.Random` fill interface (an indirect call plus a byte loop, 4.7% of the frozen run in `perf`); drawing `next()` from the engine's own `DefaultPrng` and applying std's exact f64 mapping keeps the draw sequence bit-identical | `5b6ffe0` | `8dc885d` (auregat) | first pass 1201 / 1259 / 1187 / 1290 / 1364, 1253 / 1187 / 1192 / 1236 / 1193, 1281 / 1247 / 1257 / 1287 / 1311 ms (medians 1259 / 1193 / 1281, spread above margin under load 1.9-2.1 from a parallel agent); interleaved with the `8dc885d` binary: old 1538 / 1502 / 1478, new 1230 / 1239 / 1221 ms medians | -20.0% / -17.5% / -17.4% interleaved (candidate spread 1.5%) | WIN | Signature identical on all 45 runs. Unit test draws 4M values against `std.Random.float(f64)` from the same seeds. Full candidate tree (`3f556d7`) re-measured 1187 / 1206 ms. Reproduce as experiment 14 |
 
+| 16 | PDPTW rebench on auregat, `887e520` vs `4312d28` | Re-measure the previous agent's two levers in both objectives before building on them | `4312d28` | `887e520` | ordinary medians old 2384 / 2401 / 2392 / 2442, new 1250 / 1397 / 1190 / 1250 ms (runs 1190-1611, box otherwise idle; the spread is measurement noise on 1.2 s runs, see the quiet-window rows below); money old 2962 / 2948, new 1855 / 1854 ms | ordinary -42% to -50%; money -37.4% / -37.1% | CONFIRMED | Signatures identical: ordinary 25 veh / 46264.058 / 153079.687 / 96815.629; money 23 veh / 65947.311 / 121213.662 / 45266.351. Money mode is covered by both levers (seed construction and blink draw are objective-independent) |
+| 17 | Skip the unread PDPTW suffix load labels | `suf_l` is only read by the general, break and squeeze evaluators; when every pair takes the fast path it need not be built | `f6ccf00` | `4312d28` | interleaved under the money-grid load: old 1227 / 1222, new 1251 / 1196 ms | +2.0% / -2.1% | INCONCLUSIVE alone | Kept only as the prerequisite of 18. The squeeze evaluator still needs the labels: `ensureSufL` rebuilds them on demand (`793e67b`, after the Debug suite caught an index-out-of-bounds in the eject test) |
+| 18 | Incremental PDPTW `freshen` | Rebuilding six prefix/suffix arrays per touched route was 13.6% of the tip run; keeping the untouched prefix and shifting the untouched suffix halves the fold | `885695d` | `4312d28` | quiet window, medians of 5, interleaved: ordinary old 1205 / 1396 / 1223, new 1160 / 1146 / 1173 ms; money old 1860 / 1839 / 1842, new 1857 / 1834 / 1829 ms | ordinary -3.7% / -17.9% (old run 2 had three outliers) / -4.1%; money -0.2% / -0.3% / -0.7% | WIN (ordinary, marginal) | 400-edit differential test against a from-scratch rebuild in both objectives; signatures identical |
+| 19 | Precompute the dropoff-plus-suffix merges once per route (money) | The general evaluator pays two Tws and two Lseg merges per gap pair; merging q into every suffix once per call leaves one merge per pair | `d74a2ca`, reverted `08bdec4` | `3160154` | money interleaved under grid load: old 1884, new 2150 ms | +14.1% | DEAD | Merge associativity holds bit for bit (test kept, 200k random triples), but the b-loop prunes early: per-call O(L) precompute work exceeds the merges it saves |
+| 20 | Transposed distance rows alone | `d(prev_a, p)` and `d(last, q)` walk a matrix column per gap; a transposed copy makes them row reads | `92d7988`, `11a8f58`, `b4c6b76` | `3160154` | `perf stat` under grid load, cycles old 4.62 / 4.73 / 5.12 G, new 5.24 / 4.99 / 5.48 G (instructions -4% to -10%, cache-misses -56%) | +13.3% / +5.5% / +7.0% cycles | DEAD alone | Row `last` is still fetched for the middle-arc lookup, so the copy only adds traffic; superseded by 22 |
+| 21 | Route arcs from prefix distances | `d(last, it[b])` inside the b-loop equals `pre_d[b+1] - pre_d[b]` for b > a, an exact integer difference that avoids the random-row fetch | `edf23fc` | `885695d` | quiet: ordinary 1160 / 1161 / 1160 vs 1160 / 1146 / 1173 ms; money 1813 / 1803 / 1797 vs 1857 / 1834 / 1829 ms | ordinary 0.0% / +1.3% / -1.1%; money -2.4% / -1.7% / -1.7% | INCONCLUSIVE alone | Kept as the prerequisite of 22: with it the only remaining random-row reads are the two fixed-target lookups |
+| 22 | Transposed rows on top of 21 | With 21 in place the fixed-target lookups are the last column walks; a tiled transposed copy per engine instance turns them into row reads | `8c32bf3` (restores 20 on top of 21) | `edf23fc` | quiet: ordinary 1132 / 1154 / 1134 vs 1160 / 1161 / 1160 ms; money 1640 / 1657 / 1664 vs 1813 / 1803 / 1797 ms | ordinary -2.4% / -0.6% / -2.2%; money -9.5% / -8.1% / -7.4% | WIN (money) | Costs dim^2 x 4 bytes per engine instance (4 MB at 1000 customers, one per parallel fleet-min worker); signatures identical |
+| 23 | Suffix arcs from prefix distances | Same trick inside `freshen`'s backward fold | `c5247c0`, reverted `b0b0779` | `edf23fc` | quiet: ordinary 1169 / 1191 / 1181 vs 1160 / 1161 / 1160 ms; money 1791 / 1775 / 1823 vs 1813 / 1803 / 1797 ms | ordinary +0.8% / +2.6% / +1.8%; money -1.2% / -1.6% / +1.4% | DEAD | The prefix fold already fetches each arc once; the second fetch hits cache |
+| 24 | VRPTW direct blink draw | The two per-gap `rng.float(f64)` blink draws in SISR recreate go through the generic `std.Random` fill interface, as in experiment 15 | `b233107` (draw shared via `core/blink.zig`, `5dfd4f8`) | `4312d28` | quiet, GH `c1_10_1` 300k iterations: old 2427 / 2426 / 2423, new 2123 / 2114 / 2106 ms | -12.5% / -12.9% / -13.1% | WIN | Signature `100 veh / 42504.61` identical on all 30 runs; 4M-draw equivalence test in `core/blink.zig` |
+| 25 | CVRP direct blink draw | Same draw in the CVRP SISR recreate (two per neighbour) | `9be2099` | `4312d28` | quiet, `X-n1001-k43` 600k iterations one thread: old 2486 / 2487 / 2481, new 2048 / 2037 / 2048 ms | -17.6% / -18.1% / -17.5% | WIN | Signature `74102 / 43` identical on all 30 runs |
+| 26 | Branch tip `8c32bf3` vs `4312d28`, PDPTW both objectives | Combined effect of 17, 18, 21, 22 | `8c32bf3` | `4312d28` | quiet: ordinary old 1371 / 1222 / 1243, new 1130 / 1138 / 1140 ms; money old 1853 / 1831 / 1859, new 1660 / 1672 / 1682 ms | ordinary -17.6% / -6.9% / -8.3%; money -10.4% / -8.7% / -9.5% | WIN | 52-case REST corpus byte-identical to `887e520`; reproduce with the two commands in the money section below |
+
 ## Fixed artifacts
 
-- Windows server: `maxgrechkov@100.123.98.112`, Ubuntu under WSL2, CPU pinned as recorded.
+- Windows server: `maxgrechkov@100.123.98.112`, Ubuntu under WSL2, CPU pinned as recorded (gone; rows 1-13).
+- auregat: `~/projects/stage-bins/<stage>/commiv-pdptwbench` holds every A/B binary of rows 16-26; `bench/equal-wall-quiet-timing.log` is the raw quiet-window log.
 - PDPTW instance: vendored Li & Lim `vendor/pdptw/1000/lr2_10_1.txt`.
 - Baseline refs are commit hashes, never moving branches.
 
@@ -87,3 +102,27 @@ Reproduce either mode with the same harness:
 taskset -c 2 python3 bench/run.py --runs 5 --iters 20000 --seed 1                      # ordinary
 taskset -c 2 python3 bench/run.py --runs 5 --iters 20000 --seed 1 --time-pen 1 --veh-pen 280000   # money
 ```
+
+## Equal-wall quality grids, `887e520` vs `4312d28` (auregat, 2026-09-02)
+
+Runner `bench/equal_wall_runner.py`, scorer `bench/equal_wall_score.py`, both
+binaries snapshotted with their sha256 in the first jsonl row. Money cells ran
+old and new back to back on one physical core (order alternating), five cores in
+parallel, cores 2/8 untouched; wall budgets 10/15/30/45/60/90 s by size.
+
+| grid | cells | new W/T/L | old total | new total | delta | rows |
+|---|---:|---|---:|---:|---:|---|
+| academic money (`PB_TIMEPEN=1 PB_VEH_PEN=280000`, 1 thread) | 352 | 63/289/0 | $10,975,931.77 | $10,969,375.04 | -0.060% | `bench/equal-wall-money.jsonl` |
+
+Per size: 100 1/55/0, 200 7/53/0 (-0.039%), 400 7/51/0 (-0.010%), 600 16/44/0
+(-0.048%), 800 15/45/0 (-0.076%), 1000 17/41/0 (-0.071%). Zero losses is
+expected: at a fixed seed both binaries follow the same trajectory, so the
+faster one only ever gets further along it.
+
+The ordinary PDPTW grid (`PB_FLEET=1 PB_EJECT=1`, `PB_GRAN=2` above size 100,
+seeds 1/2/3 at size 100) runs old and new at the same time with `PB_THREADS=5`
+on the two SMT halves of cores 0,1,3,4,5, sides alternating per cell. That is
+the same total load as the 2026-08-19 protocol (10 threads on 10 CPUs) but a
+different search per binary, so the absolute numbers are not comparable with
+`OPPOSITION_FINAL.md`; only the old/new pairing is. Its rows land in
+`bench/equal-wall-pdptw.jsonl` when the unit finishes.

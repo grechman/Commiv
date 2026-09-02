@@ -1,16 +1,4 @@
 #!/usr/bin/env python3
-"""Paired equal-wall Li & Lim grid: one old and one new pdptwbench binary.
-
-usage: equal_wall_runner.py money|pdptw OLD_BIN NEW_BIN [OUT_DIR]
-
-Cells and env follow bench/postfix-remaining-runner.py (352 instances, wall
-10/15/30/45/60/90 s by size; money = PB_TIMEPEN=1 PB_VEH_PEN=280000 one thread;
-pdptw = PB_FLEET=1 PB_EJECT=1, PB_GRAN=2 above size 100, seeds 1/2/3 at size 100).
-Money cells run old then new back to back on one physical core (order alternates
-per cell, five cores in parallel). PDPTW cells run old and new at the same time
-with PB_THREADS=5 on the two SMT halves of the same five cores, sides alternating.
-Every row is appended to results.jsonl; the journal makes reruns append-only.
-"""
 
 from __future__ import annotations
 

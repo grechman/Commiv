@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-"""Fixed-work throughput harness for the VRPTW and CVRP SISR engines.
-
-usage: run_fixed.py vrptw|cvrp [--build] [--runs N] [--iters N] [--seed N] [--binary PATH]
-
-Same protocol as bench/run.py: the solver owns its iteration budget, raw rows go
-to stderr, the last stdout line is one JSON object, and any fixed-seed result
-disagreement between runs aborts.
-"""
 from __future__ import annotations
 
 import argparse

@@ -1,0 +1,88 @@
+### quiet window start 13:58:07 load=1.38
+### ord tip rep1 13:58:07
+median 1205 runs [1196, 1205, 1277, 1191, 1276] veh 25 wait 96815.629
+### ord freshen rep1 13:58:13
+median 1160 runs [1160, 1165, 1200, 1144, 1155] veh 25 wait 96815.629
+### ord arcs rep1 13:58:19
+median 1160 runs [1202, 1149, 1160, 1199, 1152] veh 25 wait 96815.629
+### ord sufd rep1 13:58:25
+median 1169 runs [1184, 1142, 1157, 1209, 1169] veh 25 wait 96815.629
+### ord combo rep1 13:58:31
+median 1132 runs [1163, 1123, 1114, 1142, 1132] veh 25 wait 96815.629
+### ord tip rep2 13:58:37
+median 1396 runs [1254, 1193, 1396, 1462, 1594] veh 25 wait 96815.629
+### ord freshen rep2 13:58:44
+median 1146 runs [1185, 1143, 1146, 1147, 1143] veh 25 wait 96815.629
+### ord arcs rep2 13:58:49
+median 1161 runs [1174, 1151, 1154, 1169, 1161] veh 25 wait 96815.629
+### ord sufd rep2 13:58:55
+median 1191 runs [1191, 1158, 1133, 1207, 1200] veh 25 wait 96815.629
+### ord combo rep2 13:59:01
+median 1154 runs [1158, 1127, 1128, 1154, 1174] veh 25 wait 96815.629
+### ord tip rep3 13:59:07
+median 1223 runs [1262, 1191, 1207, 1235, 1223] veh 25 wait 96815.629
+### ord freshen rep3 13:59:13
+median 1173 runs [1140, 1210, 1209, 1173, 1151] veh 25 wait 96815.629
+### ord arcs rep3 13:59:19
+median 1160 runs [1160, 1207, 1141, 1172, 1149] veh 25 wait 96815.629
+### ord sufd rep3 13:59:25
+median 1181 runs [1137, 1181, 1183, 1180, 1332] veh 25 wait 96815.629
+### ord combo rep3 13:59:31
+median 1134 runs [1123, 1152, 1125, 1134, 1165] veh 25 wait 96815.629
+### money tip rep1 13:59:37
+median 1860 runs [1826, 1860, 1866, 1828, 1870] veh 23 wait 45266.351
+### money freshen rep1 13:59:46
+median 1857 runs [1823, 1863, 1925, 1813, 1857] veh 23 wait 45266.351
+### money arcs rep1 13:59:56
+median 1813 runs [1781, 1820, 1813, 1783, 1818] veh 23 wait 45266.351
+### money sufd rep1 14:00:05
+median 1791 runs [1768, 1805, 1763, 1809, 1791] veh 23 wait 45266.351
+### money combo rep1 14:00:14
+median 1640 runs [1640, 1679, 1638, 1656, 1636] veh 23 wait 45266.351
+### money tip rep2 14:00:22
+median 1839 runs [1824, 1839, 1821, 1841, 1894] veh 23 wait 45266.351
+### money freshen rep2 14:00:31
+median 1834 runs [1834, 1842, 1807, 1837, 1804] veh 23 wait 45266.351
+### money arcs rep2 14:00:41
+median 1803 runs [1807, 1803, 1766, 1805, 1769] veh 23 wait 45266.351
+### money sufd rep2 14:00:50
+median 1775 runs [1842, 1761, 1776, 1775, 1761] veh 23 wait 45266.351
+### money combo rep2 14:00:59
+median 1657 runs [1690, 1657, 1680, 1632, 1650] veh 23 wait 45266.351
+### money tip rep3 14:01:07
+median 1842 runs [1842, 1899, 1839, 1833, 1842] veh 23 wait 45266.351
+### money freshen rep3 14:01:16
+median 1829 runs [1882, 1809, 1829, 1813, 1939] veh 23 wait 45266.351
+### money arcs rep3 14:01:26
+median 1797 runs [1796, 1772, 1804, 1797, 1808] veh 23 wait 45266.351
+### money sufd rep3 14:01:35
+median 1823 runs [1823, 1776, 1873, 1775, 1826] veh 23 wait 45266.351
+### money combo rep3 14:01:44
+median 1664 runs [1638, 1676, 1671, 1645, 1664] veh 23 wait 45266.351
+### vrptw ../stage-bins/tip/commiv-vrptwbench rep1 14:01:52
+{"instance": "c1_10_1", "iters": 300000, "median_ms": 2427, "runs_ms": [2434, 2428, 2427, 2425, 2424], "seed": 1, "signature": "c1_10_1,1000,100,42478.95,100,42504.61,0.060,true,true", "solver": "vrptw"}
+### vrptw zig-out/bin/commiv-vrptwbench rep1 14:02:04
+{"instance": "c1_10_1", "iters": 300000, "median_ms": 2123, "runs_ms": [2107, 2132, 2123, 2101, 2123], "seed": 1, "signature": "c1_10_1,1000,100,42478.95,100,42504.61,0.060,true,true", "solver": "vrptw"}
+### cvrp ../stage-bins/tip/commiv-cvrpbench rep1 14:02:15
+{"instance": "X-n1001-k43", "iters": 600000, "median_ms": 2486, "runs_ms": [2492, 2463, 2476, 2486, 2499], "seed": 1, "signature": "X-n1001-k43,1000,72355,74102,2.414,43,0,true", "solver": "cvrp"}
+### cvrp zig-out/bin/commiv-cvrpbench rep1 14:02:28
+{"instance": "X-n1001-k43", "iters": 600000, "median_ms": 2048, "runs_ms": [2053, 2020, 2054, 2048, 2030], "seed": 1, "signature": "X-n1001-k43,1000,72355,74102,2.414,43,0,true", "solver": "cvrp"}
+### vrptw ../stage-bins/tip/commiv-vrptwbench rep2 14:02:38
+{"instance": "c1_10_1", "iters": 300000, "median_ms": 2426, "runs_ms": [2445, 2426, 2426, 2427, 2407], "seed": 1, "signature": "c1_10_1,1000,100,42478.95,100,42504.61,0.060,true,true", "solver": "vrptw"}
+### vrptw zig-out/bin/commiv-vrptwbench rep2 14:02:50
+{"instance": "c1_10_1", "iters": 300000, "median_ms": 2114, "runs_ms": [2132, 2130, 2097, 2112, 2114], "seed": 1, "signature": "c1_10_1,1000,100,42478.95,100,42504.61,0.060,true,true", "solver": "vrptw"}
+### cvrp ../stage-bins/tip/commiv-cvrpbench rep2 14:03:01
+{"instance": "X-n1001-k43", "iters": 600000, "median_ms": 2487, "runs_ms": [2487, 2471, 2489, 2490, 2463], "seed": 1, "signature": "X-n1001-k43,1000,72355,74102,2.414,43,0,true", "solver": "cvrp"}
+### cvrp zig-out/bin/commiv-cvrpbench rep2 14:03:13
+{"instance": "X-n1001-k43", "iters": 600000, "median_ms": 2037, "runs_ms": [2042, 2019, 2037, 2040, 2023], "seed": 1, "signature": "X-n1001-k43,1000,72355,74102,2.414,43,0,true", "solver": "cvrp"}
+### vrptw ../stage-bins/tip/commiv-vrptwbench rep3 14:03:23
+{"instance": "c1_10_1", "iters": 300000, "median_ms": 2423, "runs_ms": [2445, 2417, 2423, 2417, 2435], "seed": 1, "signature": "c1_10_1,1000,100,42478.95,100,42504.61,0.060,true,true", "solver": "vrptw"}
+### vrptw zig-out/bin/commiv-vrptwbench rep3 14:03:36
+{"instance": "c1_10_1", "iters": 300000, "median_ms": 2106, "runs_ms": [2118, 2115, 2106, 2099, 2099], "seed": 1, "signature": "c1_10_1,1000,100,42478.95,100,42504.61,0.060,true,true", "solver": "vrptw"}
+### cvrp ../stage-bins/tip/commiv-cvrpbench rep3 14:03:46
+{"instance": "X-n1001-k43", "iters": 600000, "median_ms": 2481, "runs_ms": [2466, 2481, 2473, 2485, 2490], "seed": 1, "signature": "X-n1001-k43,1000,72355,74102,2.414,43,0,true", "solver": "cvrp"}
+### cvrp zig-out/bin/commiv-cvrpbench rep3 14:03:59
+{"instance": "X-n1001-k43", "iters": 600000, "median_ms": 2048, "runs_ms": [2040, 2048, 2062, 2027, 2053], "seed": 1, "signature": "X-n1001-k43,1000,72355,74102,2.414,43,0,true", "solver": "cvrp"}
+### quiet window end 14:04:09
+Running as unit: commiv-equal-wall-pdptw.service; invocation ID: 918f190980f149c887660dde3d85bc46
+### pdptw grid launched 14:04:09
