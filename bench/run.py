@@ -28,6 +28,8 @@ def main() -> int:
     ap.add_argument("--build", action="store_true")
     ap.add_argument("--time-pen", type=int, default=0, help="PB_TIMEPEN; >0 selects money mode")
     ap.add_argument("--veh-pen", type=int, default=0, help="PB_VEH_PEN; money mode fleet price")
+    ap.add_argument("--dir", default="vendor/pdptw/1000")
+    ap.add_argument("--instance", default="lr2_10_1")
     args = ap.parse_args()
     if args.runs < 1 or args.iters < 1:
         ap.error("--runs and --iters must be positive")
@@ -45,8 +47,8 @@ def main() -> int:
 
     env = os.environ.copy()
     env.update(
-        PB_DIR="vendor/pdptw/1000",
-        PB_FILES="lr2_10_1",
+        PB_DIR=args.dir,
+        PB_FILES=args.instance,
         PB_FLEET="0",
         PB_TIME_MS="0",
         PB_ITERS=str(args.iters),
@@ -61,7 +63,7 @@ def main() -> int:
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
         )
         text = cp.stdout + cp.stderr
-        row = next((line for line in text.splitlines() if line.startswith("lr2_10_1,")), None)
+        row = next((line for line in text.splitlines() if line.startswith(args.instance + ",")), None)
         if row is None:
             raise SystemExit(f"run {run + 1}: benchmark row not found\n{text}")
         fields = row.split(",")
