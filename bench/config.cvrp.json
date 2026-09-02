@@ -1,5 +1,5 @@
 {
-  "run": "taskset -c 2 python3 bench/run_fixed.py cvrp --build --runs 5 --iters 200000 --seed 1",
+  "run": "taskset -c 2 python3 bench/run_fixed.py cvrp --build --runs 5 --iters 600000 --seed 1",
   "metric": {
     "name": "median_ms",
     "direction": "lower",
@@ -15,7 +15,7 @@
   "env": {
     "threads": 1,
     "seed": 1,
-    "iters": 200000,
+    "iters": 600000,
     "instance": "X-n1001-k43",
     "machine": "auregat",
     "cpu_affinity": 2

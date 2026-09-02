@@ -23,7 +23,7 @@ SOLVERS = {
         "binary": "zig-out/bin/commiv-vrptwbench",
         "instance": "c1_10_1",
         "fields": 10,
-        "iters": 100_000,
+        "iters": 300_000,
         "env": lambda a: {"VT_DIR": "vendor/vrptw/gh", "VT_FILES": "c1_10_1", "VT_SEED": str(a.seed), "VT_ITERS": str(a.iters)},
     },
     "cvrp": {
@@ -31,7 +31,7 @@ SOLVERS = {
         "binary": "zig-out/bin/commiv-cvrpbench",
         "instance": "X-n1001-k43",
         "fields": 9,
-        "iters": 200_000,
+        "iters": 600_000,
         "env": lambda a: {"CB_DIR": "vendor/cvrp_x", "CB_FILES": "X-n1001-k43", "CB_SISR": "1", "CB_THREADS": "1", "CB_SEED": str(a.seed), "CB_ITERS": str(a.iters)},
     },
 }
