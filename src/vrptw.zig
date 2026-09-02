@@ -65,6 +65,7 @@ pub fn scheduleSlice(inst: VrptwInstance, nodes: []const usize) ?u64 {
 // Time-Window Segment: shared O(1)-concatenation algebra (see core/tws.zig),
 // instantiated over VrptwInstance.
 const Tws = @import("core/tws.zig").Tws(VrptwInstance);
+const blinkDraw = @import("core/blink.zig").draw;
 
 /// Whole-route TWS (depot -> nodes -> depot). tw == 0 iff time-window feasible.
 fn routeTws(inst: VrptwInstance, nodes: []const usize) Tws {
@@ -1969,6 +1970,7 @@ const SisrTwRoute = struct {
 const SisrTw = struct {
     allocator: std.mem.Allocator,
     inst: VrptwInstance,
+    prng: *std.Random.DefaultPrng,
     routes: std.ArrayList(SisrTwRoute) = .empty,
     nonempty: usize = 0,
     cost: u64 = 0, // total distance + veh_penalty * nonempty
@@ -2021,10 +2023,11 @@ const SisrTw = struct {
         insert: struct { ri: usize, g: usize, dist: u64, load: u64 },
     };
 
-    fn init(allocator: std.mem.Allocator, inst: VrptwInstance, veh_penalty: u64, gran: []const usize, gk: usize) !SisrTw {
+    fn init(allocator: std.mem.Allocator, inst: VrptwInstance, veh_penalty: u64, gran: []const usize, gk: usize, prng: *std.Random.DefaultPrng) !SisrTw {
         const s = SisrTw{
             .allocator = allocator,
             .inst = inst,
+            .prng = prng,
             .veh_penalty = veh_penalty,
             .gran = gran,
             .gk = gk,
@@ -2571,7 +2574,7 @@ const SisrTw = struct {
                     }
                     const pos = s.loc_pos[nb];
                     for ([_]usize{ pos, pos + 1 }) |g| {
-                        if (rng.float(f64) < params.blink) continue;
+                        if (blinkDraw(s.prng) < params.blink) continue;
                         const delta = s.gapDelta(ri, g, c) orelse continue;
                         if (delta < best_delta) {
                             best_delta = delta;
@@ -2592,7 +2595,7 @@ const SisrTw = struct {
                     if (r.load + s.inst.demand[c] > s.inst.capacity) continue;
                     try s.freshen(ri);
                     for (0..r.items.items.len + 1) |g| {
-                        if (rng.float(f64) < params.blink) continue;
+                        if (blinkDraw(s.prng) < params.blink) continue;
                         const delta = s.gapDelta(ri, g, c) orelse continue;
                         if (delta < best_delta) {
                             best_delta = delta;
@@ -2877,7 +2880,8 @@ pub fn solveVrptwSisrFrom(allocator: std.mem.Allocator, inst: VrptwInstance, opt
     const gran = try buildNeighborsKeyed(allocator, inst, gk, params.nbr_key);
     defer allocator.free(gran);
 
-    var cur = try SisrTw.init(allocator, inst, params.veh_penalty, gran, gk);
+    var prng = std.Random.DefaultPrng.init(options.seed ^ 0x51_53_52_7457); // distinct stream from the ILS
+    var cur = try SisrTw.init(allocator, inst, params.veh_penalty, gran, gk, &prng);
     cur.max_route_dur = params.max_route_dur;
     defer cur.deinit();
     if (params.tabu_tenure > 0) {
@@ -2950,7 +2954,6 @@ pub fn solveVrptwSisrFrom(allocator: std.mem.Allocator, inst: VrptwInstance, opt
     errdefer if (best) |*b| b.deinit();
     var best_cost = cur.cost;
 
-    var prng = std.Random.DefaultPrng.init(options.seed ^ 0x51_53_52_7457); // distinct stream from the ILS
     const rng = prng.random();
     // Marathon profile (see VrptwSisrParams.marathon): only takes effect at
     // iters >= 1,000,000, so this is a pure no-op below that gate. ruin/recreate
@@ -3088,7 +3091,7 @@ pub fn solveVrptwSisrFrom(allocator: std.mem.Allocator, inst: VrptwInstance, opt
         // keep the result only if it improved. polish applies strict
         // improvements only, so the returned cost is never worse than
         // without this pass.
-        var fin = try SisrTw.init(allocator, inst, params.veh_penalty, gran, gk);
+        var fin = try SisrTw.init(allocator, inst, params.veh_penalty, gran, gk, &prng);
         fin.max_route_dur = params.max_route_dur;
         defer fin.deinit();
         for (best.?.routes) |route| {
@@ -3337,7 +3340,8 @@ test "VRPTW SISR: exact-delta dist/load match a from-scratch recompute after eve
     const gran = try buildNeighbors(allocator, inst, gk);
     defer allocator.free(gran);
 
-    var s = try SisrTw.init(allocator, inst, 0, gran, gk);
+    var blink_prng = std.Random.DefaultPrng.init(0);
+    var s = try SisrTw.init(allocator, inst, 0, gran, gk, &blink_prng);
     defer s.deinit();
     {
         const ri = try s.addSlot();
@@ -3406,7 +3410,8 @@ test "VRPTW SISR: undo-journal rollback restores the exact pre-iteration state" 
     const gran = try buildNeighbors(allocator, inst, gk);
     defer allocator.free(gran);
 
-    var s = try SisrTw.init(allocator, inst, 500, gran, gk);
+    var blink_prng = std.Random.DefaultPrng.init(0);
+    var s = try SisrTw.init(allocator, inst, 500, gran, gk, &blink_prng);
     defer s.deinit();
     {
         // seed: one customer per route (always TW-feasible), the engine merges from there
@@ -3531,7 +3536,8 @@ test "VRPTW SISR: partial freshen matches a full from-scratch pre/suf rebuild" {
     const gran = try buildNeighbors(allocator, inst, gk);
     defer allocator.free(gran);
 
-    var s = try SisrTw.init(allocator, inst, 0, gran, gk);
+    var blink_prng = std.Random.DefaultPrng.init(0);
+    var s = try SisrTw.init(allocator, inst, 0, gran, gk, &blink_prng);
     defer s.deinit();
     {
         const ri = try s.addSlot();
@@ -3822,7 +3828,8 @@ test "VRPTW SISR: stressPick always returns the worst-detour customer" {
     const inst = VrptwInstance{ .n = n, .matrix = &matrix, .demand = &demand, .capacity = 10, .ready = &ready, .due = &due, .service = &service };
     const gran = try buildNeighbors(allocator, inst, 2);
     defer allocator.free(gran);
-    var s = try SisrTw.init(allocator, inst, 0, gran, 2);
+    var blink_prng = std.Random.DefaultPrng.init(0);
+    var s = try SisrTw.init(allocator, inst, 0, gran, 2, &blink_prng);
     defer s.deinit();
     const ri = try s.addSlot();
     try s.installRoute(ri, &.{ 1, 2, 3, 4 });
@@ -3920,7 +3927,8 @@ test "VRPTW SISR: string removal is feasibility-checked under triangle-inequalit
         const inst = VrptwInstance{ .n = n, .matrix = &matrix, .demand = &demand, .capacity = 10, .ready = &ready, .due = &due, .service = &service };
         const gran = try buildNeighbors(allocator, inst, 2);
         defer allocator.free(gran);
-        var s = try SisrTw.init(allocator, inst, 0, gran, 2);
+        var blink_prng = std.Random.DefaultPrng.init(0);
+        var s = try SisrTw.init(allocator, inst, 0, gran, 2, &blink_prng);
         defer s.deinit();
         const ri = try s.addSlot();
         try s.installRoute(ri, &.{ 1, 2, 3 });
