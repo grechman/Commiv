@@ -14,7 +14,7 @@ their WSL2 numbers and are not comparable to auregat times.
 | Li & Lim `lr2_10_1`, 20k PDPTW iterations, seed 1, one thread | 2384 / 2401 / 2392 / 2442 ms (`887e520` on auregat, 5 runs each) | 1130 / 1138 / 1140 ms (`8c32bf3`, 5 runs each, quiet window) | exact objective/fleet/duration/wait (25 veh, 46264.058, 153079.687, 96815.629) and byte-identical responses on the 52-case `tools/rest_corpus.py` set | **52.6% / 52.6% / 52.3% less time** |
 | same instance, money mode (`--time-pen 1 --veh-pen 280000`) | 2962 / 2948 ms (`887e520`) | 1660 / 1672 / 1682 ms (`8c32bf3`) | exact 23 veh / 65947.311 / 121213.662 / 45266.351 | **44.0% / 43.3% / 43.2% less time** |
 | GH `c1_10_1`, 300k VRPTW SISR iterations, seed 1, one thread (`bench/run_fixed.py vrptw`) | 2427 / 2426 / 2423 ms (`4312d28`) | 2123 / 2114 / 2106 ms (`b233107`) | exact 100 veh / 42504.61 | **12.5% / 12.9% / 13.1% less time** |
-| Uchoa `X-n1001-k43`, 600k CVRP SISR iterations, seed 1, one thread (`bench/run_fixed.py cvrp`) | 2486 / 2487 / 2481 ms (`4312d28`) | 2048 / 2037 / 2048 ms (`9be2099`) | exact cost 74102 / 43 routes | **17.6% / 18.1% / 17.5% less time** |
+| Uchoa `X-n1001-k43`, 600k CVRP SISR iterations, seed 1, one thread (`bench/run_fixed.py cvrp`) | 2477 / 2463 ms (`4312d28`) | 1885 / 1887 ms (tip, blink draw plus insertion sort) | exact cost 74102 / 43 routes | **23.9% / 23.4% less time** |
 | same, previous machine (WSL2) | 3682 / 3716 ms (`1450221`) | 2913 / 2872 ms (`ffa3d5e`) | exact objective/fleet/duration/wait and byte-identical HTTP response | 20.9% / 22.7% less time |
 
 Reproduce the maintained harnesses (all on an otherwise idle auregat; a 5-core
