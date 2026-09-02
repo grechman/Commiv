@@ -142,5 +142,6 @@ test {
     _ = @import("vrptw.zig");
     _ = @import("pdptw.zig");
     _ = @import("pdptw_sisr.zig");
+    _ = @import("core/blink.zig");
     _ = @import("capi.zig");
 }
