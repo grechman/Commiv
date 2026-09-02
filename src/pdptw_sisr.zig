@@ -245,6 +245,25 @@ const Route = struct {
     tail_d: std.ArrayList(u64) = .empty, // arc sum items[i]->..->depot;  len items+1 (tail_d[len]=0)
     brk_ok: bool = true, // break regime only: walkWithBreak(items).ok as of last install
     dirty: bool = true,
+    pre_ok: usize = 0,
+    suf_ok: usize = 0,
+
+    fn markEdit(r: *Route, nodes: []const usize) void {
+        const old = r.items.items;
+        const m = @min(old.len, nodes.len);
+        var kf: usize = 0;
+        while (kf < m and old[kf] == nodes[kf]) kf += 1;
+        var kb: usize = 0;
+        while (kb < m and old[old.len - 1 - kb] == nodes[nodes.len - 1 - kb]) kb += 1;
+        if (r.dirty) {
+            r.pre_ok = @min(r.pre_ok, kf);
+            r.suf_ok = @min(r.suf_ok, kb);
+        } else {
+            r.pre_ok = kf;
+            r.suf_ok = kb;
+        }
+        r.dirty = true;
+    }
 
     fn deinit(r: *Route, allocator: std.mem.Allocator) void {
         r.items.deinit(allocator);
@@ -467,6 +486,7 @@ const S = struct {
         const was_empty = r.items.items.len == 0;
         const old_dist = r.dist;
         const old_dur = r.dur;
+        r.markEdit(nodes);
         r.items.clearRetainingCapacity();
         try r.items.appendSlice(s.allocator, nodes);
         r.dist = arcSum(s.inst, nodes);
@@ -479,7 +499,6 @@ const S = struct {
         } else {
             r.dur = if (s.time_penalty > 0 or s.max_route_dur > 0) routeDuration(s.inst, nodes) else 0;
         }
-        r.dirty = true;
         for (nodes, 0..) |c, p| {
             s.loc_route[c] = ri;
             s.loc_pos[c] = p;
@@ -519,12 +538,12 @@ const S = struct {
             const r = &s.routes.items[sn.ri];
             const was_empty = r.items.items.len == 0;
             const saved = s.snap_items.items[sn.start .. sn.start + sn.len];
+            r.markEdit(saved);
             r.items.clearRetainingCapacity();
             try r.items.appendSlice(s.allocator, saved);
             r.dist = sn.dist;
             r.dur = sn.dur;
             r.brk_ok = sn.brk_ok;
-            r.dirty = true;
             if (!was_empty and sn.len == 0 and sn.ri < s.min_empty_hint) s.min_empty_hint = sn.ri;
         }
         for (s.snaps.items) |sn| {
@@ -547,25 +566,45 @@ const S = struct {
         if (!r.dirty) return;
         const it = r.items.items;
         const L = it.len;
+        const built = r.pre_t.items.len != 0;
+        const L0 = r.suf_t.items.len -| 1;
+        const pre_from: usize = if (built) @min(r.pre_ok, @min(L, r.pre_t.items.len - 1)) else 0;
+        const suf_keep: usize = if (built) @min(r.suf_ok, @min(L, L0)) else 0;
         try r.pre_t.resize(s.allocator, L + 1);
-        try r.suf_t.resize(s.allocator, L + 1);
         try r.pre_l.resize(s.allocator, L + 1);
-        if (!s.fast_all) try r.suf_l.resize(s.allocator, L + 1);
         try r.pre_d.resize(s.allocator, L + 1);
-        try r.tail_d.resize(s.allocator, L + 1);
-        r.pre_t.items[0] = Tws.depotNode(s.inst);
-        r.pre_l.items[0] = pdp.Lseg.empty();
-        r.pre_d.items[0] = 0;
-        var prev: usize = 0;
-        for (it, 0..) |c, i| {
+        if (pre_from == 0) {
+            r.pre_t.items[0] = Tws.depotNode(s.inst);
+            r.pre_l.items[0] = pdp.Lseg.empty();
+            r.pre_d.items[0] = 0;
+        }
+        var prev: usize = if (pre_from == 0) 0 else it[pre_from - 1];
+        for (it[pre_from..], pre_from..) |c, i| {
             r.pre_t.items[i + 1] = Tws.merge(r.pre_t.items[i], @intCast(s.inst.d(prev, c)), Tws.client(s.inst, c));
             r.pre_l.items[i + 1] = pdp.Lseg.merge(r.pre_l.items[i], pdp.Lseg.node(s.inst, c));
             r.pre_d.items[i + 1] = r.pre_d.items[i] + s.inst.d(prev, c);
             prev = c;
         }
-        r.suf_t.items[L] = Tws.depotNode(s.inst);
-        r.tail_d.items[L] = 0;
-        var i = L;
+        if (suf_keep > 0 and L > L0) {
+            try r.suf_t.resize(s.allocator, L + 1);
+            try r.tail_d.resize(s.allocator, L + 1);
+            if (!s.fast_all) try r.suf_l.resize(s.allocator, L + 1);
+            std.mem.copyBackwards(Tws, r.suf_t.items[L - suf_keep .. L + 1], r.suf_t.items[L0 - suf_keep .. L0 + 1]);
+            std.mem.copyBackwards(u64, r.tail_d.items[L - suf_keep .. L + 1], r.tail_d.items[L0 - suf_keep .. L0 + 1]);
+            if (!s.fast_all) std.mem.copyBackwards(pdp.Lseg, r.suf_l.items[L - suf_keep .. L + 1], r.suf_l.items[L0 - suf_keep .. L0 + 1]);
+        } else if (suf_keep > 0 and L < L0) {
+            std.mem.copyForwards(Tws, r.suf_t.items[L - suf_keep .. L + 1], r.suf_t.items[L0 - suf_keep .. L0 + 1]);
+            std.mem.copyForwards(u64, r.tail_d.items[L - suf_keep .. L + 1], r.tail_d.items[L0 - suf_keep .. L0 + 1]);
+            if (!s.fast_all) std.mem.copyForwards(pdp.Lseg, r.suf_l.items[L - suf_keep .. L + 1], r.suf_l.items[L0 - suf_keep .. L0 + 1]);
+        }
+        try r.suf_t.resize(s.allocator, L + 1);
+        try r.tail_d.resize(s.allocator, L + 1);
+        if (!s.fast_all) try r.suf_l.resize(s.allocator, L + 1);
+        if (suf_keep == 0) {
+            r.suf_t.items[L] = Tws.depotNode(s.inst);
+            r.tail_d.items[L] = 0;
+        }
+        var i = L - suf_keep;
         while (i > 0) {
             i -= 1;
             const nxt: usize = if (i + 1 == L) 0 else it[i + 1];
@@ -573,8 +612,8 @@ const S = struct {
             r.tail_d.items[i] = s.inst.d(it[i], nxt) + r.tail_d.items[i + 1];
         }
         if (!s.fast_all) {
-            r.suf_l.items[L] = pdp.Lseg.empty();
-            i = L;
+            if (suf_keep == 0) r.suf_l.items[L] = pdp.Lseg.empty();
+            i = L - suf_keep;
             while (i > 0) {
                 i -= 1;
                 r.suf_l.items[i] = pdp.Lseg.merge(pdp.Lseg.node(s.inst, it[i]), r.suf_l.items[i + 1]);
@@ -2656,4 +2695,73 @@ test "PDPTW SISR driver break: with zero waiting the break adds exactly its leng
     defer allocator.free(rc);
     for (with.routes, 0..) |r, i| rc[i] = r;
     try std.testing.expect(pdp.validateWithBreak(inst, rc, bk.dur, bk.earliest, bk.latest) != null);
+}
+
+test "PDPTW SISR: incremental freshen matches a full rebuild" {
+    const allocator = std.testing.allocator;
+    var rinst = try pdp.randomInstance(allocator, 12, 11, true);
+    defer rinst.deinit(allocator);
+    const inst = rinst.inst();
+    const dim = inst.dim();
+    var prng = std.Random.DefaultPrng.init(0xF7E5);
+    const rng = prng.random();
+    for ([_]u64{ 0, 1 }) |time_pen| {
+        var s = try S.init(allocator, inst, 0, time_pen, 0, &.{}, null, &.{}, 0, &prng);
+        defer s.deinit();
+        const ri = try s.addSlot();
+        var seq: std.ArrayList(usize) = .empty;
+        defer seq.deinit(allocator);
+        for (0..400) |_| {
+            switch (rng.uintLessThan(u8, 4)) {
+                0 => try seq.insert(allocator, rng.uintAtMost(usize, seq.items.len), 1 + rng.uintLessThan(usize, dim - 1)),
+                1 => if (seq.items.len > 0) _ = seq.orderedRemove(rng.uintLessThan(usize, seq.items.len)),
+                2 => {
+                    const a = rng.uintAtMost(usize, seq.items.len);
+                    const b = a + rng.uintAtMost(usize, seq.items.len - a);
+                    try seq.replaceRange(allocator, a, b - a, &.{ 1 + rng.uintLessThan(usize, dim - 1), 1 + rng.uintLessThan(usize, dim - 1) });
+                },
+                else => {
+                    seq.clearRetainingCapacity();
+                    for (0..rng.uintAtMost(usize, 20)) |_| try seq.append(allocator, 1 + rng.uintLessThan(usize, dim - 1));
+                },
+            }
+            try s.install(ri, seq.items);
+            if (rng.boolean()) continue;
+            try s.freshen(ri);
+            const r = &s.routes.items[ri];
+            const it = r.items.items;
+            const L = it.len;
+            var pre_t = Tws.depotNode(inst);
+            var pre_l = pdp.Lseg.empty();
+            var pre_d: u64 = 0;
+            var prev: usize = 0;
+            try std.testing.expectEqual(pre_t, r.pre_t.items[0]);
+            for (it, 0..) |c, i| {
+                pre_t = Tws.merge(pre_t, @intCast(inst.d(prev, c)), Tws.client(inst, c));
+                pre_l = pdp.Lseg.merge(pre_l, pdp.Lseg.node(inst, c));
+                pre_d += inst.d(prev, c);
+                prev = c;
+                try std.testing.expectEqual(pre_t, r.pre_t.items[i + 1]);
+                try std.testing.expectEqual(pre_l, r.pre_l.items[i + 1]);
+                try std.testing.expectEqual(pre_d, r.pre_d.items[i + 1]);
+            }
+            var suf_t = Tws.depotNode(inst);
+            var suf_l = pdp.Lseg.empty();
+            var tail_d: u64 = 0;
+            try std.testing.expectEqual(suf_t, r.suf_t.items[L]);
+            try std.testing.expectEqual(tail_d, r.tail_d.items[L]);
+            var i = L;
+            while (i > 0) {
+                i -= 1;
+                const nxt: usize = if (i + 1 == L) 0 else it[i + 1];
+                suf_t = Tws.merge(Tws.client(inst, it[i]), @intCast(inst.d(it[i], nxt)), suf_t);
+                suf_l = pdp.Lseg.merge(pdp.Lseg.node(inst, it[i]), suf_l);
+                tail_d += inst.d(it[i], nxt);
+                try std.testing.expectEqual(suf_t, r.suf_t.items[i]);
+                try std.testing.expectEqual(tail_d, r.tail_d.items[i]);
+                if (!s.fast_all) try std.testing.expectEqual(suf_l, r.suf_l.items[i]);
+            }
+            if (s.fast_all) try std.testing.expectEqual(@as(usize, 0), r.suf_l.items.len);
+        }
+    }
 }
