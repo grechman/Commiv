@@ -114,6 +114,7 @@ parallel, cores 2/8 untouched; wall budgets 10/15/30/45/60/90 s by size.
 | grid | cells | new W/T/L | old total | new total | delta | rows |
 |---|---:|---|---:|---:|---:|---|
 | academic money (`PB_TIMEPEN=1 PB_VEH_PEN=280000`, 1 thread) | 352 | 63/289/0 | $10,975,931.77 | $10,969,375.04 | -0.060% | `bench/equal-wall-money.jsonl` |
+| ordinary PDPTW (`PB_FLEET=1 PB_EJECT=1`, 5 threads per side) | 464 (352 instances, seeds 1/2/3 at size 100) | 96/328/40 | 9642 veh / 5,090,509.0 dist | 9639 veh / 5,088,620.5 dist | -3 veh, -0.037% dist | `bench/equal-wall-pdptw.jsonl` |
 
 Per size: 100 1/55/0, 200 7/53/0 (-0.039%), 400 7/51/0 (-0.010%), 600 16/44/0
 (-0.048%), 800 15/45/0 (-0.076%), 1000 17/41/0 (-0.071%). Zero losses is
@@ -125,5 +126,13 @@ seeds 1/2/3 at size 100) runs old and new at the same time with `PB_THREADS=5`
 on the two SMT halves of cores 0,1,3,4,5, sides alternating per cell. That is
 the same total load as the 2026-08-19 protocol (10 threads on 10 CPUs) but a
 different search per binary, so the absolute numbers are not comparable with
-`OPPOSITION_FINAL.md`; only the old/new pairing is. Its rows land in
-`bench/equal-wall-pdptw.jsonl` when the unit finishes.
+`OPPOSITION_FINAL.md`; only the old/new pairing is. Per size (W/T/L, veh old -> new, dist old -> new): 100 1/167/0, 1207 -> 1207,
+174,256.8 -> 174,252.4; 200 6/51/3, 619 -> 618, 176,634.8 -> 177,138.2; 400
+18/32/8, 1149 -> 1148, 406,307.1 -> 405,625.0; 600 25/27/8, 1707 -> 1707,
+843,820.2 -> 841,859.8; 800 20/30/10, 2234 -> 2233, 1,408,435.4 -> 1,407,934.5;
+1000 26/21/11, 2726 -> 2726, 2,081,054.7 -> 2,081,810.5. Losses appear here
+because the parallel fleet-min driver is wall-bound and thread-raced, so the two
+binaries do not share a trajectory. The unit was stopped once at 14:04 for the
+quiet timing window and resumed at 14:07 from the journal; the cell in flight
+(`pdptw/100/lc103/s1`-area) has one duplicated old row, and the scorer takes the
+last row per bin. Ran 14:07-18:35 MSK on 2026-09-02.

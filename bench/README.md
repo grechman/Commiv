@@ -68,8 +68,10 @@ The command emits raw runs to stderr and one JSON object to stdout. See
 grids with the `887e520` and `4312d28` binaries paired per cell at equal wall;
 `bench/equal_wall_score.py` scores them. Money: new W/T/L 63/289/0,
 $10,975,931.77 to $10,969,375.04 (-0.060%), rows in `bench/equal-wall-money.jsonl`.
-The ordinary grid runs both binaries side by side at `PB_THREADS=5`, so its
-absolute numbers are not comparable with the 2026-08-19 10-thread grid.
+Ordinary PDPTW (both binaries side by side at `PB_THREADS=5`, so absolute
+numbers are not comparable with the 2026-08-19 10-thread grid): 464 cells, new
+W/T/L 96/328/40, 9642 -> 9639 vehicles, distance 5,090,509.0 -> 5,088,620.5
+(-0.037%), rows in `bench/equal-wall-pdptw.jsonl`.
 
 ## Final quality audit
 
