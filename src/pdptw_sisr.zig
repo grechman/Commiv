@@ -373,8 +373,15 @@ const S = struct {
             .nbr_mark_q = try allocator.alloc(u64, dim),
             .eject_pen = try allocator.alloc(u32, dim),
         };
-        for (0..dim) |a| {
-            for (0..dim) |b| s.dt[b * dim + a] = inst.matrix[a * dim + b];
+        const tile: usize = 64;
+        var a0: usize = 0;
+        while (a0 < dim) : (a0 += tile) {
+            var b0: usize = 0;
+            while (b0 < dim) : (b0 += tile) {
+                for (a0..@min(a0 + tile, dim)) |a| {
+                    for (b0..@min(b0 + tile, dim)) |b| s.dt[b * dim + a] = inst.matrix[a * dim + b];
+                }
+            }
         }
         @memset(s.loc_route, NO_ROUTE);
         @memset(s.loc_pos, 0);
