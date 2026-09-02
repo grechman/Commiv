@@ -133,6 +133,5 @@ different search per binary, so the absolute numbers are not comparable with
 1000 26/21/11, 2726 -> 2726, 2,081,054.7 -> 2,081,810.5. Losses appear here
 because the parallel fleet-min driver is wall-bound and thread-raced, so the two
 binaries do not share a trajectory. The unit was stopped once at 14:04 for the
-quiet timing window and resumed at 14:07 from the journal; the cell in flight
-(`pdptw/100/lc103/s1`-area) has one duplicated old row, and the scorer takes the
+quiet timing window and resumed at 14:07 from the journal; no cell was duplicated, and the scorer takes the
 last row per bin. Ran 14:07-18:35 MSK on 2026-09-02.
