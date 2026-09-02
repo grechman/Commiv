@@ -754,6 +754,10 @@ const S = struct {
         var best: ?Ins = null;
         const q_t = Tws.client(inst, q);
         const q_l = pdp.Lseg.node(inst, q);
+        const dmin_p: i64 = @intCast(s.dmin_in[p]);
+        const dmin_q: i64 = @intCast(s.dmin_in[q]);
+        const due_p: i64 = @intCast(inst.due[p]);
+        const due_q: i64 = @intCast(inst.due[q]);
 
         // Granular gap pruning is shared with the fast feasibility-only path.
         const gate = s.pairGranGate(it, p, q, params);
@@ -762,6 +766,7 @@ const S = struct {
 
         for (s.lockOf(ri)..L + 1) |a| {
             const pre = r.pre_t.items[a];
+            if (pre.tw == 0 and pre.early <= pre.late and pre.early + pre.dur + dmin_p > due_p) break;
             if (granular and (params.gran_gaps & 1) != 0 and a != 0 and a != L and
                 s.nbr_mark_p[it[a - 1]] != genp and s.nbr_mark_p[it[a]] != genp) continue;
             const prev_a: usize = if (a == 0) 0 else it[a - 1];
@@ -775,8 +780,8 @@ const S = struct {
 
             var b = a;
             while (b <= L) : (b += 1) {
+                if (m_t.early + m_t.dur + dmin_q > due_q) break;
                 blk: {
-                    if (blinkHash(s.blink_seed, s.generation, ri, p, a, b) < blink) break :blk;
                     const nxt: usize = if (b == L) 0 else it[b];
                     if (granular and (params.gran_gaps & 2) != 0 and b != a and b != L and
                         s.nbr_mark_p[last] != genp and s.nbr_mark_p[nxt] != genp) break :blk;
@@ -789,6 +794,7 @@ const S = struct {
                     // exceeds it. Duration is not monotone in b, so this only
                     // skips THIS (a,b) candidate (break :blk), never the loop.
                     if (s.max_route_dur > 0 and f2.dur > @as(i64, @intCast(s.max_route_dur))) break :blk;
+                    if (blinkHash(s.blink_seed, s.generation, ri, p, a, b) < blink) break :blk;
                     const new_dist = m_d + dt_q[last] + inst.d(q, nxt) + r.tail_d.items[b];
                     var delta = @as(i64, @intCast(new_dist)) - @as(i64, @intCast(r.dist));
                     if (s.time_penalty > 0)
@@ -826,6 +832,10 @@ const S = struct {
         const it = r.items.items;
         const L = it.len;
         const p_dem = inst.demand_signed[p];
+        const dmin_p: i64 = @intCast(s.dmin_in[p]);
+        const dmin_q: i64 = @intCast(s.dmin_in[q]);
+        const due_p: i64 = @intCast(inst.due[p]);
+        const due_q: i64 = @intCast(inst.due[q]);
         var best: ?Ins = null;
 
         const gate = s.pairGranGate(it, p, q, params);
@@ -835,6 +845,7 @@ const S = struct {
         for (s.lockOf(ri)..L + 1) |a| {
             const pre = r.pre_t.items[a];
             if (pre.tw != 0 or pre.early > pre.late) continue;
+            if (pre.early + pre.dur + dmin_p > due_p) break;
             if (granular and (params.gran_gaps & 1) != 0 and a != 0 and a != L and
                 s.nbr_mark_p[it[a - 1]] != genp and s.nbr_mark_p[it[a]] != genp) continue;
             const prev_a: usize = if (a == 0) 0 else it[a - 1];
@@ -856,8 +867,8 @@ const S = struct {
             var last = p;
             var b = a;
             while (b <= L) : (b += 1) {
+                if (depart + dmin_q > due_q) break;
                 blk: {
-                    if (blinkHash(s.blink_seed, s.generation, ri, p, a, b) < blink) break :blk;
                     const nxt: usize = if (b == L) 0 else it[b];
                     if (granular and (params.gran_gaps & 2) != 0 and b != a and b != L and
                         s.nbr_mark_p[last] != genp and s.nbr_mark_p[nxt] != genp) break :blk;
@@ -870,6 +881,7 @@ const S = struct {
                     if (q_start > @as(i64, @intCast(inst.due[q])) or suffix.tw != 0 or suffix.early > suffix.late) break :blk;
                     const suffix_arrival = q_start + @as(i64, @intCast(inst.service[q])) + @as(i64, @intCast(inst.d(q, nxt)));
                     if (suffix_arrival > suffix.late) break :blk;
+                    if (blinkHash(s.blink_seed, s.generation, ri, p, a, b) < blink) break :blk;
 
                     const new_dist = middle_dist + dt_q[last] + inst.d(q, nxt) + r.tail_d.items[b];
                     const delta = @as(i64, @intCast(new_dist)) - @as(i64, @intCast(r.dist));
@@ -927,13 +939,13 @@ const S = struct {
             var b = a;
             while (b <= L) : (b += 1) {
                 blk: {
-                    if (blinkHash(s.blink_seed, s.generation, ri, p, a, b) < blink) break :blk;
                     const nxt: usize = if (b == L) 0 else it[b];
                     const f1 = Tws.merge(m_t, @intCast(dt_q[last]), q_t);
                     const f2 = Tws.merge(f1, @intCast(inst.d(q, nxt)), r.suf_t.items[b]);
                     if (f2.tw != 0) break :blk;
                     const f_l = pdp.Lseg.merge(pdp.Lseg.merge(m_l, q_l), r.suf_l.items[b]);
                     if (!(f_l.lo >= 0 and f_l.hi <= rcap)) break :blk;
+                    if (blinkHash(s.blink_seed, s.generation, ri, p, a, b) < blink) break :blk;
                     // Materialize it[0..a] ++ p ++ it[a..b] ++ q ++ it[b..]
                     // and let the break walk decide feasibility + duration.
                     const cand = s.brk_scratch[0 .. L + 2];
