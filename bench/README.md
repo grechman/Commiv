@@ -107,6 +107,7 @@ at `8c32bf3` with the same 23-vehicle signature. See `bench/EXPERIMENTS.md`.
 
 - Debug `zig build test` skips the two 1M-iteration marathon tests (`error.SkipZigTest`); the ReleaseFast CI job still runs them. Those two tests were 198 s of a 6:03 cold Debug run (compile + run) on auregat; the warm-cache Debug run is now 2:44, ReleaseFast 1:50 either way.
 - REST identity gate: `uv run --no-project python tools/rest_corpus.py <tree> <port> <out.json>` starts that tree's `zig-out/bin/commiv-serve` and hashes 52 responses (18 solves, 34 error paths); diff the JSON of two trees.
+- Branch state 2026-09-02: `zig build test` exits 0 in Debug and ReleaseFast on auregat at the tip; the 52-case corpus is byte-identical to `887e520`. Timing rows are only valid from an otherwise idle box; capture `zig build test` exit codes without a pipe (`${PIPESTATUS}` is empty under zsh).
 
 - Native Windows benchmark binaries currently depend on Linux clocks; run under WSL2.
 - Do not time while the server is running a game or another heavy unit.
