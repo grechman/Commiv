@@ -202,7 +202,7 @@ pub fn walkWithBreak(inst: pdp.PdpInstance, nodes: []const usize, brk: Break) Br
 
 const NO_ROUTE = std.math.maxInt(usize);
 
-const blinkDraw = @import("core/blink.zig").draw;
+const blinkHash = @import("core/blink.zig").hash;
 
 const Route = struct {
     items: std.ArrayList(usize) = .empty,
@@ -290,7 +290,9 @@ const S = struct {
     brk: ?Break,
     brk_scratch: []usize, // preallocated (dim + 2): candidate sequences for break-aware eval
     prng: *std.Random.DefaultPrng,
+    blink_seed: u64,
     dt: []const u32,
+    dmin_in: []u32,
     gran: []const usize,
     gk: usize,
     loc_route: []usize, // node -> route index (NO_ROUTE when removed)
@@ -320,7 +322,7 @@ const S = struct {
     // Granular pruning is safe there (see the gran gate in evalPairInsert).
     iter_start_complete: bool = false,
 
-    fn init(allocator: std.mem.Allocator, inst: pdp.PdpInstance, veh_penalty: u64, time_penalty: u64, max_route_dur: u64, veh_types: []const VehType, brk: ?Break, gran: []const usize, gk: usize, prng: *std.Random.DefaultPrng, dt: []const u32) !S {
+    fn init(allocator: std.mem.Allocator, inst: pdp.PdpInstance, veh_penalty: u64, time_penalty: u64, max_route_dur: u64, veh_types: []const VehType, brk: ?Break, gran: []const usize, gk: usize, prng: *std.Random.DefaultPrng, dt: []const u32, blink_seed: u64) !S {
         const dim = inst.dim();
         var windows_well_formed = true;
         for (inst.ready, inst.due) |ready, due| {
@@ -351,7 +353,9 @@ const S = struct {
             .gran = gran,
             .gk = gk,
             .prng = prng,
+            .blink_seed = blink_seed,
             .dt = dt,
+            .dmin_in = try allocator.alloc(u32, dim),
             .loc_route = try allocator.alloc(usize, dim),
             .loc_pos = try allocator.alloc(usize, dim),
             .brk_scratch = try allocator.alloc(usize, dim + 2),
@@ -366,6 +370,14 @@ const S = struct {
         @memset(s.nbr_mark_p, 0);
         @memset(s.nbr_mark_q, 0);
         @memset(s.eject_pen, 0);
+        for (0..dim) |q| {
+            const row = dt[q * dim ..][0..dim];
+            var m: u32 = std.math.maxInt(u32);
+            for (row, 0..) |v, j| {
+                if (j != q and v < m) m = v;
+            }
+            s.dmin_in[q] = m;
+        }
         return s;
     }
 
@@ -381,6 +393,7 @@ const S = struct {
         s.allocator.free(s.nbr_mark_p);
         s.allocator.free(s.nbr_mark_q);
         s.allocator.free(s.eject_pen);
+        s.allocator.free(s.dmin_in);
         s.removed.deinit(s.allocator);
         s.cand_mark.deinit(s.allocator);
         s.ruin_mark.deinit(s.allocator);
@@ -748,11 +761,12 @@ const S = struct {
         const genp = gate.generation;
 
         for (s.lockOf(ri)..L + 1) |a| {
+            const pre = r.pre_t.items[a];
             if (granular and (params.gran_gaps & 1) != 0 and a != 0 and a != L and
                 s.nbr_mark_p[it[a - 1]] != genp and s.nbr_mark_p[it[a]] != genp) continue;
             const prev_a: usize = if (a == 0) 0 else it[a - 1];
             // middle segment: pre[a] + p, extended one node per b step
-            var m_t = Tws.merge(r.pre_t.items[a], @intCast(dt_p[prev_a]), Tws.client(inst, p));
+            var m_t = Tws.merge(pre, @intCast(dt_p[prev_a]), Tws.client(inst, p));
             if (m_t.tw != 0) continue; // deeper a only arrives later, but other a gaps may differ
             var m_l = pdp.Lseg.merge(r.pre_l.items[a], pdp.Lseg.node(inst, p));
             if (m_l.lo < 0 or m_l.hi > rcap) continue;
@@ -762,7 +776,7 @@ const S = struct {
             var b = a;
             while (b <= L) : (b += 1) {
                 blk: {
-                    if (blinkDraw(s.prng) < blink) break :blk;
+                    if (blinkHash(s.blink_seed, s.generation, ri, p, a, b) < blink) break :blk;
                     const nxt: usize = if (b == L) 0 else it[b];
                     if (granular and (params.gran_gaps & 2) != 0 and b != a and b != L and
                         s.nbr_mark_p[last] != genp and s.nbr_mark_p[nxt] != genp) break :blk;
@@ -819,11 +833,11 @@ const S = struct {
         const genp = gate.generation;
 
         for (s.lockOf(ri)..L + 1) |a| {
+            const pre = r.pre_t.items[a];
+            if (pre.tw != 0 or pre.early > pre.late) continue;
             if (granular and (params.gran_gaps & 1) != 0 and a != 0 and a != L and
                 s.nbr_mark_p[it[a - 1]] != genp and s.nbr_mark_p[it[a]] != genp) continue;
             const prev_a: usize = if (a == 0) 0 else it[a - 1];
-            const pre = r.pre_t.items[a];
-            if (pre.tw != 0 or pre.early > pre.late) continue;
             const p_start = @max(
                 pre.early + pre.dur + @as(i64, @intCast(dt_p[prev_a])),
                 @as(i64, @intCast(inst.ready[p])),
@@ -843,7 +857,7 @@ const S = struct {
             var b = a;
             while (b <= L) : (b += 1) {
                 blk: {
-                    if (blinkDraw(s.prng) < blink) break :blk;
+                    if (blinkHash(s.blink_seed, s.generation, ri, p, a, b) < blink) break :blk;
                     const nxt: usize = if (b == L) 0 else it[b];
                     if (granular and (params.gran_gaps & 2) != 0 and b != a and b != L and
                         s.nbr_mark_p[last] != genp and s.nbr_mark_p[nxt] != genp) break :blk;
@@ -913,7 +927,7 @@ const S = struct {
             var b = a;
             while (b <= L) : (b += 1) {
                 blk: {
-                    if (blinkDraw(s.prng) < blink) break :blk;
+                    if (blinkHash(s.blink_seed, s.generation, ri, p, a, b) < blink) break :blk;
                     const nxt: usize = if (b == L) 0 else it[b];
                     const f1 = Tws.merge(m_t, @intCast(dt_q[last]), q_t);
                     const f2 = Tws.merge(f1, @intCast(inst.d(q, nxt)), r.suf_t.items[b]);
@@ -1453,7 +1467,7 @@ fn solvePdptwSisrFromLocked(allocator: std.mem.Allocator, inst: pdp.PdpInstance,
     const rng = prng.random();
     const own_dt: ?[]u32 = if (shared_dt == null) try transposedMatrix(allocator, inst) else null;
     defer if (own_dt) |o| allocator.free(o);
-    var s = try S.init(allocator, inst, params.veh_penalty, params.time_penalty, params.max_route_dur, params.veh_types, params.brk, gran, gk, &prng, shared_dt orelse own_dt.?);
+    var s = try S.init(allocator, inst, params.veh_penalty, params.time_penalty, params.max_route_dur, params.veh_types, params.brk, gran, gk, &prng, shared_dt orelse own_dt.?, params.seed);
     defer s.deinit();
 
     for (seed_sol.items, 0..) |r, wi| {
@@ -2743,7 +2757,7 @@ test "PDPTW SISR: incremental freshen matches a full rebuild" {
     for ([_]u64{ 0, 1 }) |time_pen| {
         const dt = try transposedMatrix(allocator, inst);
         defer allocator.free(dt);
-        var s = try S.init(allocator, inst, 0, time_pen, 0, &.{}, null, &.{}, 0, &prng, dt);
+        var s = try S.init(allocator, inst, 0, time_pen, 0, &.{}, null, &.{}, 0, &prng, dt, 0);
         defer s.deinit();
         const ri = try s.addSlot();
         var seq: std.ArrayList(usize) = .empty;
