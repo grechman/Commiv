@@ -476,10 +476,6 @@ const S = struct {
 
     /// Set route `ri`'s content to `nodes`, updating dist/loc/nonempty/cost.
     fn install(s: *S, ri: usize, nodes: []const usize) !void {
-        return s.installWith(ri, nodes, null);
-    }
-
-    fn installWith(s: *S, ri: usize, nodes: []const usize, known: ?Known) !void {
         const r = &s.routes.items[ri];
         const was_empty = r.items.items.len == 0;
         const old_dist = r.dist;
@@ -487,10 +483,8 @@ const S = struct {
         r.markEdit(nodes);
         r.items.clearRetainingCapacity();
         try r.items.appendSlice(s.allocator, nodes);
-        r.dist = if (known) |k| k.dist else arcSum(s.inst, nodes);
-        if (known) |k| {
-            r.dur = k.dur;
-        } else if (s.brk) |bk| {
+        r.dist = arcSum(s.inst, nodes);
+        if (s.brk) |bk| {
             // Break regime: duration is the depart-at-0 completion including
             // the break, and the walk's verdict is the route's break flag.
             const w = walkWithBreak(s.inst, nodes, bk);
@@ -696,8 +690,7 @@ const S = struct {
         return true;
     }
 
-    const Ins = struct { a: usize, b: usize, delta: i64, dist: u64, dur: u64 };
-    const Known = struct { dist: u64, dur: u64 };
+    const Ins = struct { a: usize, b: usize, delta: i64 };
     const GranGate = struct { enabled: bool, generation: u64 };
 
     /// Mark the union of kNN(p) and kNN(q) for optional pickup/dropoff gap
@@ -786,7 +779,7 @@ const S = struct {
                     var delta = @as(i64, @intCast(new_dist)) - @as(i64, @intCast(r.dist));
                     if (s.time_penalty > 0)
                         delta += @as(i64, @intCast(s.time_penalty)) * (f2.dur - @as(i64, @intCast(r.dur)));
-                    if (best == null or delta < best.?.delta) best = .{ .a = a, .b = b, .delta = delta, .dist = new_dist, .dur = @intCast(@max(f2.dur, 0)) };
+                    if (best == null or delta < best.?.delta) best = .{ .a = a, .b = b, .delta = delta };
                 }
                 if (b < L) {
                     const step: u64 = if (b == a) inst.d(p, it[b]) else r.pre_d.items[b + 1] - r.pre_d.items[b];
@@ -866,7 +859,7 @@ const S = struct {
 
                     const new_dist = middle_dist + dt_q[last] + inst.d(q, nxt) + r.tail_d.items[b];
                     const delta = @as(i64, @intCast(new_dist)) - @as(i64, @intCast(r.dist));
-                    if (best == null or delta < best.?.delta) best = .{ .a = a, .b = b, .delta = delta, .dist = new_dist, .dur = 0 };
+                    if (best == null or delta < best.?.delta) best = .{ .a = a, .b = b, .delta = delta };
                 }
                 if (b < L) {
                     const c = it[b];
@@ -942,7 +935,7 @@ const S = struct {
                     var delta = @as(i64, @intCast(new_dist)) - @as(i64, @intCast(r.dist));
                     if (s.time_penalty > 0)
                         delta += @as(i64, @intCast(s.time_penalty)) * (@as(i64, @intCast(w.dur)) - @as(i64, @intCast(r.dur)));
-                    if (best == null or delta < best.?.delta) best = .{ .a = a, .b = b, .delta = delta, .dist = new_dist, .dur = 0 };
+                    if (best == null or delta < best.?.delta) best = .{ .a = a, .b = b, .delta = delta };
                 }
                 if (b < L) {
                     const step: u64 = if (b == a) inst.d(p, it[b]) else r.pre_d.items[b + 1] - r.pre_d.items[b];
@@ -1071,7 +1064,7 @@ const S = struct {
         const before = try s.allocator.dupe(usize, s.routes.items[best_ri].items.items);
         defer s.allocator.free(before);
 
-        try s.insertPair(best_ri, p, q, best_ins.a, best_ins.b, null);
+        try s.insertPair(best_ri, p, q, best_ins.a, best_ins.b);
 
         // Rung 1: existing single-eject candidate, unchanged selection.
         if (try s.ejectCandidate(best_ri, p)) |ec| {
@@ -1134,10 +1127,10 @@ const S = struct {
                 if (!try s.removeStringPaired(r2, s.loc_pos[p2], 1)) break :trial;
                 try s.freshen(r2);
                 const ins1 = s.evalPairInsert(r2, p1, q1, params) orelse break :trial;
-                try s.insertPair(r2, p1, q1, ins1.a, ins1.b, .{ .dist = ins1.dist, .dur = ins1.dur });
+                try s.insertPair(r2, p1, q1, ins1.a, ins1.b);
                 try s.freshen(r1);
                 const ins2 = s.evalPairInsert(r1, p2, q2, params) orelse break :trial;
-                try s.insertPair(r1, p2, q2, ins2.a, ins2.b, .{ .dist = ins2.dist, .dur = ins2.dur });
+                try s.insertPair(r1, p2, q2, ins2.a, ins2.b);
                 if (s.cost < saved_cost) {
                     s.removed.clearRetainingCapacity();
                     s.n_unassigned = saved_unassigned;
@@ -1153,7 +1146,7 @@ const S = struct {
     }
 
     /// Apply an insertion found by evalPairInsert.
-    fn insertPair(s: *S, ri: usize, p: usize, q: usize, a: usize, b: usize, known: ?Known) !void {
+    fn insertPair(s: *S, ri: usize, p: usize, q: usize, a: usize, b: usize) !void {
         try s.snapshot(ri);
         const r = &s.routes.items[ri];
         const it = r.items.items;
@@ -1163,7 +1156,7 @@ const S = struct {
         try s.keep_buf.appendSlice(s.allocator, it[a..b]);
         try s.keep_buf.append(s.allocator, q);
         try s.keep_buf.appendSlice(s.allocator, it[b..]);
-        try s.installWith(ri, s.keep_buf.items, if (s.brk == null) known else null);
+        try s.install(ri, s.keep_buf.items);
     }
 
     fn ruin(s: *S, params: PdpSisrParams, rng: std.Random) !void {
@@ -1298,7 +1291,7 @@ const S = struct {
                 try s.keep_buf.append(s.allocator, q);
                 try s.install(slot, s.keep_buf.items);
             } else {
-                try s.insertPair(best_ri, p, q, best_ins.a, best_ins.b, .{ .dist = best_ins.dist, .dur = best_ins.dur });
+                try s.insertPair(best_ri, p, q, best_ins.a, best_ins.b);
             }
             s.n_unassigned -= 1;
         }
