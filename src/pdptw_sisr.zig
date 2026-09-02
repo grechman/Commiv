@@ -792,11 +792,12 @@ const S = struct {
                     if (best == null or delta < best.?.delta) best = .{ .a = a, .b = b, .delta = delta };
                 }
                 if (b < L) {
-                    m_t = Tws.merge(m_t, @intCast(inst.d(last, it[b])), Tws.client(inst, it[b]));
+                    const step: u64 = if (b == a) inst.d(p, it[b]) else r.pre_d.items[b + 1] - r.pre_d.items[b];
+                    m_t = Tws.merge(m_t, @intCast(step), Tws.client(inst, it[b]));
                     if (m_t.tw != 0) break; // no later b for this a can heal
                     m_l = pdp.Lseg.merge(m_l, pdp.Lseg.node(inst, it[b]));
                     if (m_l.lo < 0 or m_l.hi > rcap) break;
-                    m_d += inst.d(last, it[b]);
+                    m_d += step;
                     last = it[b];
                 }
             }
@@ -872,8 +873,9 @@ const S = struct {
                 }
                 if (b < L) {
                     const c = it[b];
+                    const step: u64 = if (b == a) inst.d(p, c) else r.pre_d.items[b + 1] - r.pre_d.items[b];
                     const start = @max(
-                        depart + @as(i64, @intCast(inst.d(last, c))),
+                        depart + @as(i64, @intCast(step)),
                         @as(i64, @intCast(inst.ready[c])),
                     );
                     if (start > @as(i64, @intCast(inst.due[c]))) break;
@@ -881,7 +883,7 @@ const S = struct {
                     load += inst.demand_signed[c];
                     peak = @max(peak, load);
                     if (load < 0 or peak > rcap) break;
-                    middle_dist += inst.d(last, c);
+                    middle_dist += step;
                     last = c;
                 }
             }
@@ -946,11 +948,12 @@ const S = struct {
                     if (best == null or delta < best.?.delta) best = .{ .a = a, .b = b, .delta = delta };
                 }
                 if (b < L) {
-                    m_t = Tws.merge(m_t, @intCast(inst.d(last, it[b])), Tws.client(inst, it[b]));
+                    const step: u64 = if (b == a) inst.d(p, it[b]) else r.pre_d.items[b + 1] - r.pre_d.items[b];
+                    m_t = Tws.merge(m_t, @intCast(step), Tws.client(inst, it[b]));
                     if (m_t.tw != 0) break;
                     m_l = pdp.Lseg.merge(m_l, pdp.Lseg.node(inst, it[b]));
                     if (m_l.lo < 0 or m_l.hi > rcap) break;
-                    m_d += inst.d(last, it[b]);
+                    m_d += step;
                     last = it[b];
                 }
             }
@@ -998,9 +1001,10 @@ const S = struct {
                     best = .{ .a = a, .b = b, .viol = viol, .delta = delta };
                 }
                 if (b < L) {
-                    m_t = Tws.merge(m_t, @intCast(inst.d(last, it[b])), Tws.client(inst, it[b]));
+                    const step: u64 = if (b == a) inst.d(p, it[b]) else r.pre_d.items[b + 1] - r.pre_d.items[b];
+                    m_t = Tws.merge(m_t, @intCast(step), Tws.client(inst, it[b]));
                     m_l = pdp.Lseg.merge(m_l, pdp.Lseg.node(inst, it[b]));
-                    m_d += inst.d(last, it[b]);
+                    m_d += step;
                     last = it[b];
                 }
             }
