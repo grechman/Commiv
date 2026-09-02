@@ -2741,7 +2741,9 @@ test "PDPTW SISR: incremental freshen matches a full rebuild" {
     var prng = std.Random.DefaultPrng.init(0xF7E5);
     const rng = prng.random();
     for ([_]u64{ 0, 1 }) |time_pen| {
-        var s = try S.init(allocator, inst, 0, time_pen, 0, &.{}, null, &.{}, 0, &prng);
+        const dt = try transposedMatrix(allocator, inst);
+        defer allocator.free(dt);
+        var s = try S.init(allocator, inst, 0, time_pen, 0, &.{}, null, &.{}, 0, &prng, dt);
         defer s.deinit();
         const ri = try s.addSlot();
         var seq: std.ArrayList(usize) = .empty;
