@@ -1,6 +1,6 @@
 # Commiv benchmark status
 
-Bench SHA: f7bca03 · updated 2026-09-02 · auregat
+Bench SHA: 28cbe08 · updated 2026-09-02 · auregat
 
 The Windows/WSL2 machine that produced every number before 2026-09-01 is gone.
 The frozen baseline was re-measured on auregat (Debian 13, Ryzen 5 2600X, Zig
@@ -49,6 +49,7 @@ The command emits raw runs to stderr and one JSON object to stdout. See
 | Prefix-distance route arcs plus transposed rows for fixed-target lookups (auregat) | money 7.4-9.5% less time on top of the arcs, ordinary 0.6-2.4%; exact result; one shared copy per solve | `edf23fc`, `8c32bf3`, `f7bca03` |
 | VRPTW direct blink draw (auregat) | 12.5% / 12.9% / 13.1% less time, exact result | `b233107` |
 | CVRP direct blink draw (auregat) | 17.6% / 18.1% / 17.5% less time, exact result | `9be2099` |
+| CVRP insertion sort for small ruin sets (auregat) | 8.7% / 8.1% less time on top of the blink draw, exact result | `28cbe08` |
 
 ## Dead/reverted
 
@@ -61,6 +62,9 @@ The command emits raw runs to stderr and one JSON object to stdout. See
 | Precomputed dropoff-plus-suffix merges (money) | +14.1% slower | `08bdec4` |
 | Transposed rows without the prefix-arc lookup | +5.5% to +13.3% cycles | superseded by `8c32bf3` |
 | Suffix arcs from prefix distances inside `freshen` | +0.8% to +2.6% ordinary, noise in money | `b0b0779` |
+| CVRP transposed recreate rows | +1.6% / +0.5% | `a8946fc` |
+| PDPTW install with evaluator labels | -1.9% money, noise ordinary, below margin | `d8d3b8c` |
+| Exact pruning of the fast gap scan | impossible: any skipped gap shifts the blink stream (probe changed the signature) | not landed |
 
 ## Equal-wall old/new quality grids (2026-09-02)
 
@@ -99,7 +103,6 @@ at `8c32bf3` with the same 23-vehicle signature. See `bench/EXPERIMENTS.md`.
 
 | priority | lever | required gate |
 |---:|---|---|
-| 0 | PDPTW `install` re-walks the route for `arcSum` and, in money mode, `routeDuration` (1.6-3.3% self time) although the chosen candidate's distance and duration are already known to the evaluator | exact signature both objectives; likely below the 3% margin alone |
 | 0 | `core/neighbors.zig` full `pdq` sort per row (8% of a 300k-iteration VRPTW run, 1.6% at 2M): a bounded top-k cannot reproduce pdq's unstable tie order, so it is a quality-neutral behaviour change, not an exact lever | equal-wall quality grid, not the frozen harness |
 | 1 | Replace quadratic all-roots MST bottleneck candidate traversal | exact candidate sets/tours, large sparse and dense regimes |
 | 2 | Make geometric nearest-candidate construction use its spatial grid | cached and on-the-fly TSP regimes, no quality loss |
